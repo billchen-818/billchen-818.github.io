@@ -150,6 +150,89 @@
   
   
   <article itemscope itemtype="http://schema.org/Article" class="post-block" lang="zh-CN">
+    <link itemprop="mainEntityOfPage" href="http://example.com/2024/09/15/%E4%BB%A5%E5%A4%AA%E5%9D%8A%E9%A2%84%E7%BC%96%E8%AF%91%E5%90%88%E7%BA%A6%E4%BB%8B%E7%BB%8D/">
+
+    <span hidden itemprop="author" itemscope itemtype="http://schema.org/Person">
+      <meta itemprop="image" content="https://avatars.githubusercontent.com/u/61696517?v=4">
+      <meta itemprop="name" content="billchen-818">
+      <meta itemprop="description" content="">
+    </span>
+
+    <span hidden itemprop="publisher" itemscope itemtype="http://schema.org/Organization">
+      <meta itemprop="name" content="明星的博客">
+    </span>
+      <header class="post-header">
+        <h2 class="post-title" itemprop="name headline">
+          
+            <a href="/2024/09/15/%E4%BB%A5%E5%A4%AA%E5%9D%8A%E9%A2%84%E7%BC%96%E8%AF%91%E5%90%88%E7%BA%A6%E4%BB%8B%E7%BB%8D/" class="post-title-link" itemprop="url">以太坊预编译合约介绍</a>
+        </h2>
+
+        <div class="post-meta">
+            <span class="post-meta-item">
+              <span class="post-meta-item-icon">
+                <i class="far fa-calendar"></i>
+              </span>
+              <span class="post-meta-item-text">发表于</span>
+              
+
+              <time title="创建时间：2024-09-15 09:09:42 / 修改时间：11:10:46" itemprop="dateCreated datePublished" datetime="2024-09-15T09:09:42+08:00">2024-09-15</time>
+            </span>
+
+          
+
+        </div>
+      </header>
+
+    
+    
+    
+    <div class="post-body" itemprop="articleBody">
+
+      
+          <h2 id="预编译合约"><a href="#预编译合约" class="headerlink" title="预编译合约"></a>预编译合约</h2><p>因为EVM是一个基于堆栈的虚拟机，它根据交易要执行的指令来计算要消耗的gas，但是有时候有的非常复杂，在EVM中执行相关指令就会非常低效，所以以太坊提供了预编译合约。</p>
+<p>预编译合约接口：</p>
+<figure class="highlight golang"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">type</span> PrecompiledContract <span class="keyword">interface</span> &#123;</span><br><span class="line">    <span class="comment">// 计算gas</span></span><br><span class="line">	RequiredGas(input []<span class="type">byte</span>) <span class="type">uint64</span></span><br><span class="line">    <span class="comment">// 调用预编译合约</span></span><br><span class="line">	Run(input []<span class="type">byte</span>) ([]<span class="type">byte</span>, <span class="type">error</span>)</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>预编译合约就是定义的结构体实现了上面的接口。</p>
+<p>在内部，定义了一个map，key为合约地址，value为对应的预编译合约，如下：</p>
+<figure class="highlight golang"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">type</span> PrecompiledContracts <span class="keyword">map</span>[common.Address]PrecompiledContract</span><br></pre></td></tr></table></figure>
+
+<p>实际上，预编译合约的地址是从1开始，累加的，目前已经到19了，也就是说，有19个预编译合约了，但是好像坎昆升级之后才有10个，从1到a。</p>
+<figure class="highlight golang"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br></pre></td><td class="code"><pre><span class="line"><span class="comment">// 坎昆升级的预编译合约</span></span><br><span class="line"><span class="keyword">var</span> PrecompiledContractsCancun = PrecompiledContracts&#123;</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x1</span>&#125;): &amp;ecrecover&#123;&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x2</span>&#125;): &amp;sha256hash&#123;&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x3</span>&#125;): &amp;ripemd160hash&#123;&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x4</span>&#125;): &amp;dataCopy&#123;&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x5</span>&#125;): &amp;bigModExp&#123;eip2565: <span class="literal">true</span>&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x6</span>&#125;): &amp;bn256AddIstanbul&#123;&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x7</span>&#125;): &amp;bn256ScalarMulIstanbul&#123;&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x8</span>&#125;): &amp;bn256PairingIstanbul&#123;&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x9</span>&#125;): &amp;blake2F&#123;&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0xa</span>&#125;): &amp;kzgPointEvaluation&#123;&#125;,</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="keyword">var</span> PrecompiledContractsPrague = PrecompiledContracts&#123;</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x01</span>&#125;): &amp;ecrecover&#123;&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x02</span>&#125;): &amp;sha256hash&#123;&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x03</span>&#125;): &amp;ripemd160hash&#123;&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x04</span>&#125;): &amp;dataCopy&#123;&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x05</span>&#125;): &amp;bigModExp&#123;eip2565: <span class="literal">true</span>&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x06</span>&#125;): &amp;bn256AddIstanbul&#123;&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x07</span>&#125;): &amp;bn256ScalarMulIstanbul&#123;&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x08</span>&#125;): &amp;bn256PairingIstanbul&#123;&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x09</span>&#125;): &amp;blake2F&#123;&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x0a</span>&#125;): &amp;kzgPointEvaluation&#123;&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x0b</span>&#125;): &amp;bls12381G1Add&#123;&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x0c</span>&#125;): &amp;bls12381G1Mul&#123;&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x0d</span>&#125;): &amp;bls12381G1MultiExp&#123;&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x0e</span>&#125;): &amp;bls12381G2Add&#123;&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x0f</span>&#125;): &amp;bls12381G2Mul&#123;&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x10</span>&#125;): &amp;bls12381G2MultiExp&#123;&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x11</span>&#125;): &amp;bls12381Pairing&#123;&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x12</span>&#125;): &amp;bls12381MapG1&#123;&#125;,</span><br><span class="line">	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x13</span>&#125;): &amp;bls12381MapG2&#123;&#125;,</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>下面就是预编译合约sha256hash的实现例子：</p>
+<figure class="highlight golang"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">type</span> sha256hash <span class="keyword">struct</span>&#123;&#125;</span><br><span class="line"></span><br><span class="line"><span class="function"><span class="keyword">func</span> <span class="params">(c *sha256hash)</span></span> RequiredGas(input []<span class="type">byte</span>) <span class="type">uint64</span> &#123;</span><br><span class="line">	<span class="keyword">return</span> <span class="type">uint64</span>(<span class="built_in">len</span>(input)+<span class="number">31</span>)/<span class="number">32</span>*params.Sha256PerWordGas + params.Sha256BaseGas</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="function"><span class="keyword">func</span> <span class="params">(c *sha256hash)</span></span> Run(input []<span class="type">byte</span>) ([]<span class="type">byte</span>, <span class="type">error</span>) &#123;</span><br><span class="line">	h := sha256.Sum256(input)</span><br><span class="line">	<span class="keyword">return</span> h[:], <span class="literal">nil</span></span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<h2 id="预编译合约的初始化调用"><a href="#预编译合约的初始化调用" class="headerlink" title="预编译合约的初始化调用"></a>预编译合约的初始化调用</h2><p>以太坊预编译合约会存在全局map中，会在新建evm的时候来把它加进EVM结构体的precompiles字段。另外，在以太坊中，交易的执行都会新建一个EVM</p>
+<figure class="highlight golang"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">func</span> <span class="title">ApplyTransaction</span><span class="params">(config *params.ChainConfig, bc ChainContext, author *common.Address, gp *GasPool, statedb *state.StateDB, header *types.Header, tx *types.Transaction, usedGas *<span class="type">uint64</span>, cfg vm.Config)</span></span> (*types.Receipt, <span class="type">error</span>) &#123;</span><br><span class="line">	msg, err := TransactionToMessage(tx, types.MakeSigner(config, header.Number, header.Time), header.BaseFee)</span><br><span class="line">	<span class="keyword">if</span> err != <span class="literal">nil</span> &#123;</span><br><span class="line">		<span class="keyword">return</span> <span class="literal">nil</span>, err</span><br><span class="line">	&#125;</span><br><span class="line">	<span class="comment">// Create a new context to be used in the EVM environment</span></span><br><span class="line">	blockContext := NewEVMBlockContext(header, bc, author)</span><br><span class="line">	txContext := NewEVMTxContext(msg)</span><br><span class="line">     <span class="comment">// 新建EVM</span></span><br><span class="line">	vmenv := vm.NewEVM(blockContext, txContext, statedb, config, cfg)</span><br><span class="line">	<span class="keyword">return</span> ApplyTransactionWithEVM(msg, config, gp, statedb, header.Number, header.Hash(), tx, usedGas, vmenv)</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>EVM结构体：</p>
+<figure class="highlight golang"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">type</span> EVM <span class="keyword">struct</span> &#123;</span><br><span class="line">	Context BlockContext</span><br><span class="line">	TxContext</span><br><span class="line">	StateDB StateDB</span><br><span class="line">	depth <span class="type">int</span></span><br><span class="line">	chainConfig *params.ChainConfig</span><br><span class="line">	chainRules params.Rules</span><br><span class="line">	Config Config</span><br><span class="line">	interpreter *EVMInterpreter</span><br><span class="line">	abort atomic.Bool</span><br><span class="line">	callGasTemp <span class="type">uint64</span></span><br><span class="line">     <span class="comment">// 预编译合约</span></span><br><span class="line">	precompiles <span class="keyword">map</span>[common.Address]PrecompiledContract</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="function"><span class="keyword">func</span> <span class="title">NewEVM</span><span class="params">(blockCtx BlockContext, txCtx TxContext, statedb StateDB, chainConfig *params.ChainConfig, config Config)</span></span> *EVM &#123;</span><br><span class="line">	evm := &amp;EVM&#123;</span><br><span class="line">		Context:     blockCtx,</span><br><span class="line">		TxContext:   txCtx,</span><br><span class="line">		StateDB:     statedb,</span><br><span class="line">		Config:      config,</span><br><span class="line">		chainConfig: chainConfig,</span><br><span class="line">		chainRules:  chainConfig.Rules(blockCtx.BlockNumber, blockCtx.Random != <span class="literal">nil</span>, blockCtx.Time),</span><br><span class="line">	&#125;</span><br><span class="line">    <span class="comment">// 加载预编译合约</span></span><br><span class="line">	evm.precompiles = activePrecompiledContracts(evm.chainRules)</span><br><span class="line">	evm.interpreter = NewEVMInterpreter(evm)</span><br><span class="line">	<span class="keyword">return</span> evm</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>最终，会调用EVM的Call函数.</p>
+<figure class="highlight golang"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">func</span> <span class="params">(evm *EVM)</span></span> Call(caller ContractRef, addr common.Address, input []<span class="type">byte</span>, gas <span class="type">uint64</span>, value *uint256.Int) (ret []<span class="type">byte</span>, leftOverGas <span class="type">uint64</span>, err <span class="type">error</span>) &#123;</span><br><span class="line">...</span><br><span class="line">    p, isPrecompile := evm.precompile(addr)</span><br><span class="line">    ...</span><br><span class="line">    <span class="keyword">if</span> isPrecompile &#123;</span><br><span class="line">		ret, gas, err = RunPrecompiledContract(p, input, gas, evm.Config.Tracer)</span><br><span class="line">    &#125; <span class="keyword">else</span> &#123;</span><br><span class="line">    ...</span><br><span class="line">    &#125;</span><br><span class="line">    ...</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>最后，会调用RunPrecompiledContract,来调用预编译合约的Run方法，来实现预想的结果</p>
+<figure class="highlight golang"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">func</span> <span class="title">RunPrecompiledContract</span><span class="params">(p PrecompiledContract, input []<span class="type">byte</span>, suppliedGas <span class="type">uint64</span>, logger *tracing.Hooks)</span></span> (ret []<span class="type">byte</span>, remainingGas <span class="type">uint64</span>, err <span class="type">error</span>) &#123;</span><br><span class="line">	gasCost := p.RequiredGas(input)</span><br><span class="line">	<span class="keyword">if</span> suppliedGas &lt; gasCost &#123;</span><br><span class="line">		<span class="keyword">return</span> <span class="literal">nil</span>, <span class="number">0</span>, ErrOutOfGas</span><br><span class="line">	&#125;</span><br><span class="line">	<span class="keyword">if</span> logger != <span class="literal">nil</span> &amp;&amp; logger.OnGasChange != <span class="literal">nil</span> &#123;</span><br><span class="line">		logger.OnGasChange(suppliedGas, suppliedGas-gasCost, tracing.GasChangeCallPrecompiledContract)</span><br><span class="line">	&#125;</span><br><span class="line">	suppliedGas -= gasCost</span><br><span class="line">    <span class="comment">// 调用预编译合约的Run方法</span></span><br><span class="line">	output, err := p.Run(input)</span><br><span class="line">	<span class="keyword">return</span> output, suppliedGas, err</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+      
+    </div>
+
+    
+    
+    
+      <footer class="post-footer">
+        <div class="post-eof"></div>
+      </footer>
+  </article>
+  
+  
+  
+
+      
+  
+  
+  <article itemscope itemtype="http://schema.org/Article" class="post-block" lang="zh-CN">
     <link itemprop="mainEntityOfPage" href="http://example.com/2024/09/14/Go%E8%AF%AD%E8%A8%80channel%E6%80%BB%E7%BB%93/">
 
     <span hidden itemprop="author" itemscope itemtype="http://schema.org/Person">
@@ -573,14 +656,14 @@
       <div class="site-state-item site-state-posts">
           <a href="/archives/">
         
-          <span class="site-state-item-count">3</span>
+          <span class="site-state-item-count">4</span>
           <span class="site-state-item-name">日志</span>
         </a>
       </div>
       <div class="site-state-item site-state-tags">
             <a href="/tags/">
           
-        <span class="site-state-item-count">1</span>
+        <span class="site-state-item-count">2</span>
         <span class="site-state-item-name">标签</span></a>
       </div>
   </nav>
