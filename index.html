@@ -150,6 +150,138 @@
   
   
   <article itemscope itemtype="http://schema.org/Article" class="post-block" lang="zh-CN">
+    <link itemprop="mainEntityOfPage" href="http://example.com/2025/02/18/2025/02/mysql%E4%B9%8B%E6%82%B2%E8%A7%82%E9%94%81/">
+
+    <span hidden itemprop="author" itemscope itemtype="http://schema.org/Person">
+      <meta itemprop="image" content="https://avatars.githubusercontent.com/u/61696517?v=4">
+      <meta itemprop="name" content="billchen-818">
+      <meta itemprop="description" content="">
+    </span>
+
+    <span hidden itemprop="publisher" itemscope itemtype="http://schema.org/Organization">
+      <meta itemprop="name" content="明星的博客">
+    </span>
+      <header class="post-header">
+        <h2 class="post-title" itemprop="name headline">
+          
+            <a href="/2025/02/18/2025/02/mysql%E4%B9%8B%E6%82%B2%E8%A7%82%E9%94%81/" class="post-title-link" itemprop="url">mysql之悲观锁</a>
+        </h2>
+
+        <div class="post-meta">
+            <span class="post-meta-item">
+              <span class="post-meta-item-icon">
+                <i class="far fa-calendar"></i>
+              </span>
+              <span class="post-meta-item-text">发表于</span>
+              
+
+              <time title="创建时间：2025-02-18 19:44:02 / 修改时间：20:38:45" itemprop="dateCreated datePublished" datetime="2025-02-18T19:44:02+08:00">2025-02-18</time>
+            </span>
+
+          
+
+        </div>
+      </header>
+
+    
+    
+    
+    <div class="post-body" itemprop="articleBody">
+
+      
+          <h3 id="背景"><a href="#背景" class="headerlink" title="背景"></a>背景</h3><p>假如A、B两个用户同时购买一件id为1的商品，用户A获取到的库存量为1000，用户B获取到的库存量也为1000。用户A购买完成后修改该商品的库存量为999，用户B购买完成后修改该商品的库存量为999，此时库存数据量产生了不一致的情况。今天就讨论下悲观锁的解决方案。</p>
+<h3 id="悲观锁"><a href="#悲观锁" class="headerlink" title="悲观锁"></a>悲观锁</h3><p>悲观锁就是认为对数据库的修改操作，一定会造成数据的不一致性，所以需要对数据库进行加锁操作，为了使得影响的面最小，在innoDB存储引擎下，使用select…for update配合where子句可以达到行级锁的效果。</p>
+<figure class="highlight sql"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">start</span> transaction;</span><br><span class="line"><span class="keyword">select</span> <span class="operator">*</span> <span class="keyword">from</span> books <span class="keyword">where</span> book_id <span class="operator">=</span> <span class="number">1</span> <span class="keyword">for</span> <span class="keyword">update</span>;</span><br><span class="line"><span class="keyword">update</span> <span class="keyword">set</span> amount <span class="operator">=</span> amount <span class="operator">-</span> <span class="number">1</span> <span class="keyword">where</span> book_id <span class="operator">=</span> <span class="number">1</span>;</span><br><span class="line"><span class="keyword">commit</span>;</span><br></pre></td></tr></table></figure>
+
+<p>上面代码是使用原生sql的，下面使用go gorm来看看，我们看下gorm文档中是如何使用的。<a target="_blank" rel="noopener" href="https://gorm.io/zh_CN/docs/advanced_query.html#%E9%94%81">gorm支持</a></p>
+<p>GORM 支持多种类型的锁，例如：</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line">// 基本的 FOR UPDATE 锁</span><br><span class="line">db.Clauses(clause.Locking&#123;Strength: &quot;UPDATE&quot;&#125;).Find(&amp;users)</span><br><span class="line">// SQL: SELECT * FROM `users` FOR UPDATE</span><br></pre></td></tr></table></figure>
+<p>上述语句将会在事务（transaction）中锁定选中行（selected rows）。 可以被用于以下场景：当你准备在事务（transaction）中更新（update）一些行（rows）时，并且想要在本事务完成前，阻止（prevent）其他的事务（other transactions）修改你准备更新的选中行。</p>
+<h3 id="案例说明"><a href="#案例说明" class="headerlink" title="案例说明"></a>案例说明</h3><p>假如我们有一个图书库存表，用户购买一次图书，都会扣将库存。</p>
+<p>新建一个数据库books，添加一个表books，新增两个字段id和amount，添加一条记录id&#x3D;1,amount&#x3D;100。</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br><span class="line">37</span><br><span class="line">38</span><br><span class="line">39</span><br><span class="line">40</span><br><span class="line">41</span><br><span class="line">42</span><br><span class="line">43</span><br><span class="line">44</span><br><span class="line">45</span><br><span class="line">46</span><br><span class="line">47</span><br><span class="line">48</span><br><span class="line">49</span><br><span class="line">50</span><br><span class="line">51</span><br><span class="line">52</span><br><span class="line">53</span><br><span class="line">54</span><br><span class="line">55</span><br><span class="line">56</span><br><span class="line">57</span><br><span class="line">58</span><br><span class="line">59</span><br><span class="line">60</span><br><span class="line">61</span><br><span class="line">62</span><br><span class="line">63</span><br><span class="line">64</span><br><span class="line">65</span><br><span class="line">66</span><br><span class="line">67</span><br><span class="line">68</span><br><span class="line">69</span><br><span class="line">70</span><br><span class="line">71</span><br></pre></td><td class="code"><pre><span class="line">package main</span><br><span class="line"></span><br><span class="line">import (</span><br><span class="line">	&quot;fmt&quot;</span><br><span class="line">	&quot;sync&quot;</span><br><span class="line"></span><br><span class="line">	&quot;gorm.io/driver/mysql&quot;</span><br><span class="line">	&quot;gorm.io/gorm&quot;</span><br><span class="line">	&quot;gorm.io/gorm/clause&quot;</span><br><span class="line">)</span><br><span class="line"></span><br><span class="line">var (</span><br><span class="line">	db *gorm.DB</span><br><span class="line">)</span><br><span class="line"></span><br><span class="line">type Books struct &#123;</span><br><span class="line">	Id     int</span><br><span class="line">	Amount int</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line">// 连接数据库</span><br><span class="line">func Init() error &#123;</span><br><span class="line">	var err error</span><br><span class="line">	dsn := &quot;root:Admin123@tcp(127.0.0.1:3306)/books?charset=utf8mb4&amp;parseTime=True&amp;loc=Local&quot;</span><br><span class="line">	db, err = gorm.Open(mysql.Open(dsn), &amp;gorm.Config&#123;&#125;)</span><br><span class="line">	if err != nil &#123;</span><br><span class="line">		return err</span><br><span class="line">	&#125;</span><br><span class="line"></span><br><span class="line">	return nil</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line">func main() &#123;</span><br><span class="line">	err := Init()</span><br><span class="line">	if err != nil &#123;</span><br><span class="line">		fmt.Printf(&quot;Failed to connect to database: %v&quot;, err)</span><br><span class="line">		return</span><br><span class="line">	&#125;</span><br><span class="line">	fmt.Println(&quot;Connected to database&quot;)</span><br><span class="line"></span><br><span class="line">	var wg sync.WaitGroup</span><br><span class="line">	// 并发扣减库存</span><br><span class="line">	for i := 0; i &lt; 20; i++ &#123;</span><br><span class="line">		wg.Add(1)</span><br><span class="line">		go Sub(&amp;wg)</span><br><span class="line">	&#125;</span><br><span class="line"></span><br><span class="line">	wg.Wait()</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line">// 扣减库存功能函数</span><br><span class="line">// 使用gorm的for update</span><br><span class="line">func Sub(wg *sync.WaitGroup) &#123;</span><br><span class="line">	defer wg.Done()</span><br><span class="line">	tx := db.Begin() // 开启事务</span><br><span class="line">	var b Books</span><br><span class="line">	if result := tx.Clauses(clause.Locking&#123;Strength: &quot;UPDATE&quot;&#125;).Where(&amp;Books&#123;Id: 1&#125;).First(&amp;b); result.RowsAffected == 0 &#123;</span><br><span class="line">		tx.Rollback() // 回滚</span><br><span class="line">		return</span><br><span class="line">	&#125; else &#123;</span><br><span class="line">		if b.Amount &gt; 0 &#123;</span><br><span class="line">			b.Amount = b.Amount - 1</span><br><span class="line">			tx.Save(&amp;b)</span><br><span class="line">		&#125; else &#123;</span><br><span class="line">			fmt.Println(&quot;库存不足&quot;)</span><br><span class="line">			tx.Rollback() // 回滚</span><br><span class="line">			return</span><br><span class="line">		&#125;</span><br><span class="line">	&#125;</span><br><span class="line">	tx.Commit() // 提交事务</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+      
+    </div>
+
+    
+    
+    
+      <footer class="post-footer">
+        <div class="post-eof"></div>
+      </footer>
+  </article>
+  
+  
+  
+
+      
+  
+  
+  <article itemscope itemtype="http://schema.org/Article" class="post-block" lang="zh-CN">
+    <link itemprop="mainEntityOfPage" href="http://example.com/2024/09/26/%E5%8F%AF%E5%8D%87%E7%BA%A7%E5%90%88%E7%BA%A6/">
+
+    <span hidden itemprop="author" itemscope itemtype="http://schema.org/Person">
+      <meta itemprop="image" content="https://avatars.githubusercontent.com/u/61696517?v=4">
+      <meta itemprop="name" content="billchen-818">
+      <meta itemprop="description" content="">
+    </span>
+
+    <span hidden itemprop="publisher" itemscope itemtype="http://schema.org/Organization">
+      <meta itemprop="name" content="明星的博客">
+    </span>
+      <header class="post-header">
+        <h2 class="post-title" itemprop="name headline">
+          
+            <a href="/2024/09/26/%E5%8F%AF%E5%8D%87%E7%BA%A7%E5%90%88%E7%BA%A6/" class="post-title-link" itemprop="url">可升级合约</a>
+        </h2>
+
+        <div class="post-meta">
+            <span class="post-meta-item">
+              <span class="post-meta-item-icon">
+                <i class="far fa-calendar"></i>
+              </span>
+              <span class="post-meta-item-text">发表于</span>
+
+              <time title="创建时间：2024-09-26 20:57:51" itemprop="dateCreated datePublished" datetime="2024-09-26T20:57:51+08:00">2024-09-26</time>
+            </span>
+              <span class="post-meta-item">
+                <span class="post-meta-item-icon">
+                  <i class="far fa-calendar-check"></i>
+                </span>
+                <span class="post-meta-item-text">更新于</span>
+                <time title="修改时间：2024-10-09 08:06:09" itemprop="dateModified" datetime="2024-10-09T08:06:09+08:00">2024-10-09</time>
+              </span>
+
+          
+
+        </div>
+      </header>
+
+    
+    
+    
+    <div class="post-body" itemprop="articleBody">
+
+      
+          
+      
+    </div>
+
+    
+    
+    
+      <footer class="post-footer">
+        <div class="post-eof"></div>
+      </footer>
+  </article>
+  
+  
+  
+
+      
+  
+  
+  <article itemscope itemtype="http://schema.org/Article" class="post-block" lang="zh-CN">
     <link itemprop="mainEntityOfPage" href="http://example.com/2024/09/18/%E6%B7%B1%E5%BA%A6%E6%80%BB%E7%BB%93Uniswap-V2/">
 
     <span hidden itemprop="author" itemscope itemtype="http://schema.org/Person">
@@ -804,14 +936,14 @@
       <div class="site-state-item site-state-posts">
           <a href="/archives/">
         
-          <span class="site-state-item-count">5</span>
+          <span class="site-state-item-count">7</span>
           <span class="site-state-item-name">日志</span>
         </a>
       </div>
       <div class="site-state-item site-state-tags">
             <a href="/tags/">
           
-        <span class="site-state-item-count">3</span>
+        <span class="site-state-item-count">4</span>
         <span class="site-state-item-name">标签</span></a>
       </div>
   </nav>
@@ -838,7 +970,7 @@
 <div class="copyright">
   
   &copy; 
-  <span itemprop="copyrightYear">2024</span>
+  <span itemprop="copyrightYear">2025</span>
   <span class="with-love">
     <i class="fa fa-heart"></i>
   </span>
