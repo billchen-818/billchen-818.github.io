@@ -1,0 +1,380 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>solana-spl-token介绍</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>solana-spl-token介绍</h1><div class="time">2025-08-13</div><h2 id="SPL代币标准"><a href="#SPL代币标准" class="headerlink" title="SPL代币标准"></a>SPL代币标准</h2><p>代币是数字资产，代表对多种类型资产的所有权或权利，这些资产包括金融工具、房地产、知识产权、虚拟商品等。代币化实现了资产产权的数字化，是管理同质化代币和非同质化代币的重要组成部分。</p>
+<ul>
+<li>同质化代币：同类型同价值且可以互换和分割的资产，例如USDC。类似于以太坊中的ERC20标准。</li>
+<li>非同质化：代表不可分割资产的所有权，例如艺术品。类似于以太坊中的ERC721标准。</li>
+</ul>
+<p>在solana中，这些代币统称为SPL(Solana Program Library)代币，下面是一些SPL基本概念：</p>
+<ul>
+<li>代币程序：包含了在网络上与代币交互的索引指令逻辑，涵盖了同质化代币和非同质化代币的管理。</li>
+<li>铸币账户：代表一种特定类型的代币，存储该代币的全局元数据，例如总供应量和铸币权限。</li>
+<li>代币账户：用于记录某个地址拥有的特定类型代币（由铸币账户定义）的数量，以便跟踪个人的代币持有情况。</li>
+</ul>
+<h3 id="代币程序"><a href="#代币程序" class="headerlink" title="代币程序"></a>代币程序</h3><p>solana上所有代币实际上都是由代币程序拥有的数据账户。</p>
+<p>一些常用的指令：</p>
+<ul>
+<li>InitializeMint：创建一个新的铸币账户，用于表示新的代币类型。</li>
+<li>InitializeAccount：创建一个新的代币账户，用于持有特定类型代币（由铸币账户定义）的单位。</li>
+<li>MintTo：创建特定类型代币的新单位并将其添加到代币账户，这会增加代币的供应量，并且只能由铸币账户的铸币权限地址执行。</li>
+<li>Transfer：将特定类型代币的单位从一个代币账户转移到另一个代币账户。</li>
+</ul>
+<h3 id="铸币账户"><a href="#铸币账户" class="headerlink" title="铸币账户"></a>铸币账户</h3><p>Solana上的代币通过由Token Program所拥有的铸币账户（Mint Account）的地址来唯一标识。</p>
+<p>这些铸币账户实际上充当特定代币的全局计数器，并存储以下数据：</p>
+<ul>
+<li>总供应量Total Supply：该代币的总供应量，表示发行的代币数量；</li>
+<li>铸币权限（Mint Authority）：有权铸造新单位代币的地址。如果没有设置铸币权限，代币就不能再增加供应量。</li>
+<li>冻结权限（Freeze Authority）：有权冻结代币账户的地址，用于防止某些账户进行代币转账。</li>
+<li>代币精度Decimals：定义该代币的最小单位是多少（例如，USDC 使用 6 位小数）。</li>
+</ul>
+<p>铸币账户代码：</p>
+<pre><code class="highlight rust"><span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">Mint</span> &#123;
+    <span class="comment">/// Optional authority used to mint new tokens. The mint authority may only</span>
+    <span class="comment">/// be provided during mint creation. If no mint authority is present</span>
+    <span class="comment">/// then the mint has a fixed supply and no further tokens may be</span>
+    <span class="comment">/// minted.</span>
+    <span class="keyword">pub</span> mint_authority: COption&lt;Pubkey&gt;,
+    <span class="comment">/// Total supply of tokens.</span>
+    <span class="keyword">pub</span> supply: <span class="type">u64</span>,
+    <span class="comment">/// Number of base 10 digits to the right of the decimal place.</span>
+    <span class="keyword">pub</span> decimals: <span class="type">u8</span>,
+    <span class="comment">/// Is `true` if this structure has been initialized</span>
+    <span class="keyword">pub</span> is_initialized: <span class="type">bool</span>,
+    <span class="comment">/// Optional authority to freeze token accounts.</span>
+    <span class="keyword">pub</span> freeze_authority: COption&lt;Pubkey&gt;,
+&#125;</code></pre>
+
+<h3 id="代币账户"><a href="#代币账户" class="headerlink" title="代币账户"></a>代币账户</h3><p>为了跟踪特定代币每个单位的所有权，需要创建由Token Program管理的另一种类型数据账户，这种账户被称为Token Account（代币账户）。</p>
+<p>代币账户中存储的数据通常包括以下内容：</p>
+<ul>
+<li>Mint:表示该代币账户所持有的代币类型，即关联的铸币账户地址；</li>
+<li>Owner:授权管理该代币账户的程序账户地址（代币程序），只有这个程序账户可以从中转出代币。</li>
+<li>Amount:该代币账户当前持有的代币数量（单位）。</li>
+</ul>
+<p>代币账户代码定义如下：</p>
+<pre><code class="highlight rust"><span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">Account</span> &#123;
+    <span class="comment">/// The mint associated with this account</span>
+    <span class="keyword">pub</span> mint: Pubkey,
+    <span class="comment">/// The owner of this account.</span>
+    <span class="keyword">pub</span> owner: Pubkey,
+    <span class="comment">/// The amount of tokens this account holds.</span>
+    <span class="keyword">pub</span> amount: <span class="type">u64</span>,
+    <span class="comment">/// If `delegate` is `Some` then `delegated_amount` represents</span>
+    <span class="comment">/// the amount authorized by the delegate</span>
+    <span class="keyword">pub</span> delegate: COption&lt;Pubkey&gt;,
+    <span class="comment">/// The account&#x27;s state</span>
+    <span class="keyword">pub</span> state: AccountState,
+    <span class="comment">/// If is_native.is_some, this is a native token, and the value logs the</span>
+    <span class="comment">/// rent-exempt reserve. An Account is required to be rent-exempt, so</span>
+    <span class="comment">/// the value is used by the Processor to ensure that wrapped SOL</span>
+    <span class="comment">/// accounts do not drop below this threshold.</span>
+    <span class="keyword">pub</span> is_native: COption&lt;<span class="type">u64</span>&gt;,
+    <span class="comment">/// The amount delegated</span>
+    <span class="keyword">pub</span> delegated_amount: <span class="type">u64</span>,
+    <span class="comment">/// Optional authority to close the account.</span>
+    <span class="keyword">pub</span> close_authority: COption&lt;Pubkey&gt;,
+&#125;</code></pre>
+
+<p>为了让一个钱包拥有某种代币的单位，需要为这种代币(<strong>Mint Account</strong>)创建一个<strong>Token Account</strong>，并将钱包指定为该<strong>Token Account</strong>的所有者（即owner字段的值时钱包地址）。</p>
+<blockquote>
+<p>1、一个钱包可以为同一种代币创建多个 Token Account，例如为了进行分类管理。2、每个 Token Account 只能由一个钱包拥有，并且只能存储一种类型的代币。</p>
+</blockquote>
+<p><img src="/./../img/solana-spl-token.png" alt="账户关系"></p>
+<h2 id="实战-创建一个SPL标准代币"><a href="#实战-创建一个SPL标准代币" class="headerlink" title="实战-创建一个SPL标准代币"></a>实战-创建一个SPL标准代币</h2><h3 id="安装spl-token-cli"><a href="#安装spl-token-cli" class="headerlink" title="安装spl-token-cli"></a>安装spl-token-cli</h3><p>在solana上，创建和管理spl代币的过程相对简化，因为solana提供了一个现成的SPL Token Program，开发者不需要编写复杂的智能合约代码，只需要使用现成的命令行工具和库。</p>
+<p>为了使用 SPL Token Program 创建 SPL 代币，我们需要使用 Solana 提供的命令行工具 spl-token，现在来安装这个工具。</p>
+<p>注意：需要你提前安装好 rust 和 solana 环境。</p>
+<p>运行以下命令：</p>
+<pre><code class="highlight sh">cargo install spl-token-cli</code></pre>
+
+<h3 id="创建代币"><a href="#创建代币" class="headerlink" title="创建代币"></a>创建代币</h3><p>使用spl-token命令行工具创建一个新的代币。创建代币时，solana会为你生成一个铸币账户，这个账户存储代币的必要信息，如供应量，授权账户等。</p>
+<p>运行以下命令，创建一个新的代币：</p>
+<pre><code class="highlight sh">spl-token create-token</code></pre>
+
+<p>输出如下：</p>
+<pre><code class="highlight plaintext">Creating token 7FtgPqsoJ19uSH7jHShzvwYfypRbp4GoBqBXzhBoBxcu under program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
+
+Address:  7FtgPqsoJ19uSH7jHShzvwYfypRbp4GoBqBXzhBoBxcu
+Decimals:  9
+
+Signature: 2vTyBz2LtMHXPhcivLcbEFX1XNR74RvscEG2thn6BNSUYhUgDMVc27381LEf9A4GnUNCLvnxxJKnfTqTaZmFxE4E</code></pre>
+
+<p>生成的地址<strong>7FtgPqsoJ19uSH7jHShzvwYfypRbp4GoBqBXzhBoBxcu</strong>是代币的铸币账户地址（Mint Account）,用于存储代币信息，如供应量和授权账户，代表了一种代币。</p>
+<p>新创建的代币初始供应量为0，可以通过以下命令验证：</p>
+<pre><code class="highlight sh">spl-token supply 7FtgPqsoJ19uSH7jHShzvwYfypRbp4GoBqBXzhBoBxcu</code></pre>
+
+<p>输出如下：</p>
+<pre><code class="highlight plaintext">0</code></pre>
+
+<p>在铸造代币之前，需要先创建一个账户(Token Account)，来持有代币的余额信息。</p>
+<h3 id="创建Token-Account"><a href="#创建Token-Account" class="headerlink" title="创建Token Account"></a>创建Token Account</h3><p>在为代币铸造供应量之前，需要创建一个Token Account，用于存储代币余额，每个Token Account关联特定代币（Mint）。运行下面命令，创建：</p>
+<pre><code class="highlight sh">spl-token create-account 7FtgPqsoJ19uSH7jHShzvwYfypRbp4GoBqBXzhBoBxcu</code></pre>
+
+<p>输出如下：</p>
+<pre><code class="highlight plaintext">Creating account 9TeAnD3b5AXnvWUqh7AFGcAQShHBD7pmRGjTcCtShfjM
+
+Signature: 5Pk9zooWKP1hDBNEuiDMPpQTcJPsnkNcpDezkgcUURwGKrEVCWSC4nT2U7XTcdpgvGoe4Tfma3YQhUCWCj86otJd</code></pre>
+
+<p>生成的9TeAnD3b5AXnvWUqh7AFGcAQShHBD7pmRGjTcCtShfjM地址就是代币的账户地址，用于存储上文创建的代币的余额信息，现在这个代币的余额是0.</p>
+<h3 id="铸造代币"><a href="#铸造代币" class="headerlink" title="铸造代币"></a>铸造代币</h3><p>铸造代币的过程会增加铸币账户的供应量（Supply） 和 代币账户的余额（Balance）。以下是铸造命令格式：</p>
+<pre><code class="highlight sh">spl-token mint &lt;mint_adderss&gt; &lt;amount&gt; &lt;token_account_address&gt;</code></pre>
+
+<p>例如，为刚刚创建的代币账户铸造100个代币：</p>
+<pre><code class="highlight sh">spl-token mint 7FtgPqsoJ19uSH7jHShzvwYfypRbp4GoBqBXzhBoBxcu 100 9TeAnD3b5AXnvWUqh7AFGcAQShHBD7pmRGjTcCtShfjM</code></pre>
+
+<p>输出如下：</p>
+<pre><code class="highlight plaintext">Minting 100 tokens
+  Token: 7FtgPqsoJ19uSH7jHShzvwYfypRbp4GoBqBXzhBoBxcu
+  Recipient: 9TeAnD3b5AXnvWUqh7AFGcAQShHBD7pmRGjTcCtShfjM
+
+Signature: fEKg7Y3kNN36gmFWbVxRob2GQxaMTYaNMJjLoXQ9hUPFfXxG6en8rdC9W2J37S9yqs6ATChKVczA61QxssUuH4H</code></pre>
+
+<p>此时可通过以下命令查看铸币账户供应量和代币账户余额：</p>
+<pre><code class="highlight sh">spl-token supply 7FtgPqsoJ19uSH7jHShzvwYfypRbp4GoBqBXzhBoBxcu
+spl-token balance 7FtgPqsoJ19uSH7jHShzvwYfypRbp4GoBqBXzhBoBxcu</code></pre>
+
+<h3 id="查询代币和账户信息"><a href="#查询代币和账户信息" class="headerlink" title="查询代币和账户信息"></a>查询代币和账户信息</h3><h4 id="查看代币账户信息"><a href="#查看代币账户信息" class="headerlink" title="查看代币账户信息"></a>查看代币账户信息</h4><pre><code class="highlight sh">spl-token display 9TeAnD3b5AXnvWUqh7AFGcAQShHBD7pmRGjTcCtShfjM</code></pre>
+
+<p>输出如下：</p>
+<pre><code class="highlight plaintext">SPL Token Account
+  Address: 9TeAnD3b5AXnvWUqh7AFGcAQShHBD7pmRGjTcCtShfjM
+  Program: TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
+  Balance: 100
+  Decimals: 9
+  Mint: 7FtgPqsoJ19uSH7jHShzvwYfypRbp4GoBqBXzhBoBxcu
+  Owner: Grut8Qc3QFxVxkfpsiYgLZ2ic7MJL62RVS9XoW4NQKKe
+  State: Initialized
+  Delegation: (not set)
+  Close authority: (not set)</code></pre>
+
+<h4 id="查询铸币信息账户"><a href="#查询铸币信息账户" class="headerlink" title="查询铸币信息账户"></a>查询铸币信息账户</h4><pre><code class="highlight sh">spl-token display 7FtgPqsoJ19uSH7jHShzvwYfypRbp4GoBqBXzhBoBxcu</code></pre>
+
+<p>输出如下：</p>
+<pre><code class="highlight plaintext">SPL Token Mint
+  Address: 7FtgPqsoJ19uSH7jHShzvwYfypRbp4GoBqBXzhBoBxcu
+  Program: TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
+  Supply: 100000000000
+  Decimals: 9
+  Mint authority: Grut8Qc3QFxVxkfpsiYgLZ2ic7MJL62RVS9XoW4NQKKe
+  Freeze authority: (not set)</code></pre>
+
+<p>可以在浏览器查看刚刚创建的代币：<a href="https://explorer.solana.com/address/7FtgPqsoJ19uSH7jHShzvwYfypRbp4GoBqBXzhBoBxcu?cluster=devnet">代币</a></p>
+<h3 id="转账代币"><a href="#转账代币" class="headerlink" title="转账代币"></a>转账代币</h3><p>使用 spl-token 工具可以进行代币的转账、查询余额等各种操作。</p>
+<h4 id="给钱包账户转账"><a href="#给钱包账户转账" class="headerlink" title="给钱包账户转账"></a>给钱包账户转账</h4><p>创建一个新钱包</p>
+<pre><code class="highlight sh">solana-keygen new -o ~/.config/solana/id-02.json</code></pre>
+
+<p>输出如下：</p>
+<pre><code class="highlight plaintext">Generating a new keypair
+
+For added security, enter a BIP39 passphrase
+
+NOTE! This passphrase improves security of the recovery seed phrase NOT the
+keypair file itself, which is stored as insecure plain text
+
+BIP39 Passphrase (empty for none): $(123456)
+Enter same passphrase again: $(123456)
+
+Wrote new keypair to /Users/chenmx/.config/solana/id-02.json
+===============================================================================
+pubkey: CuEsnnr6v9jjDhv7xNDiSXrcpAB27HTfiZM947X5rvfq
+===============================================================================
+Save this seed phrase and your BIP39 passphrase to recover your new keypair:
+benefit west jacket suggest attack fog firm truly bullet collect lyrics captain
+===============================================================================</code></pre>
+
+<p>新地址为：CuEsnnr6v9jjDhv7xNDiSXrcpAB27HTfiZM947X5rvfq</p>
+<p>向新地址转账：</p>
+<pre><code class="highlight sh">spl-token transfer 7FtgPqsoJ19uSH7jHShzvwYfypRbp4GoBqBXzhBoBxcu 50 CuEsnnr6v9jjDhv7xNDiSXrcpAB27HTfiZM947X5rvfq</code></pre>
+
+<p>会输出如下错误信息：</p>
+<pre><code class="highlight plaintext">Transfer 50 tokens
+  Sender: 9TeAnD3b5AXnvWUqh7AFGcAQShHBD7pmRGjTcCtShfjM
+  Recipient: CuEsnnr6v9jjDhv7xNDiSXrcpAB27HTfiZM947X5rvfq
+Error: &quot;Error: The recipient address is not funded. Add `--allow-unfunded-recipient` to complete the transfer.&quot;</code></pre>
+
+<p>这个错误是因为接收地址是我们刚刚创建的，还没有代币账户来存储余额，通常，有两种方法解决：</p>
+<h5 id="接收者自己创建代币账户"><a href="#接收者自己创建代币账户" class="headerlink" title="接收者自己创建代币账户"></a>接收者自己创建代币账户</h5><p>1、首先，切换默认钱包至新创建的接收者钱包：</p>
+<pre><code class="highlight sh">solana config <span class="built_in">set</span> --keypair ~/.config/solana/id-02.json
+solana address
+solana config get
+solana airdrop 5</code></pre>
+
+<p>2、然后创建代币账户：</p>
+<pre><code class="highlight plaintext">spl-token create-account 7FtgPqsoJ19uSH7jHShzvwYfypRbp4GoBqBXzhBoBxcu</code></pre>
+
+<p>输出如下：</p>
+<pre><code class="highlight plaintext">Creating account 5AdKdgDP8wGeYqqoYikjuezgnjccXLik5dLjaMQYgcYN
+
+Signature: 3fSw8ZvDXdEhZQCys2VJS6HztFB96UFAUn4zPkvieZJ3VFKbsyXr2v586ziQ8PeL4rsokwzYdYR7NXHfqy6XMwZH</code></pre>
+
+<p>为新账户创建了代币账户5AdKdgDP8wGeYqqoYikjuezgnjccXLik5dLjaMQYgcYN，下面向新账户转账：</p>
+<p>注意：需先切换回原来账户。</p>
+<pre><code class="highlight sh">solana config <span class="built_in">set</span> --keypair ~/.config/solana/id.json</code></pre>
+
+<p>再来转账：</p>
+<pre><code class="highlight sh">spl-token transfer 7FtgPqsoJ19uSH7jHShzvwYfypRbp4GoBqBXzhBoBxcu 50 CuEsnnr6v9jjDhv7xNDiSXrcpAB27HTfiZM947X5rvfq</code></pre>
+
+<p>输出如下：</p>
+<pre><code class="highlight plaintext">Transfer 50 tokens
+  Sender: 9TeAnD3b5AXnvWUqh7AFGcAQShHBD7pmRGjTcCtShfjM
+  Recipient: CuEsnnr6v9jjDhv7xNDiSXrcpAB27HTfiZM947X5rvfq
+  Recipient associated token account: 5AdKdgDP8wGeYqqoYikjuezgnjccXLik5dLjaMQYgcYN
+
+Signature: 3RaopXzR3uzicVp6F4VPCr6xbfB9tvWeBXHuuSH1k9h2xAgHWMAYhLc4rULJyr7Myy2CJoTWPG2v9fDWKLGauHGD</code></pre>
+
+<h5 id="发送者为接收者创建代币账户"><a href="#发送者为接收者创建代币账户" class="headerlink" title="发送者为接收者创建代币账户"></a>发送者为接收者创建代币账户</h5><p>这种方法需要发送者资助一些sol给接收者，因为创建代币账户是需要租金的，代币账户虽然是接收方的，但创建时需要有人支付这笔租金。发送者选择为接收者代付这部分费用，因此称为“fund”。</p>
+<p>运行以下命令：</p>
+<pre><code class="highlight sh"><span class="comment"># --fund-recipient 表示资助接收者 SOL 用于支付代币账户租金</span>
+<span class="comment"># --allow-unfunded-recipient 表示允许自动为接收者创建代币账户</span>
+spl-token transfer --fund-recipient 7FtgPqsoJ19uSH7jHShzvwYfypRbp4GoBqBXzhBoBxcu 50 H1jxjEVnxKgrdN17UpU7tDzhwDBCHvKXfuzJAmcouQ9Y --allow-unfunded-recipient</code></pre>
+
+<p>通过输出信息可以看到，已经自动为接收者创建了一个代币账户，并成功转账了 50 个代币。</p>
+<h4 id="给代币账户转账代币"><a href="#给代币账户转账代币" class="headerlink" title="给代币账户转账代币"></a>给代币账户转账代币</h4><p>除了给钱包转账，也可以给已存在的代币账户转账，例如向刚刚创建的代币账户转账：</p>
+<pre><code class="highlight sh">spl-token transfer 7FtgPqsoJ19uSH7jHShzvwYfypRbp4GoBqBXzhBoBxcu 5 5AdKdgDP8wGeYqqoYikjuezgnjccXLik5dLjaMQYgcYN</code></pre>
+
+<p>输出如下：</p>
+<pre><code class="highlight plaintext">Transfer 5 tokens
+  Sender: 9TeAnD3b5AXnvWUqh7AFGcAQShHBD7pmRGjTcCtShfjM
+  Recipient: 5AdKdgDP8wGeYqqoYikjuezgnjccXLik5dLjaMQYgcYN
+
+Signature: zYd4cDS8psHKpWeirZ3HdoVTPHaPLD1qxmjbgjunVeppiggdQ3PFBNBgBhE7mKLpcvrMoeNyLNBN8d9svkEc3iN</code></pre>
+
+<p>现在，我们查看这个代币账户的余额看看效果，运行以下命令：</p>
+<pre><code class="highlight sh">spl-token display 5AdKdgDP8wGeYqqoYikjuezgnjccXLik5dLjaMQYgcYN</code></pre>
+
+<p>输出如下：</p>
+<pre><code class="highlight plaintext">SPL Token Account
+  Address: 5AdKdgDP8wGeYqqoYikjuezgnjccXLik5dLjaMQYgcYN
+  Program: TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
+  Balance: 55
+  Decimals: 9
+  Mint: 7FtgPqsoJ19uSH7jHShzvwYfypRbp4GoBqBXzhBoBxcu
+  Owner: CuEsnnr6v9jjDhv7xNDiSXrcpAB27HTfiZM947X5rvfq
+  State: Initialized
+  Delegation: (not set)
+  Close authority: (not set)</code></pre>
+
+<p>可以看到，余额是 55 个代币，符合预期，因为第一次向钱包转账了 50 个，第二次直接向代币账户转账了 5 个。</p>
+<h3 id="配置元数据"><a href="#配置元数据" class="headerlink" title="配置元数据"></a>配置元数据</h3><p>我们的代币还没有元数据，比如name、symbol、uri等。由于我们的代币是由Token Program创建的，要想添加元数据，需要使用<strong>Metaplex Token Metadata Program</strong> 才能实现，而官方已经推荐使用新的代币标准（ <strong>即 Token-2022 Program</strong> ）。</p>
+<p><strong>Token-2022</strong> 是对 <strong>经典 SPL Token Program</strong> 的增强版本，支持更丰富的功能，可以直接为代币设置<code>名称（name）</code>、<code>符号（symbol）</code>和<code>资源定位符（URI）</code>等。</p>
+<p>因此，我们重新创建一个 <code>Token-2022 Program</code> 的代币。</p>
+<h4 id="创建一个-Token-2022-Program-的代币"><a href="#创建一个-Token-2022-Program-的代币" class="headerlink" title="创建一个 Token-2022 Program 的代币"></a>创建一个 Token-2022 Program 的代币</h4><pre><code class="highlight sh"><span class="comment"># -p 指定 Token-2022 Program 的地址</span>
+<span class="comment"># --enable-metadata 启用元数据</span>
+spl-token create-token -p TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb --enable-metadata</code></pre>
+
+<p>输出为：</p>
+<pre><code class="highlight sh">Creating token FQCikCzDRnSZeoQieBkjPHgXhAQW8wqTEbJWSkEWcFUj under program TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb
+To initialize metadata inside the mint, please run `spl-token initialize-metadata FQCikCzDRnSZeoQieBkjPHgXhAQW8wqTEbJWSkEWcFUj &lt;YOUR_TOKEN_NAME&gt; &lt;YOUR_TOKEN_SYMBOL&gt; &lt;YOUR_TOKEN_URI&gt;`, and sign with the mint authority.
+
+Address:  FQCikCzDRnSZeoQieBkjPHgXhAQW8wqTEbJWSkEWcFUj
+Decimals:  9
+
+Signature: 3vA3R6hpE1Nuv4NjbbngukcS3GRUS3embkox6CtcUHg9ux6ENLVWbPMkdn7BxHZArp3mbMKnZo9Z7iPFzDs5bvwC</code></pre>
+
+<h4 id="为新代币初始化元数据"><a href="#为新代币初始化元数据" class="headerlink" title="为新代币初始化元数据"></a>为新代币初始化元数据</h4><p>根据提示命令，我们为新代币添加 name 和 symbol</p>
+<pre><code class="highlight sh">spl-token initialize-metadata FQCikCzDRnSZeoQieBkjPHgXhAQW8wqTEbJWSkEWcFUj <span class="string">&quot;My SPL Token&quot;</span> <span class="string">&quot;MST&quot;</span> <span class="string">&quot;&quot;</span></code></pre>
+
+<p>初始化元数据后，查看代币信息：</p>
+<pre><code class="highlight plaintext">spl-token display FQCikCzDRnSZeoQieBkjPHgXhAQW8wqTEbJWSkEWcFUj</code></pre>
+
+<p>输出：</p>
+<pre><code class="highlight plaintext">SPL Token Mint
+  Address: FQCikCzDRnSZeoQieBkjPHgXhAQW8wqTEbJWSkEWcFUj
+  Program: TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb
+  Supply: 0
+  Decimals: 9
+  Mint authority: Grut8Qc3QFxVxkfpsiYgLZ2ic7MJL62RVS9XoW4NQKKe
+  Freeze authority: (not set)
+Extensions
+  Metadata Pointer:
+    Authority: Grut8Qc3QFxVxkfpsiYgLZ2ic7MJL62RVS9XoW4NQKKe
+    Metadata address: FQCikCzDRnSZeoQieBkjPHgXhAQW8wqTEbJWSkEWcFUj
+  Metadata:
+    Update Authority: Grut8Qc3QFxVxkfpsiYgLZ2ic7MJL62RVS9XoW4NQKKe
+    Mint: FQCikCzDRnSZeoQieBkjPHgXhAQW8wqTEbJWSkEWcFUj
+    Name: My SPL Token
+    Symbol: MST
+    URI: (not set)</code></pre>
+
+<h4 id="创建代币账户，存储这个新代币的余额"><a href="#创建代币账户，存储这个新代币的余额" class="headerlink" title="创建代币账户，存储这个新代币的余额"></a>创建代币账户，存储这个新代币的余额</h4><pre><code class="highlight plaintext">spl-token create-account FQCikCzDRnSZeoQieBkjPHgXhAQW8wqTEbJWSkEWcFUj</code></pre>
+
+<p>输出：</p>
+<pre><code class="highlight plaintext">Creating account 6RTJVvEu6kTazPLEd6v11Hvj8Z6ciE9q9TgEX33auJQD
+
+Signature: 3NVV5jzH3kvevusxu6WLx1tcAHLdgMjmuXiPG9SUxT6ugR3DHpuib4AmXDbH2fyVPCWKUmbgpJxcasqTzXCLCHuq</code></pre>
+
+<p>查看代币账户：</p>
+<pre><code class="highlight plaintext">SPL Token Account
+  Address: 6RTJVvEu6kTazPLEd6v11Hvj8Z6ciE9q9TgEX33auJQD
+  Program: TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb
+  Balance: 0
+  Decimals: 9
+  Mint: FQCikCzDRnSZeoQieBkjPHgXhAQW8wqTEbJWSkEWcFUj
+  Owner: Grut8Qc3QFxVxkfpsiYgLZ2ic7MJL62RVS9XoW4NQKKe
+  State: Initialized
+  Delegation: (not set)
+  Close authority: (not set)
+Extensions:
+  Immutable owner</code></pre>
+
+<h3 id="配置区块浏览器"><a href="#配置区块浏览器" class="headerlink" title="配置区块浏览器"></a>配置区块浏览器</h3><p>现在，你打开区块浏览器查看这个新代币，发现 logo 的位置依然显示 <strong>Unknown Token</strong>，这是为什么呢？</p>
+<p>因为我们刚刚没有配置 <code>uri</code>！在 Solana 的代币元数据标准中，URI 字段通常用于存储指向 JSON 文件的链接。这个 JSON 文件包含代币的详细信息，例如 name、symbol 和 logo URL。</p>
+<h4 id="选择-Web3-存储服务"><a href="#选择-Web3-存储服务" class="headerlink" title="选择 Web3 存储服务"></a>选择 Web3 存储服务</h4><p>市面上有众多 Web3 存储服务，例如：<code>IPFS</code>、<code>Web3.Storage</code>、<code>NFT.Storage</code>、<code>Arweave</code>、<code>Pinata</code> 等。它们大都有免费使用的空间，为了避免绑定银行卡，我选择使用 <strong>Pinata</strong>。</p>
+<p>在 <a href="">https://pinata.cloud/</a>注册成功后，上传文件获得 <code>IPFS CID</code>，然后就可以通过 <code>https://ipfs.io/ipfs/&#123;IPFS_CID&#125;</code> 公开访问我们的资源了。</p>
+<blockquote>
+<p>Pinata 的使用自行研究即可，非常简单。</p>
+</blockquote>
+<ol>
+<li>上传 Logo 图标</li>
+</ol>
+<p>选择一个 logo 图标，通过 Pinata 网站上传，获得 IPFS_CID。</p>
+<ol>
+<li>上传 JSON 文件</li>
+</ol>
+<p>我们的代币元数据如下：</p>
+<pre><code class="highlight json"><span class="punctuation">&#123;</span>
+  <span class="attr">&quot;name&quot;</span><span class="punctuation">:</span> <span class="string">&quot;My SPL Token&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;symbol&quot;</span><span class="punctuation">:</span> <span class="string">&quot;MST&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;description&quot;</span><span class="punctuation">:</span> <span class="string">&quot;A pig token.&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;image&quot;</span><span class="punctuation">:</span> <span class="string">&quot;https://ipfs.io/ipfs/&#123;IPFS_CID&#125;&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;external_url&quot;</span><span class="punctuation">:</span> <span class="string">&quot;&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;attributes&quot;</span><span class="punctuation">:</span> <span class="punctuation">[</span><span class="punctuation">]</span><span class="punctuation">,</span>
+  <span class="attr">&quot;properties&quot;</span><span class="punctuation">:</span> <span class="punctuation">&#123;</span>
+    <span class="attr">&quot;files&quot;</span><span class="punctuation">:</span> <span class="punctuation">[</span>
+      <span class="punctuation">&#123;</span>
+        <span class="attr">&quot;uri&quot;</span><span class="punctuation">:</span> <span class="string">&quot;https://ipfs.io/ipfs/&#123;IPFS_CID&#125;&quot;</span><span class="punctuation">,</span>
+        <span class="attr">&quot;type&quot;</span><span class="punctuation">:</span> <span class="string">&quot;image/png&quot;</span>
+      <span class="punctuation">&#125;</span>
+    <span class="punctuation">]</span>
+  <span class="punctuation">&#125;</span>
+<span class="punctuation">&#125;</span></code></pre>
+
+<p>这里的 image 字段写你的 logo 访问地址，然后按照同样的步骤上传至 Pinata。</p>
+<p>我的CID是bafkreianvqy6a6lwzqzhjiyh27jl5pqsj3p2gznbz5luwqhjggcpsofiqm</p>
+<p>JSON文件：</p>
+<pre><code class="highlight json"><span class="punctuation">&#123;</span>
+  <span class="attr">&quot;name&quot;</span><span class="punctuation">:</span> <span class="string">&quot;My SPL Token&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;symbol&quot;</span><span class="punctuation">:</span> <span class="string">&quot;MST&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;description&quot;</span><span class="punctuation">:</span> <span class="string">&quot;A pig token.&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;image&quot;</span><span class="punctuation">:</span> <span class="string">&quot;https://ipfs.io/ipfs/bafkreianvqy6a6lwzqzhjiyh27jl5pqsj3p2gznbz5luwqhjggcpsofiqm&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;external_url&quot;</span><span class="punctuation">:</span> <span class="string">&quot;&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;attributes&quot;</span><span class="punctuation">:</span> <span class="punctuation">[</span><span class="punctuation">]</span><span class="punctuation">,</span>
+  <span class="attr">&quot;properties&quot;</span><span class="punctuation">:</span> <span class="punctuation">&#123;</span>
+    <span class="attr">&quot;files&quot;</span><span class="punctuation">:</span> <span class="punctuation">[</span>
+      <span class="punctuation">&#123;</span>
+        <span class="attr">&quot;uri&quot;</span><span class="punctuation">:</span> <span class="string">&quot;https://ipfs.io/ipfs/bafkreianvqy6a6lwzqzhjiyh27jl5pqsj3p2gznbz5luwqhjggcpsofiqm&quot;</span><span class="punctuation">,</span>
+        <span class="attr">&quot;type&quot;</span><span class="punctuation">:</span> <span class="string">&quot;image/png&quot;</span>
+      <span class="punctuation">&#125;</span>
+    <span class="punctuation">]</span>
+  <span class="punctuation">&#125;</span>
+<span class="punctuation">&#125;</span></code></pre>
+
+<h4 id="更新代币元数据"><a href="#更新代币元数据" class="headerlink" title="更新代币元数据"></a>更新代币元数据</h4><p>获得 ipfs 链接后，我们使用以下命令更新代币的 URI 字段：</p>
+<pre><code class="highlight bash">// 为上传的json文件的cid
+spl-token update-metadata FQCikCzDRnSZeoQieBkjPHgXhAQW8wqTEbJWSkEWcFUj uri <span class="string">&quot;https://ipfs.io/ipfs/bafkreih4jhfqxlgpoxtlavbijbzl4u3utiubgneinane4p34k4f7z3tnqa&quot;</span></code></pre>
+
+<p>更新成功后，再次打开 Solana 区块浏览器，就可以正常看到我们配置的 Logo 和 Name 了。</p>
+<p><a href="https://explorer.solana.com/address/FQCikCzDRnSZeoQieBkjPHgXhAQW8wqTEbJWSkEWcFUj?cluster=devnet">https://explorer.solana.com/address/FQCikCzDRnSZeoQieBkjPHgXhAQW8wqTEbJWSkEWcFUj?cluster=devnet</a></p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
