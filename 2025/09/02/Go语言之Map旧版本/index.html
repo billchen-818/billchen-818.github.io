@@ -1,0 +1,582 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Go语言之Map旧版本</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Go语言之Map旧版本</h1><div class="time">2025-09-02</div><h2 id="Go1-24之前的map原理"><a href="#Go1-24之前的map原理" class="headerlink" title="Go1.24之前的map原理"></a>Go1.24之前的map原理</h2><h3 id="一、map结构"><a href="#一、map结构" class="headerlink" title="一、map结构"></a>一、map结构</h3><p>Go语言Map的结构：</p>
+<pre><code class="highlight go"><span class="comment">// Maximum number of key/elem pairs a bucket can hold.</span>
+bucketCntBits = <span class="number">3</span>
+bucketCnt     = <span class="number">1</span> &lt;&lt; bucketCntBits<span class="comment">//每个桶中元素个数为8</span>
+
+<span class="comment">// Represent as loadFactorNum/loadFactorDen, to allow integer math.</span>
+loadFactorNum = <span class="number">13</span>
+loadFactorDen = <span class="number">2</span> <span class="comment">//13除以2得到负载因子 6.5</span>
+<span class="comment">// flags</span>
+iterator     = <span class="number">1</span> <span class="comment">// there may be an iterator using buckets</span>
+oldIterator  = <span class="number">2</span> <span class="comment">// there may be an iterator using oldbuckets</span>
+hashWriting  = <span class="number">4</span> <span class="comment">// a goroutine is writing to the map</span>
+sameSizeGrow = <span class="number">8</span> <span class="comment">// the current map growth is to a new map of the same size</span>
+<span class="comment">// A header for a Go map.</span>
+<span class="keyword">type</span> hmap <span class="keyword">struct</span> &#123;
+	count     <span class="type">int</span> <span class="comment">//map中键值对个数 ，len(map)就是取的该值</span>
+	flags     <span class="type">uint8</span> <span class="comment">//标志位，用于表示当前map正在写等状态</span>
+	B         <span class="type">uint8</span>  <span class="comment">// 2^B表示map中桶的个数</span>
+	noverflow <span class="type">uint16</span> <span class="comment">// 溢出桶的个数,其只表示实时申请的溢出桶个数，不包含预申请的溢出桶。approximate number of overflow buckets; see incrnoverflow for details</span>
+	hash0     <span class="type">uint32</span> <span class="comment">// hash seed</span>
+	buckets    unsafe.Pointer <span class="comment">// 桶数组。array of 2^B Buckets. may be nil if count==0.</span>
+	oldbuckets unsafe.Pointer <span class="comment">// 扩容时用，暂存旧的桶。previous bucket array of half the size, non-nil only when growing</span>
+	nevacuate  <span class="type">uintptr</span>        <span class="comment">// 表示扩容时迁移进度，小于该值的表示已经被迁移了。progress counter for evacuation (buckets less than this have been evacuated)</span>
+	extra *mapextra <span class="comment">// optional fields</span>
+&#125;
+<span class="comment">// mapextra holds fields that are not present on all maps.</span>
+<span class="comment">//overflow与nextOverflow没有任何从属关系</span>
+<span class="keyword">type</span> mapextra <span class="keyword">struct</span> &#123;
+	overflow    *[]*bmap <span class="comment">//等nextOverflow没有时，插入时又需要溢出桶，此时申请的溢出桶就放在这里，可称之为实时申请的溢出桶</span>
+	oldoverflow *[]*bmap <span class="comment">//扩容时旧的溢出桶</span>
+	<span class="comment">// nextOverflow holds a pointer to a free overflow bucket.</span>
+	nextOverflow *bmap <span class="comment">//预申请的溢出桶，在map初始化的时候确定，与h.buckets属于同一块连续内存</span>
+&#125;
+<span class="comment">// 桶内部结构</span>
+<span class="keyword">type</span> bmap <span class="keyword">struct</span> &#123;
+	tophash [bucketCnt]<span class="type">uint8</span><span class="comment">//tophash的元素是取key的hash值的高8位，用于快速定位key的位置</span>
+	key[bucketCnt]unsafe.Pointer<span class="comment">//连续的key,便于内存对齐以节省空间</span>
+	value[bucketCnt]unsafe.Pointer<span class="comment">//连续的value,便于内存对齐以节省空间</span>
+	overflow    *bmap <span class="comment">//溢出桶指针</span>
+&#125;</code></pre>
+
+<p>bmap中的key,value,overflow类型没有显式定义，而是通过指针运算来访问。</p>
+<p>大多数的map操作函数都是以maptype类型作为第一个参数，maptype类型定义：</p>
+<pre><code class="highlight go"><span class="keyword">type</span> maptype <span class="keyword">struct</span> &#123;
+	typ    _type<span class="comment">//map类型</span>
+	key    *_type <span class="comment">//key类型</span>
+	elem   *_type <span class="comment">//value类型</span>
+	bucket *_type <span class="comment">// internal type representing a hash bucket</span>
+	<span class="comment">// function for hashing keys (ptr to key, seed) -&gt; hash</span>
+	hasher     <span class="function"><span class="keyword">func</span><span class="params">(unsafe.Pointer, <span class="type">uintptr</span>)</span></span> <span class="type">uintptr</span> <span class="comment">//hsah函数</span>
+	keysize    <span class="type">uint8</span>  <span class="comment">// size of key slot</span>
+	elemsize   <span class="type">uint8</span>  <span class="comment">// size of elem slot</span>
+	bucketsize <span class="type">uint16</span> <span class="comment">// size of bucket，即bmap大小</span>
+	flags      <span class="type">uint32</span>
+&#125;</code></pre>
+
+<p>maptype类型中有key，value类型大小还有hash函数。</p>
+<p><img src="/./../img/go-map.png" alt="map结构图"></p>
+<p>从上面可以看出，对于hash冲突，map是采用拉链法(溢出桶)来解决hash冲突。</p>
+<h3 id="二、map的初始化"><a href="#二、map的初始化" class="headerlink" title="二、map的初始化"></a>二、map的初始化</h3><p>我们在make函数初始化的时候，可以分为不带容量初始化和带容量初始化。</p>
+<h4 id="1、不带容量初始化"><a href="#1、不带容量初始化" class="headerlink" title="1、不带容量初始化"></a>1、不带容量初始化</h4><p>不带容量初始化比较简单，调用makemap_small，如下：</p>
+<pre><code class="highlight go"><span class="function"><span class="keyword">func</span> <span class="title">makemap_small</span><span class="params">()</span></span> *hmap &#123;
+	h := <span class="built_in">new</span>(hmap)
+	h.hash0 = fastrand()<span class="comment">//生成hash种子</span>
+	<span class="keyword">return</span> h
+&#125;</code></pre>
+
+<p>可以看到只是初始化了一个hmap类型的指针，并没有申请其它内存。</p>
+<h4 id="2、带容量初始化"><a href="#2、带容量初始化" class="headerlink" title="2、带容量初始化"></a>2、带容量初始化</h4><p>带容量初始化的时候如果容量类型是int64,会调用makemap64函数，如下：</p>
+<pre><code class="highlight go"><span class="function"><span class="keyword">func</span> <span class="title">makemap64</span><span class="params">(t *maptype, hint <span class="type">int64</span>, h *hmap)</span></span> *hmap &#123;
+	<span class="keyword">if</span> <span class="type">int64</span>(<span class="type">int</span>(hint)) != hint &#123;
+		hint = <span class="number">0</span>
+	&#125;
+	<span class="keyword">return</span> makemap(t, <span class="type">int</span>(hint), h)
+&#125;</code></pre>
+
+<p>否则直接调用makemap函数：</p>
+<pre><code class="highlight go"><span class="comment">//hint 是make是定义的map的键值对个数，比如make(map[int]bool,111),那么hint就是111</span>
+<span class="function"><span class="keyword">func</span> <span class="title">makemap</span><span class="params">(t *maptype, hint <span class="type">int</span>, h *hmap)</span></span> *hmap &#123;
+	mem, overflow := math.MulUintptr(<span class="type">uintptr</span>(hint), t.bucket.size)
+	<span class="keyword">if</span> overflow || mem &gt; maxAlloc &#123;
+		hint = <span class="number">0</span>
+	&#125;
+	<span class="comment">// initialize Hmap</span>
+	<span class="keyword">if</span> h == <span class="literal">nil</span> &#123;
+		h = <span class="built_in">new</span>(hmap)
+	&#125;
+	h.hash0 = fastrand()<span class="comment">//生成hash种子</span>
+	<span class="comment">// Find the size parameter B which will hold the requested # of elements.</span>
+	<span class="comment">// For hint &lt; 0 overLoadFactor returns false since hint &lt; bucketCnt.</span>
+	B := <span class="type">uint8</span>(<span class="number">0</span>)
+	<span class="keyword">for</span> overLoadFactor(hint, B) &#123;<span class="comment">//根据hint值计算B的大小，即桶个数</span>
+		B++ <span class="comment">//如果此时超过负载因子，B就加1</span>
+	&#125;
+	h.B = B
+	<span class="comment">// if B == 0, the buckets field is allocated lazily later (in mapassign)</span>
+	<span class="comment">// If hint is large zeroing this memory could take a while.</span>
+	<span class="keyword">if</span> h.B != <span class="number">0</span> &#123;
+		<span class="keyword">var</span> nextOverflow *bmap
+		h.buckets, nextOverflow = makeBucketArray(t, h.B, <span class="literal">nil</span>)<span class="comment">//申请桶和溢出桶内存</span>
+		<span class="keyword">if</span> nextOverflow != <span class="literal">nil</span> &#123;
+			h.extra = <span class="built_in">new</span>(mapextra)
+			h.extra.nextOverflow = nextOverflow
+		&#125;
+	&#125;
+	<span class="keyword">return</span> h
+&#125;
+
+<span class="function"><span class="keyword">func</span> <span class="title">makeBucketArray</span><span class="params">(t *maptype, b <span class="type">uint8</span>, dirtyalloc unsafe.Pointer)</span></span> (buckets unsafe.Pointer, nextOverflow *bmap) &#123;
+	base := bucketShift(b)<span class="comment">//计算桶个数，2^B</span>
+	nbuckets := base
+	<span class="comment">//对于map键值对个数较少时并不会申请溢出桶，避免计算开销</span>
+	<span class="keyword">if</span> b &gt;= <span class="number">4</span> &#123;<span class="comment">//只有b&gt;=4时才会按照2^(b-4来申请溢出桶个数</span>
+		nbuckets += bucketShift(b - <span class="number">4</span>)
+		sz := t.bucket.size * nbuckets
+		up := roundupsize(sz)<span class="comment">//内存对齐</span>
+		<span class="keyword">if</span> up != sz &#123;
+			nbuckets = up / t.bucket.size<span class="comment">//得出内存对齐后的所有桶个数</span>
+		&#125;
+	&#125;
+  <span class="comment">//申请一段连续内存（包括正常桶和溢出桶）</span>
+	<span class="keyword">if</span> dirtyalloc == <span class="literal">nil</span> &#123;
+		buckets = newarray(t.bucket, <span class="type">int</span>(nbuckets))
+	&#125; <span class="keyword">else</span> &#123;
+		buckets = dirtyalloc
+		size := t.bucket.size * nbuckets
+		<span class="keyword">if</span> t.bucket.ptrdata != <span class="number">0</span> &#123;
+			memclrHasPointers(buckets, size)
+		&#125; <span class="keyword">else</span> &#123;
+			memclrNoHeapPointers(buckets, size)
+		&#125;
+	&#125;
+	<span class="comment">//根据指针运算定位溢出桶位置，可以看到并未将预申请的溢出桶计入noverflow</span>
+	<span class="keyword">if</span> base != nbuckets &#123;
+		nextOverflow = (*bmap)(add(buckets, base*<span class="type">uintptr</span>(t.bucketsize)))<span class="comment">//找到属于溢出桶的那部分内存</span>
+		last := (*bmap)(add(buckets, (nbuckets<span class="number">-1</span>)*<span class="type">uintptr</span>(t.bucketsize)))<span class="comment">//找到最后一个溢出桶</span>
+		last.setoverflow(t, (*bmap)(buckets))<span class="comment">//设置最后一个溢出桶的溢出指针（即bmap的overflow字段）为第一个桶，这时只是为了占个位</span>
+	&#125;
+	<span class="keyword">return</span> buckets, nextOverflow
+&#125;</code></pre>
+
+<h3 id="三、map的查找"><a href="#三、map的查找" class="headerlink" title="三、map的查找"></a>三、map的查找</h3><p>针对var a &#x3D; map[int]bool&#x3D;{1:true}分析，我们进行map查找有两种：</p>
+<ul>
+<li>b:&#x3D;a[1]。这种情况下key 1 存在就返回相应的value,不存在就返回value类型的零值，即false，对应源码函数为mapaccess1;</li>
+<li>b,ok:&#x3D;a[1]。这种情况key 1 存在b就是key对应的value，ok为true,否则b就是value类型的零值，ok为false，对应源码函数为mapaccess2;</li>
+</ul>
+<p>两种种查找过模式的核心逻辑一样：</p>
+<ul>
+<li>1、计算key的hash值；</li>
+<li>2、通过B的大小和hash值来确定key在哪个桶(假设此时B&#x3D;2，则桶个数b&#x3D;4,所以取hash值的后4位，如果后四位是0101，0101用十进制表示为5，所以在5号桶）；</li>
+<li>3、如果处于扩容后的迁移期间，定位key位于的旧桶，若旧桶没被迁移，则到该旧桶查找value;</li>
+<li>4、通过2、3步定位key所在桶后，计算tophash值，即hash值的高八位；</li>
+<li>5、遍历桶中元素，根据tophash值和key来找value；</li>
+<li>6、如果第五步没找到，则切换到溢出桶，如此重复5,6步，找到就结束遍历，否则一直循环，直至遍历完所有溢出桶；</li>
+</ul>
+<pre><code class="highlight go"><span class="function"><span class="keyword">func</span> <span class="title">mapaccess1</span><span class="params">(t *maptype, h *hmap, key unsafe.Pointer)</span></span> unsafe.Pointer &#123;
+	<span class="comment">//省略代码...</span>
+	<span class="keyword">if</span> h == <span class="literal">nil</span> || h.count == <span class="number">0</span> &#123;<span class="comment">//这里可以看出查找未初始化的map也不会报错，直接返回value类型零值</span>
+		<span class="keyword">if</span> t.hashMightPanic() &#123;
+			t.hasher(key, <span class="number">0</span>) 
+		&#125;
+		<span class="keyword">return</span> unsafe.Pointer(&amp;zeroVal[<span class="number">0</span>])
+	&#125;
+	<span class="keyword">if</span> h.flags&amp;hashWriting != <span class="number">0</span> &#123;<span class="comment">//如果map正在写，不允许读</span>
+		fatal(<span class="string">&quot;concurrent map read and map write&quot;</span>)
+	&#125;
+	hash := t.hasher(key, <span class="type">uintptr</span>(h.hash0))<span class="comment">// 计算key的hash值</span>
+	m := bucketMask(h.B)<span class="comment">//计算掩码，即2^B - 1</span>
+	<span class="comment">//hash&amp;m等价于取模运算（公式：X % 2^ n = X &amp; (2^ n – 1)，只适用于2的次方），用于获取桶的偏移量</span>
+	b := (*bmap)(add(h.buckets, (hash&amp;m)*<span class="type">uintptr</span>(t.bucketsize)))<span class="comment">//通过</span>
+	<span class="keyword">if</span> c := h.oldbuckets; c != <span class="literal">nil</span> &#123;
+		<span class="keyword">if</span> !h.sameSizeGrow() &#123;
+			<span class="comment">// There used to be half as many buckets; mask down one more power of two.</span>
+			m &gt;&gt;= <span class="number">1</span>
+		&#125;
+		oldb := (*bmap)(add(c, (hash&amp;m)*<span class="type">uintptr</span>(t.bucketsize)))<span class="comment">//定位旧桶</span>
+		<span class="keyword">if</span> !evacuated(oldb) &#123;<span class="comment">//旧桶没迁移就到该旧桶查找value</span>
+			b = oldb
+		&#125;
+	&#125;
+	top := tophash(hash)<span class="comment">//计算tophash，取hash高八位</span>
+bucketloop:
+	<span class="keyword">for</span> ; b != <span class="literal">nil</span>; b = b.overflow(t) &#123;
+		<span class="keyword">for</span> i := <span class="type">uintptr</span>(<span class="number">0</span>); i &lt; bucketCnt; i++ &#123;
+			<span class="keyword">if</span> b.tophash[i] != top &#123;<span class="comment">//通过tophash加速定位key的位置</span>
+				<span class="keyword">if</span> b.tophash[i] == emptyRest &#123;<span class="comment">//如果遇到emptyRest标志位，表示不管是正常桶，还是溢出桶，后面都没有元素了，直接跳出循环即可</span>
+					<span class="keyword">break</span> bucketloop
+				&#125;
+				<span class="keyword">continue</span>
+			&#125;
+			k := add(unsafe.Pointer(b), dataOffset+i*<span class="type">uintptr</span>(t.keysize))<span class="comment">//tophash相等，就通过指针运算取真实的key值</span>
+			<span class="keyword">if</span> t.indirectkey() &#123;
+				k = *((*unsafe.Pointer)(k))
+			&#125;
+			<span class="keyword">if</span> t.key.equal(key, k) &#123;<span class="comment">//tophash相等只能说明key hash值的高八位一样，还需要对比此key值与要找的key是否相等</span>
+				e := add(unsafe.Pointer(b), dataOffset+bucketCnt*<span class="type">uintptr</span>(t.keysize)+i*<span class="type">uintptr</span>(t.elemsize))
+				<span class="keyword">if</span> t.indirectelem() &#123;
+					e = *((*unsafe.Pointer)(e))
+				&#125;
+				<span class="keyword">return</span> e
+			&#125;
+		&#125;
+	&#125;
+	<span class="keyword">return</span> unsafe.Pointer(&amp;zeroVal[<span class="number">0</span>])
+&#125;</code></pre>
+
+<p>取hash的掩码：</p>
+<pre><code class="highlight go"><span class="function"><span class="keyword">func</span> <span class="title">bucketShift</span><span class="params">(b <span class="type">uint8</span>)</span></span> <span class="type">uintptr</span> &#123;<span class="comment">//计算当前桶个数，可以看出桶个数（不包括溢出桶）在64为系统下最多是2^63个，32位系统下最多是2^31个</span>
+	<span class="comment">// Masking the shift amount allows overflow checks to be elided.</span>
+	<span class="keyword">return</span> <span class="type">uintptr</span>(<span class="number">1</span>) &lt;&lt; (b &amp; (goarch.PtrSize*<span class="number">8</span> - <span class="number">1</span>))
+&#125;
+<span class="comment">// bucketMask returns 1&lt;&lt;b - 1, optimized for code generation.</span>
+<span class="function"><span class="keyword">func</span> <span class="title">bucketMask</span><span class="params">(b <span class="type">uint8</span>)</span></span> <span class="type">uintptr</span> &#123;
+	<span class="keyword">return</span> bucketShift(b) - <span class="number">1</span>
+&#125;</code></pre>
+
+<h3 id="四、map的插入"><a href="#四、map的插入" class="headerlink" title="四、map的插入"></a>四、map的插入</h3><p>插入逻辑步骤如下：</p>
+<ul>
+<li>1、计算key的hash值；</li>
+<li>2、通过B的大小和hash值来确定key在哪个桶(假设此时B&#x3D;2，则桶个数b&#x3D;4,所以取hash值的后4位，如果后四位是0101，0101用十进制表示为5，所以在5号桶）；</li>
+<li>3、如果处于扩容后的迁移期间，就先把key所映射的旧桶及其溢出桶的内容迁移到新的桶中;</li>
+<li>4、遍历新桶，根据tophash值和key来定位key是否存在；</li>
+<li>5、存在就直接结束，并返回value的地址，用于更新value；</li>
+<li>6、不存在就找一个空位，用于插入key和value；</li>
+<li>7、再判定是否需要扩容，需要的话就先扩容，之后跳到第2步；</li>
+<li>8、不需要扩容就设置key及其tophash,并返回value地址，用户设置value的值。</li>
+</ul>
+<h4 id="1、插入源码分析"><a href="#1、插入源码分析" class="headerlink" title="1、插入源码分析"></a>1、插入源码分析</h4><p>向map插入键值对核心逻辑就是找key是否存在，存在就更新value值，不存在就插入该键值对，下面一起来看看源码吧。</p>
+<pre><code class="highlight go"><span class="function"><span class="keyword">func</span> <span class="title">mapassign</span><span class="params">(t *maptype, h *hmap, key unsafe.Pointer)</span></span> unsafe.Pointer &#123;
+	<span class="keyword">if</span> h == <span class="literal">nil</span> &#123;<span class="comment">//向未初始化的map中插入数据会panic</span>
+		<span class="built_in">panic</span>(plainError(<span class="string">&quot;assignment to entry in nil map&quot;</span>))
+	&#125;
+	<span class="comment">//省略代码...</span>
+	<span class="keyword">if</span> h.flags&amp;hashWriting != <span class="number">0</span> &#123;<span class="comment">//如果map正在写，不允许插入，否则报错</span>
+		fatal(<span class="string">&quot;concurrent map writes&quot;</span>)
+	&#125;
+	hash := t.hasher(key, <span class="type">uintptr</span>(h.hash0))<span class="comment">// 计算key的hash值</span>
+	h.flags ^= hashWriting<span class="comment">//设置map状态标志位为正在写</span>
+	<span class="keyword">if</span> h.buckets == <span class="literal">nil</span> &#123;<span class="comment">//如果当前map的桶未初始化，就申请内存，针对在初始还map时未声明容量大小或容量大小为0的情况</span>
+		h.buckets = newobject(t.bucket) <span class="comment">// newarray(t.bucket, 1)</span>
+	&#125;
+again:
+	bucket := hash &amp; bucketMask(h.B)<span class="comment">//没啥好说的，在查找章节说过了，计算key所在桶的内存偏移量</span>
+	<span class="keyword">if</span> h.growing() &#123;<span class="comment">//如果map正在扩容</span>
+		growWork(t, h, bucket)<span class="comment">//先把key所映射的旧桶内容迁移到新的桶中，详情待后续map 扩容章节讲解</span>
+	&#125;
+	b := (*bmap)(add(h.buckets, bucket*<span class="type">uintptr</span>(t.bucketsize)))<span class="comment">//根据偏移量得到桶内容</span>
+	top := tophash(hash)<span class="comment">//计算tophash</span>
+
+	<span class="keyword">var</span> inserti *<span class="type">uint8</span> 
+	<span class="keyword">var</span> insertk unsafe.Pointer
+	<span class="keyword">var</span> elem unsafe.Pointer<span class="comment">//key对应value的指针，会赋给该变量</span>
+bucketloop:
+	<span class="keyword">for</span> &#123;
+		<span class="keyword">for</span> i := <span class="type">uintptr</span>(<span class="number">0</span>); i &lt; bucketCnt; i++ &#123;
+			<span class="keyword">if</span> b.tophash[i] != top &#123;<span class="comment">//tophash值不等，说明key不存在</span>
+				<span class="keyword">if</span> isEmpty(b.tophash[i]) &amp;&amp; inserti == <span class="literal">nil</span> &#123;<span class="comment">//如果当前tophash位置是空的</span>
+					inserti = &amp;b.tophash[i] <span class="comment">//取当前tophash地址赋给inserti变量</span>
+					insertk = add(unsafe.Pointer(b), dataOffset+i*<span class="type">uintptr</span>(t.keysize))<span class="comment">//通过指针运算取对应key地址赋给insertK变量</span>
+					elem = add(unsafe.Pointer(b), dataOffset+bucketCnt*<span class="type">uintptr</span>(t.keysize)+i*<span class="type">uintptr</span>(t.elemsize))<span class="comment">//取对应value地址赋给elem变量</span>
+				&#125;
+				<span class="keyword">if</span> b.tophash[i] == emptyRest &#123;<span class="comment">//如果遇到emptyRest标志位，表示不管是正常桶，还是溢出桶，后面都没有元素了，直接跳出循环即可</span>
+					<span class="keyword">break</span> bucketloop
+				&#125;
+				<span class="keyword">continue</span>
+			&#125;
+			<span class="comment">//tophash值相等，说明key可能存在</span>
+			k := add(unsafe.Pointer(b), dataOffset+i*<span class="type">uintptr</span>(t.keysize))
+			<span class="keyword">if</span> t.indirectkey() &#123;
+				k = *((*unsafe.Pointer)(k))
+			&#125;
+			<span class="keyword">if</span> !t.key.equal(key, k) &#123;<span class="comment">//对比此key值与要插入的key是否相等，不相等继续循环</span>
+				<span class="keyword">continue</span>
+			&#125;
+			<span class="comment">// already have a mapping for key. Update it.</span>
+			<span class="keyword">if</span> t.needkeyupdate() &#123;
+				typedmemmove(t.key, k, key)
+			&#125;
+			<span class="comment">//key相等的话就将value的地址赋给elem并go to don以退出函数</span>
+			elem = add(unsafe.Pointer(b), dataOffset+bucketCnt*<span class="type">uintptr</span>(t.keysize)+i*<span class="type">uintptr</span>(t.elemsize))
+			<span class="keyword">goto</span> done
+		&#125;
+		<span class="comment">//没找到的话就到溢出桶里找</span>
+		ovf := b.overflow(t)
+		<span class="keyword">if</span> ovf == <span class="literal">nil</span> &#123;<span class="comment">//溢出桶存在就找</span>
+			<span class="keyword">break</span>
+		&#125;
+		b = ovf
+	&#125;
+  <span class="comment">//如果当前map不在进行扩容迁移，判断当前负载是否大于负载因子6.5，或者溢出桶数量是否过多</span>
+  <span class="comment">//任何一个满足就进行扩容，注意，此时只是扩容，并不迁移，Go map为了避免一次迁移所有数据太耗资源，采用渐进式迁移策略。</span>
+	<span class="keyword">if</span> !h.growing() &amp;&amp; (overLoadFactor(h.count+<span class="number">1</span>, h.B) || tooManyOverflowBuckets(h.noverflow, h.B)) &#123;
+		hashGrow(t, h)
+		<span class="keyword">goto</span> again <span class="comment">//重新跑一遍again 域内的逻辑</span>
+	&#125;
+  <span class="comment">//已有的桶都满了，这个新的key没位置了，就申请一个溢出桶</span>
+	<span class="keyword">if</span> inserti == <span class="literal">nil</span> &#123;
+		<span class="comment">// The current bucket and all the overflow buckets connected to it are full, allocate a new one.</span>
+		newb := h.newoverflow(t, b)
+		inserti = &amp;newb.tophash[<span class="number">0</span>]
+		insertk = add(unsafe.Pointer(newb), dataOffset)
+		elem = add(insertk, bucketCnt*<span class="type">uintptr</span>(t.keysize))
+	&#125;
+
+	<span class="comment">//把新的key,value存储到正当的位置</span>
+	<span class="keyword">if</span> t.indirectkey() &#123;<span class="comment">//申请key的内存</span>
+		kmem := newobject(t.key)
+		*(*unsafe.Pointer)(insertk) = kmem
+		insertk = kmem
+	&#125;
+	<span class="keyword">if</span> t.indirectelem() &#123;<span class="comment">////申请value的内存</span>
+		vmem := newobject(t.elem)
+		*(*unsafe.Pointer)(elem) = vmem
+	&#125;
+	typedmemmove(t.key, insertk, key)<span class="comment">//存储key</span>
+	*inserti = top<span class="comment">//存储tophash</span>
+	h.count++ <span class="comment">//不存在的key就计数+1</span>
+<span class="comment">//看到这里的同学可能会有疑问，value啥时候存储呢，可以看到最终把value地址elem返回</span>
+<span class="comment">//在调用完本函数后会将真实的value赋给elem,本函数并不会设置value的值</span>
+done:
+	<span class="keyword">if</span> h.flags&amp;hashWriting == <span class="number">0</span> &#123;
+		fatal(<span class="string">&quot;concurrent map writes&quot;</span>)
+	&#125;
+	h.flags &amp;^= hashWriting
+	<span class="keyword">if</span> t.indirectelem() &#123;
+		elem = *((*unsafe.Pointer)(elem))
+	&#125;
+	<span class="keyword">return</span> elem
+&#125;</code></pre>
+
+<h4 id="2、溢出桶申请策略"><a href="#2、溢出桶申请策略" class="headerlink" title="2、溢出桶申请策略"></a>2、溢出桶申请策略</h4><p>通过阅读mapassign函数源码，我们知道h.newoverflow函数会做溢出桶申请的工作。</p>
+<p>通过阅读mapassign函数源码，我们知道h.newoverflow函数会做溢出桶申请的工作。</p>
+<p>为什么ovf.overflow(t) &#x3D;&#x3D; nil 的判定为false就知道该桶是预申请的溢出桶的最后一个呢？<br>细心的同学应该还记得2.2小节的makeBucketArray函数，关键代码如下：</p>
+<pre><code class="highlight go"><span class="keyword">if</span> base != nbuckets &#123;
+		nextOverflow = (*bmap)(add(buckets, base*<span class="type">uintptr</span>(t.bucketsize)))<span class="comment">//找到属于溢出桶的那部分内存</span>
+		last := (*bmap)(add(buckets, (nbuckets<span class="number">-1</span>)*<span class="type">uintptr</span>(t.bucketsize)))<span class="comment">//找到最后一个溢出桶</span>
+		last.setoverflow(t, (*bmap)(buckets))<span class="comment">//设置最后一个溢出桶的溢出指针（即bmap的overflow字段）为第一个桶，这时只是为了占个位</span>
+	&#125;</code></pre>
+
+<p>可以看到当初始化map的时候，如果需要预申请溢出桶，就会特地找到最后一个溢出桶，并将其溢出桶指针设置为buckets，即非空。</p>
+<pre><code class="highlight go"><span class="function"><span class="keyword">func</span> <span class="params">(h *hmap)</span></span> newoverflow(t *maptype, b *bmap) *bmap &#123;
+	<span class="keyword">var</span> ovf *bmap
+	<span class="keyword">if</span> h.extra != <span class="literal">nil</span> &amp;&amp; h.extra.nextOverflow != <span class="literal">nil</span> &#123;<span class="comment">//使用预申请的溢出桶，详见2.2节makeBucketArray函数</span>
+		<span class="comment">// We have preallocated overflow buckets available，See makeBucketArray for more details.</span>
+		ovf = h.extra.nextOverflow<span class="comment">//预申请的溢出桶</span>
+		<span class="keyword">if</span> ovf.overflow(t) == <span class="literal">nil</span> &#123;<span class="comment">//判断ovf的溢出桶指针是否为nil，不为nil的话表示则是nextOverflow最后一个桶了</span>
+			<span class="comment">// We&#x27;re not at the end of the preallocated overflow buckets. Bump the pointer.</span>
+			h.extra.nextOverflow = (*bmap)(add(unsafe.Pointer(ovf), <span class="type">uintptr</span>(t.bucketsize)))<span class="comment">//ovf不是最后一个桶的话就将h.extra.nextOverflow后移</span>
+		&#125; <span class="keyword">else</span> &#123;
+			<span class="comment">// This is the last preallocated overflow bucket， Reset the overflow pointer on this bucket,</span>
+			<span class="comment">//which was set to a non-nil sentinel value.</span>
+			ovf.setoverflow(t, <span class="literal">nil</span>)<span class="comment">//最后一个桶就把其溢出桶指针重置为nil</span>
+			h.extra.nextOverflow = <span class="literal">nil</span><span class="comment">//设为nil，表示预申请的溢出桶耗尽，后续就要申请内存了</span>
+		&#125;
+	&#125; <span class="keyword">else</span> &#123;
+		ovf = (*bmap)(newobject(t.bucket))<span class="comment">//申请一个溢出桶</span>
+	&#125;
+	h.incrnoverflow()<span class="comment">//溢出桶计数</span>
+	<span class="keyword">if</span> t.bucket.ptrdata == <span class="number">0</span> &#123;
+		h.createOverflow()<span class="comment">//初始化溢出桶管理</span>
+		*h.extra.overflow = <span class="built_in">append</span>(*h.extra.overflow, ovf)<span class="comment">//放到溢出桶数组中</span>
+	&#125;
+	b.setoverflow(t, ovf)
+	<span class="keyword">return</span> ovf
+&#125;
+
+<span class="comment">// To keep hmap small, noverflow is a uint16.</span>
+<span class="comment">// When there are few buckets, noverflow is an exact count.</span>
+<span class="comment">// When there are many buckets, noverflow is an approximate count.</span>
+<span class="comment">//溢出桶计数，可以看到当溢出桶个数较小的时候其值是准确的，过大就只是一个近似值</span>
+<span class="function"><span class="keyword">func</span> <span class="params">(h *hmap)</span></span> incrnoverflow() &#123;
+	<span class="keyword">if</span> h.B &lt; <span class="number">16</span> &#123;
+		h.noverflow++
+		<span class="keyword">return</span>
+	&#125;
+	mask := <span class="type">uint32</span>(<span class="number">1</span>)&lt;&lt;(h.B<span class="number">-15</span>) - <span class="number">1</span>
+	<span class="comment">// Example: if h.B == 18, then mask == 7, and fastrand &amp; 7 == 0 with probability 1/8.</span>
+	<span class="keyword">if</span> fastrand()&amp;mask == <span class="number">0</span> &#123;
+		h.noverflow++
+	&#125;
+&#125;</code></pre>
+
+<p>所以可以看出，对于溢出桶的管理分两部分：</p>
+<ul>
+<li>h.extra.nextOverflow是预申请的溢出桶，其与正常桶是在同一个数组。</li>
+<li>h.extra.overflow是当预申请的溢出桶没有的时候才会被初始化，是独立申请的。</li>
+</ul>
+<h3 id="五、map的删除"><a href="#五、map的删除" class="headerlink" title="五、map的删除"></a>五、map的删除</h3><p>删除与插入差不多，只不过找到后要对相应空，找不到就直接返回，这里简单说下。</p>
+<pre><code class="highlight go"><span class="function"><span class="keyword">func</span> <span class="title">mapdelete</span><span class="params">(t *maptype, h *hmap, key unsafe.Pointer)</span></span> &#123;
+  <span class="comment">//省略代码...</span>
+	<span class="keyword">if</span> h == <span class="literal">nil</span> || h.count == <span class="number">0</span> &#123;<span class="comment">//向未初始化的map中插入数据会panic</span>
+		<span class="keyword">if</span> t.hashMightPanic() &#123;
+			t.hasher(key, <span class="number">0</span>) <span class="comment">// see issue 23734</span>
+		&#125;
+		<span class="keyword">return</span>
+	&#125;
+	<span class="keyword">if</span> h.flags&amp;hashWriting != <span class="number">0</span> &#123;<span class="comment">//如果map正在写，不允许删除，否则panic</span>
+		fatal(<span class="string">&quot;concurrent map writes&quot;</span>)
+	&#125;
+	hash := t.hasher(key, <span class="type">uintptr</span>(h.hash0))<span class="comment">// 计算key的hash值</span>
+	h.flags ^= hashWriting<span class="comment">//设置map状态标志位为正在写</span>
+
+	bucket := hash &amp; bucketMask(h.B)<span class="comment">// 计算key所在桶的内存偏移量</span>
+	<span class="keyword">if</span> h.growing() &#123;<span class="comment">//如果map正在扩容</span>
+		growWork(t, h, bucket)<span class="comment">//先把key所映射的旧桶内容迁移到新的桶中，详情待后续map 扩容章节讲解</span>
+	&#125;
+	b := (*bmap)(add(h.buckets, bucket*<span class="type">uintptr</span>(t.bucketsize)))
+	bOrig := b
+	top := tophash(hash)<span class="comment">//计算tophash值，取hash高8位</span>
+search:
+	<span class="keyword">for</span> ; b != <span class="literal">nil</span>; b = b.overflow(t) &#123;<span class="comment">//循环遍历正常桶和溢出桶</span>
+		<span class="keyword">for</span> i := <span class="type">uintptr</span>(<span class="number">0</span>); i &lt; bucketCnt; i++ &#123;
+			<span class="keyword">if</span> b.tophash[i] != top &#123;
+				<span class="keyword">if</span> b.tophash[i] == emptyRest &#123;<span class="comment">//如果遇到emptyRest标志位还没找到，直接跳出循环即可</span>
+					<span class="keyword">break</span> search
+				&#125;
+				<span class="keyword">continue</span> <span class="comment">//tophash值不相等就继续循环</span>
+			&#125;
+			k := add(unsafe.Pointer(b), dataOffset+i*<span class="type">uintptr</span>(t.keysize))
+			k2 := k
+			<span class="keyword">if</span> t.indirectkey() &#123;
+				k2 = *((*unsafe.Pointer)(k2))
+			&#125;
+			<span class="keyword">if</span> !t.key.equal(key, k2) &#123;<span class="comment">//此key不等于要删除的key，就继续找</span>
+				<span class="keyword">continue</span>
+			&#125;
+			<span class="comment">//找到了，清除key</span>
+			<span class="keyword">if</span> t.indirectkey() &#123;
+				*(*unsafe.Pointer)(k) = <span class="literal">nil</span>
+			&#125; <span class="keyword">else</span> <span class="keyword">if</span> t.key.ptrdata != <span class="number">0</span> &#123;
+				memclrHasPointers(k, t.key.size)
+			&#125;
+			<span class="comment">//清除value</span>
+			e := add(unsafe.Pointer(b), dataOffset+bucketCnt*<span class="type">uintptr</span>(t.keysize)+i*<span class="type">uintptr</span>(t.elemsize))
+			<span class="keyword">if</span> t.indirectelem() &#123;
+				*(*unsafe.Pointer)(e) = <span class="literal">nil</span>
+			&#125; <span class="keyword">else</span> <span class="keyword">if</span> t.elem.ptrdata != <span class="number">0</span> &#123;
+				memclrHasPointers(e, t.elem.size)
+			&#125; <span class="keyword">else</span> &#123;
+				memclrNoHeapPointers(e, t.elem.size)
+			&#125;
+			b.tophash[i] = emptyOne<span class="comment">//对应tophash的值设置空标志位</span>
+			<span class="comment">// If the bucket now ends in a bunch of emptyOne states,</span>
+			<span class="comment">// change those to emptyRest states.</span>
+			<span class="comment">// It would be nice to make this a separate function, but</span>
+			<span class="comment">// for loops are not currently inlineable.</span>
+			<span class="keyword">if</span> i == bucketCnt<span class="number">-1</span> &#123;
+				<span class="keyword">if</span> b.overflow(t) != <span class="literal">nil</span> &amp;&amp; b.overflow(t).tophash[<span class="number">0</span>] != emptyRest &#123;<span class="comment">//如果当前桶的溢出桶非空桶，表示后面还有键值对</span>
+					<span class="keyword">goto</span> notLast
+				&#125;
+			&#125; <span class="keyword">else</span> &#123;
+				<span class="keyword">if</span> b.tophash[i+<span class="number">1</span>] != emptyRest &#123;
+					<span class="keyword">goto</span> notLast
+				&#125;
+			&#125;
+			<span class="keyword">for</span> &#123;<span class="comment">//设置tophash标志位为emptyRest,表示此index之后(包括溢出桶)不存在键值对了，减少查找时的无效遍历</span>
+				b.tophash[i] = emptyRest
+				<span class="comment">//省略代码...</span>
+			&#125;
+		notLast:
+			h.count--
+			<span class="comment">// Reset the hash seed to make it more difficult for attackers to</span>
+			<span class="comment">// repeatedly trigger hash collisions. See issue 25237.</span>
+			<span class="keyword">if</span> h.count == <span class="number">0</span> &#123;
+				h.hash0 = fastrand()<span class="comment">//重置hash种子</span>
+			&#125;
+			<span class="keyword">break</span> search
+		&#125;
+	&#125;
+
+	<span class="keyword">if</span> h.flags&amp;hashWriting == <span class="number">0</span> &#123;
+		fatal(<span class="string">&quot;concurrent map writes&quot;</span>)
+	&#125;
+	h.flags &amp;^= hashWriting
+&#125;
+</code></pre>
+
+<h3 id="六、map的扩容与迁移"><a href="#六、map的扩容与迁移" class="headerlink" title="六、map的扩容与迁移"></a>六、map的扩容与迁移</h3><h4 id="1、扩容条件"><a href="#1、扩容条件" class="headerlink" title="1、扩容条件"></a>1、扩容条件</h4><p>扩容有两个条件：</p>
+<ul>
+<li>当前负载因子大于6.5；</li>
+<li>有过多的溢出桶</li>
+</ul>
+<h5 id="当前负载因子大于6-5"><a href="#当前负载因子大于6-5" class="headerlink" title="当前负载因子大于6.5"></a>当前负载因子大于6.5</h5><pre><code class="highlight go"><span class="function"><span class="keyword">func</span> <span class="title">overLoadFactor</span><span class="params">(count <span class="type">int</span>, B <span class="type">uint8</span>)</span></span> <span class="type">bool</span> &#123;
+	<span class="keyword">return</span> count &gt; bucketCnt &amp;&amp; <span class="type">uintptr</span>(count) &gt; loadFactorNum*(bucketShift(B)/loadFactorDen)
+&#125;</code></pre>
+
+<p>逻辑简单，就是当前map键值对个数count除以桶个数2^B &gt; 6.5，当前负载过小说明空间利用率低，负载过大说明冲突严重，存取效率低。</p>
+<h5 id="有过多的溢出桶"><a href="#有过多的溢出桶" class="headerlink" title="有过多的溢出桶"></a>有过多的溢出桶</h5><pre><code class="highlight go"><span class="function"><span class="keyword">func</span> <span class="title">tooManyOverflowBuckets</span><span class="params">(noverflow <span class="type">uint16</span>, B <span class="type">uint8</span>)</span></span> <span class="type">bool</span> &#123;
+	<span class="keyword">if</span> B &gt; <span class="number">15</span> &#123;
+		B = <span class="number">15</span>
+	&#125;
+	<span class="comment">// The compiler doesn&#x27;t see here that B &lt; 16; mask B to generate shorter shift code.</span>
+	<span class="keyword">return</span> noverflow &gt;= <span class="type">uint16</span>(<span class="number">1</span>)&lt;&lt;(B&amp;<span class="number">15</span>)
+&#125;</code></pre>
+
+<p>当B&lt;16时，溢出桶个数 大于正常桶个数就属于有过多溢出桶；<br>当B&gt;16时，溢出桶个数 大于2^15就属于有过多溢出桶；</p>
+<h4 id="2、扩容"><a href="#2、扩容" class="headerlink" title="2、扩容"></a>2、扩容</h4><p>扩容发生在插入时，如果负载因子大于6.5则进行增量扩容，否则是等量扩容，因为等量扩容时桶个数不变，所以key在新桶的索引也不变<br>等量扩容也叫伪缩容，它只是把减少溢出桶的数量，并不会减少正常桶数量<br>扩容逻辑简单，重新申请一块内存，旧的桶暂时放到h.oldbuckets,h.extra.oldoverflow字段上。</p>
+<pre><code class="highlight go"><span class="function"><span class="keyword">func</span> <span class="title">hashGrow</span><span class="params">(t *maptype, h *hmap)</span></span> &#123;
+	<span class="comment">// If we&#x27;ve hit the load factor, get bigger.</span>
+	<span class="comment">// Otherwise, there are too many overflow buckets,</span>
+	<span class="comment">// so keep the same number of buckets and &quot;grow&quot; laterally.</span>
+	bigger := <span class="type">uint8</span>(<span class="number">1</span>)
+	<span class="keyword">if</span> !overLoadFactor(h.count+<span class="number">1</span>, h.B) &#123;<span class="comment">//如果不满足负载因子大于6.5，但满足有过多溢出桶，说明键值对存储不够紧凑，浪费了大量空间</span>
+		bigger = <span class="number">0</span>
+		h.flags |= sameSizeGrow<span class="comment">//等量扩容</span>
+	&#125;
+	oldbuckets := h.buckets
+	newbuckets, nextOverflow := makeBucketArray(t, h.B+bigger, <span class="literal">nil</span>)<span class="comment">//重新申请内存，不管是增量扩容还是等量扩容</span>
+
+	flags := h.flags &amp;^ (iterator | oldIterator)
+	<span class="keyword">if</span> h.flags&amp;iterator != <span class="number">0</span> &#123;
+		flags |= oldIterator
+	&#125;
+	<span class="comment">// commit the grow (atomic wrt gc)</span>
+	h.B += bigger
+	h.flags = flags
+	h.oldbuckets = oldbuckets<span class="comment">//将旧的桶转移</span>
+	h.buckets = newbuckets<span class="comment">//设置新的桶</span>
+	h.nevacuate = <span class="number">0</span>
+	h.noverflow = <span class="number">0</span><span class="comment">//</span>
+
+	<span class="keyword">if</span> h.extra != <span class="literal">nil</span> &amp;&amp; h.extra.overflow != <span class="literal">nil</span> &#123;
+		<span class="comment">// Promote current overflow buckets to the old generation.</span>
+		<span class="keyword">if</span> h.extra.oldoverflow != <span class="literal">nil</span> &#123;
+			throw(<span class="string">&quot;oldoverflow is not nil&quot;</span>)
+		&#125;
+		h.extra.oldoverflow = h.extra.overflow <span class="comment">//将旧的溢出桶转移</span>
+		h.extra.overflow = <span class="literal">nil</span>
+	&#125;
+	<span class="keyword">if</span> nextOverflow != <span class="literal">nil</span> &#123;
+		<span class="keyword">if</span> h.extra == <span class="literal">nil</span> &#123;
+			h.extra = <span class="built_in">new</span>(mapextra)
+		&#125;
+		h.extra.nextOverflow = nextOverflow<span class="comment">//设置新的预申请的溢出桶</span>
+	&#125;
+&#125;</code></pre>
+
+<h4 id="3、迁移"><a href="#3、迁移" class="headerlink" title="3、迁移"></a>3、迁移</h4><p>迁移发生在插入和删除时，并且每次最多迁移2个bucket,一个是插入删除key所映射的旧桶，另一个是按照迁移进度排到的旧桶，这样就能保证一定能迁移完，如果只迁移插入删除key所映射的旧桶，虽说严格遵循了copy on write,但可能会导致很久很久也迁不完。</p>
+<blockquote>
+<p>迁移插入删除key所映射的旧桶，不表示旧桶中一定包含该key。</p>
+</blockquote>
+<pre><code class="highlight go"><span class="function"><span class="keyword">func</span> <span class="title">growWork</span><span class="params">(t *maptype, h *hmap, bucket <span class="type">uintptr</span>)</span></span> &#123;
+	<span class="comment">// make sure we evacuate the oldbucket corresponding to the bucket we&#x27;re about to use</span>
+	evacuate(t, h, bucket&amp;h.oldbucketmask())<span class="comment">//优先迁移插入删除key所映射的旧桶</span>
+	<span class="comment">// evacuate one more oldbucket to make progress on growing</span>
+	<span class="keyword">if</span> h.growing() &#123;
+		evacuate(t, h, h.nevacuate)<span class="comment">//按正常的迁移进度迁</span>
+	&#125;
+&#125;
+<span class="function"><span class="keyword">func</span> <span class="title">evacuate</span><span class="params">(t *maptype, h *hmap, oldbucket <span class="type">uintptr</span>)</span></span> &#123;
+	b := (*bmap)(add(h.oldbuckets, oldbucket*<span class="type">uintptr</span>(t.bucketsize)))
+	newbit := h.noldbuckets()<span class="comment">//旧桶的个数</span>
+	<span class="keyword">if</span> !evacuated(b) &#123;<span class="comment">//判定下当前桶是否迁移过了，已经迁移的不操作了，否则进行迁移操作</span>
+		<span class="comment">//迁移旧桶及其溢出桶代码 ...</span>
+	&#125;
+
+	<span class="keyword">if</span> oldbucket == h.nevacuate &#123;
+		advanceEvacuationMark(h, t, newbit)<span class="comment">//更新迁移进度</span>
+	&#125;
+&#125;
+<span class="function"><span class="keyword">func</span> <span class="title">advanceEvacuationMark</span><span class="params">(h *hmap, t *maptype, newbit <span class="type">uintptr</span>)</span></span> &#123;
+	h.nevacuate++
+	stop := h.nevacuate + <span class="number">1024</span>
+	<span class="keyword">if</span> stop &gt; newbit &#123;
+		stop = newbit
+	&#125;
+	<span class="keyword">for</span> h.nevacuate != stop &amp;&amp; bucketEvacuated(t, h, h.nevacuate) &#123;<span class="comment">//如果下一个旧桶也迁移完了，就令h.nevacuate++</span>
+		h.nevacuate++
+	&#125;
+	<span class="keyword">if</span> h.nevacuate == newbit &#123; <span class="comment">// 表示迁移完了，将h.oldbuckets与h.extra.oldoverflow置空</span>
+		h.oldbuckets = <span class="literal">nil</span>
+		<span class="keyword">if</span> h.extra != <span class="literal">nil</span> &#123;
+			h.extra.oldoverflow = <span class="literal">nil</span>
+		&#125;
+		h.flags &amp;^= sameSizeGrow
+	&#125;
+&#125;</code></pre></div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
