@@ -1,0 +1,93 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Go语言之slice</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Go语言之slice</h1><div class="time">2025-09-03</div><h2 id="底层原理"><a href="#底层原理" class="headerlink" title="底层原理"></a>底层原理</h2><p>切片（slice）是对数组一个连续片段的引用，所以切片是一个引用类型。切片是一个长度可变的数组。</p>
+<pre><code class="highlight go(runtime/slice.go)">type slice struct &#123;
+	array unsafe.Pointer
+	len   int
+	cap   int
+&#125;</code></pre>
+
+<p>字段说明：</p>
+<ul>
+<li>array：底层数组的地址</li>
+<li>len：切片的长度</li>
+<li>cap：切片的容量</li>
+</ul>
+<h2 id="切片的创建"><a href="#切片的创建" class="headerlink" title="切片的创建"></a>切片的创建</h2><pre><code class="highlight go"><span class="function"><span class="keyword">func</span> <span class="title">makeslice</span><span class="params">(et *_type, <span class="built_in">len</span>, <span class="built_in">cap</span> <span class="type">int</span>)</span></span> unsafe.Pointer &#123;
+	mem, overflow := math.MulUintptr(et.Size_, <span class="type">uintptr</span>(<span class="built_in">cap</span>))
+	...
+
+	<span class="keyword">return</span> mallocgc(mem, et, <span class="literal">true</span>)
+&#125;</code></pre>
+
+<p>切片的创建主要就是根据容量去申请一块内存。</p>
+<h2 id="切片的扩容"><a href="#切片的扩容" class="headerlink" title="切片的扩容"></a>切片的扩容</h2><p>扩容是当切片的长度大于容量的时候，底层数组已经装不下时</p>
+<pre><code class="highlight go"><span class="function"><span class="keyword">func</span> <span class="title">growslice</span><span class="params">(oldPtr unsafe.Pointer, newLen, oldCap, num <span class="type">int</span>, et *_type)</span></span> slice &#123;
+    <span class="comment">// newLen：新切片的长度</span>
+    <span class="comment">// num：添加的元素数</span>
+    <span class="comment">// oldLen：旧切片（原来的切片的长度）</span>
+	oldLen := newLen - num
+    <span class="comment">// ...</span>
+    <span class="comment">// 新的长度小于0直接报panic</span>
+	<span class="keyword">if</span> newLen &lt; <span class="number">0</span> &#123;
+		<span class="built_in">panic</span>(errorString(<span class="string">&quot;growslice: len out of range&quot;</span>))
+	&#125;
+
+	<span class="keyword">if</span> et.Size_ == <span class="number">0</span> &#123;
+		<span class="keyword">return</span> slice&#123;unsafe.Pointer(&amp;zerobase), newLen, newLen&#125;
+	&#125;
+
+    <span class="comment">// 计算新切片的容量</span>
+	newcap := nextslicecap(newLen, oldCap)
+    ...
+
+	<span class="keyword">var</span> p unsafe.Pointer
+	<span class="keyword">if</span> !et.Pointers() &#123;
+		p = mallocgc(capmem, <span class="literal">nil</span>, <span class="literal">false</span>)
+		memclrNoHeapPointers(add(p, newlenmem), capmem-newlenmem)
+	&#125; <span class="keyword">else</span> &#123;
+		p = mallocgc(capmem, et, <span class="literal">true</span>)
+		<span class="keyword">if</span> lenmem &gt; <span class="number">0</span> &amp;&amp; writeBarrier.enabled &#123;
+			bulkBarrierPreWriteSrcOnly(<span class="type">uintptr</span>(p), <span class="type">uintptr</span>(oldPtr), lenmem-et.Size_+et.PtrBytes, et)
+		&#125;
+	&#125;
+    <span class="comment">// 移动</span>
+	memmove(p, oldPtr, lenmem)
+
+	<span class="keyword">return</span> slice&#123;p, newLen, newcap&#125;
+&#125;</code></pre>
+
+<p>计算新切片的容量函数：</p>
+<pre><code class="highlight go"><span class="function"><span class="keyword">func</span> <span class="title">nextslicecap</span><span class="params">(newLen, oldCap <span class="type">int</span>)</span></span> <span class="type">int</span> &#123;
+	newcap := oldCap
+	doublecap := newcap + newcap
+	<span class="keyword">if</span> newLen &gt; doublecap &#123;
+        <span class="comment">// 旧容量的2倍还小于新长度，直接返回新长度</span>
+		<span class="keyword">return</span> newLen
+	&#125;
+
+    <span class="comment">// 旧容量的2倍大于新长度</span>
+	<span class="keyword">const</span> threshold = <span class="number">256</span>
+	<span class="keyword">if</span> oldCap &lt; threshold &#123;
+        <span class="comment">// 小于256的直接返回旧容量的2倍</span>
+		<span class="keyword">return</span> doublecap
+	&#125;
+	<span class="keyword">for</span> &#123;
+        <span class="comment">// 新容量=新容量 + 新容量/4 + 192 </span>
+        <span class="comment">// 右移2位就是除以4</span>
+		newcap += (newcap + <span class="number">3</span>*threshold) &gt;&gt; <span class="number">2</span>
+
+        <span class="comment">// 直到新的容量大于等于新的长度才推出循环</span>
+		<span class="keyword">if</span> <span class="type">uint</span>(newcap) &gt;= <span class="type">uint</span>(newLen) &#123;
+			<span class="keyword">break</span>
+		&#125;
+	&#125;
+
+	<span class="keyword">if</span> newcap &lt;= <span class="number">0</span> &#123;
+		<span class="keyword">return</span> newLen
+	&#125;
+	<span class="keyword">return</span> newcap
+&#125;</code></pre></div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
