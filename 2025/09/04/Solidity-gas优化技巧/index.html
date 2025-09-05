@@ -1,0 +1,280 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Solidity Gas优化技巧</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Solidity Gas优化技巧</h1><div class="time">2025-09-04</div><ul class="tags"><li><span>#</span><a href="/tags/solidity/">solidity</a></li></ul><h2 id="存储打包"><a href="#存储打包" class="headerlink" title="存储打包"></a>存储打包</h2><p>下面两个合约，如下：</p>
+<p>未优化的合约：</p>
+<pre><code class="highlight solidity">// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract PackingBad &#123;
+    uint256 public a; // 32 bytes
+    uint8 public b;   // 1 byte
+    uint256 public c; // 32 bytes
+    uint8 public d;   // 1 byte
+    uint256 public e; // 32 bytes
+    uint8 public f;   // 1 byte
+
+    constructor() &#123;
+    
+    &#125;
+
+    function setValue() public &#123;
+        a = 1;
+        b = 2;
+        c = 3;
+        d = 4;
+        e = 5;
+        f = 6;
+    &#125;
+&#125;</code></pre>
+
+<p>优化过后的合约：</p>
+<pre><code class="highlight solidity">// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract PackingGood &#123;
+    uint256 public a; // 32 bytes
+    uint256 public c; // 32 bytes
+    uint256 public e; // 32 bytes
+    uint8 public b; // 1 byte
+    uint8 public d; // 1 byte
+    uint8 public f; // 1 byte
+
+    constructor() &#123;
+    &#125;
+
+    function setValues() public &#123;
+        a = 1;
+        b = 2;
+        c = 3;
+        d = 4;
+        e = 5;
+        f = 6;
+    &#125;
+&#125;</code></pre>
+
+<p>我们在编写两个测试函数，使用<code>forge test --gas-report</code>来测试，测试结果如下：</p>
+<pre><code class="highlight plaintext">╭----------------------------------------+-----------------+--------+--------+--------+---------╮
+| src/PackingBad.sol:PackingBad Contract |                 |        |        |        |         |
++===============================================================================================+
+| Deployment Cost                        | Deployment Size |        |        |        |         |
+|----------------------------------------+-----------------+--------+--------+--------+---------|
+| 193491                                 | 677             |        |        |        |         |
+|----------------------------------------+-----------------+--------+--------+--------+---------|
+|                                        |                 |        |        |        |         |
+|----------------------------------------+-----------------+--------+--------+--------+---------|
+| Function Name                          | Min             | Avg    | Median | Max    | # Calls |
+|----------------------------------------+-----------------+--------+--------+--------+---------|
+| setValue                               | 154046          | 154046 | 154046 | 154046 | 1       |
+╰----------------------------------------+-----------------+--------+--------+--------+---------╯
+
+╭------------------------------------------+-----------------+--------+--------+--------+---------╮
+| src/PackingGood.sol:PackingGood Contract |                 |        |        |        |         |
++=================================================================================================+
+| Deployment Cost                          | Deployment Size |        |        |        |         |
+|------------------------------------------+-----------------+--------+--------+--------+---------|
+| 194379                                   | 681             |        |        |        |         |
+|------------------------------------------+-----------------+--------+--------+--------+---------|
+|                                          |                 |        |        |        |         |
+|------------------------------------------+-----------------+--------+--------+--------+---------|
+| Function Name                            | Min             | Avg    | Median | Max    | # Calls |
+|------------------------------------------+-----------------+--------+--------+--------+---------|
+| setValues                                | 110348          | 110348 | 110348 | 110348 | 1       |
+╰------------------------------------------+-----------------+--------+--------+--------+---------╯</code></pre>
+
+<p>合约gas优化从15万多到11万多，只是调整了变量的声明顺序，其实优化的背后是solidity编译器的功劳。当solidity编译器遇到连续的多个占据位数较少的变量声明时，solidity编译器会选择打包这些变量，来进行一次存储槽写入。对于上面的合约<strong>PackingBad</strong>不满足这一点，它的变量b、d、f会逐个写入，六次存储槽写入远高于四次写入。</p>
+<h2 id="常量"><a href="#常量" class="headerlink" title="常量"></a>常量</h2><p>solidity中，存在<code>constant</code>和<code>immutable</code>两种常量声明方案，它们的区别如下：</p>
+<ul>
+<li>constant：在solidity编译过程中被写入字节码</li>
+<li>immutable：在solidity合约部署过程中被写入字节码，所以我们可以在构造函数<code>constructor</code>内对其进行赋值</li>
+</ul>
+<p>需要说明的是，运行时低成本gas对应着部署时高成本gas，但是在部署时多消耗的gas肯定远小于多次调用时消耗的gas。请看源码：</p>
+<pre><code class="highlight solidity">// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract ConstantBad &#123;
+    uint256 public A = 1;
+
+    constructor() &#123;
+    &#125;
+
+    function getValues() public view returns (uint256) &#123;
+        return A;
+    &#125;
+&#125;</code></pre>
+
+<pre><code class="highlight solidity">// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract ConstantGood &#123;
+    uint256 public constant A = 1;
+
+    constructor() &#123;
+    &#125;
+
+    function getValues() public pure returns (uint256) &#123;
+        return A;
+    &#125;
+&#125;</code></pre>
+
+<p>我们在编写两个测试函数，使用<code>forge test --gas-report</code>来测试，测试结果如下：</p>
+<pre><code class="highlight plaintext">╭------------------------------------------+-----------------+------+--------+------+---------╮
+| src/ConstantBad.sol:ConstantBad Contract |                 |      |        |      |         |
++=============================================================================================+
+| Deployment Cost                          | Deployment Size |      |        |      |         |
+|------------------------------------------+-----------------+------+--------+------+---------|
+| 122324                                   | 246             |      |        |      |         |
+|------------------------------------------+-----------------+------+--------+------+---------|
+|                                          |                 |      |        |      |         |
+|------------------------------------------+-----------------+------+--------+------+---------|
+| Function Name                            | Min             | Avg  | Median | Max  | # Calls |
+|------------------------------------------+-----------------+------+--------+------+---------|
+| getValues                                | 2409            | 2409 | 2409   | 2409 | 1       |
+╰------------------------------------------+-----------------+------+--------+------+---------╯
+
+╭--------------------------------------------+-----------------+-----+--------+-----+---------╮
+| src/ConstantGood.sol:ConstantGood Contract |                 |     |        |     |         |
++=============================================================================================+
+| Deployment Cost                            | Deployment Size |     |        |     |         |
+|--------------------------------------------+-----------------+-----+--------+-----+---------|
+| 100155                                     | 242             |     |        |     |         |
+|--------------------------------------------+-----------------+-----+--------+-----+---------|
+|                                            |                 |     |        |     |         |
+|--------------------------------------------+-----------------+-----+--------+-----+---------|
+| Function Name                              | Min             | Avg | Median | Max | # Calls |
+|--------------------------------------------+-----------------+-----+--------+-----+---------|
+| getValues                                  | 310             | 310 | 310    | 310 | 1       |
+╰--------------------------------------------+-----------------+-----+--------+-----+---------╯</code></pre>
+
+<p>可能我这个合约比较简单，我们看调用，一个gas消耗2400多，一个才300多。</p>
+<h2 id="缓存"><a href="#缓存" class="headerlink" title="缓存"></a>缓存</h2><p>缓存可以使用临时变量来避免多次从存储中读取，每次从存储读取消耗2100gas，看代码：</p>
+<pre><code class="highlight solidity">// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract CacheBad &#123;
+    uint256 public count = 20;
+
+    constructor() &#123;
+    &#125;
+
+    function add(uint256 input) public view returns (uint256) &#123;
+        uint256 res = 0;
+        
+        for (uint256 i = 0; i &lt; count; i++) &#123;
+            // do nothing
+            res += input;
+        &#125;
+        return res;
+    &#125;
+&#125;</code></pre>
+
+<pre><code class="highlight solidity">// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract CacheGood &#123;
+    uint256 public count = 20;
+
+    constructor() &#123;
+    &#125;
+
+    function add(uint256 input) public view returns (uint256) &#123;
+        uint256 res = 0;
+        uint256 aa = count;
+
+        for (uint256 i = 0; i &lt; aa; i++) &#123;
+            res += input;
+        &#125;
+        return res;
+    &#125;
+&#125;</code></pre>
+
+<p>我们在编写两个测试函数，使用<code>forge test --gas-report</code>来测试，测试结果如下：</p>
+<pre><code class="highlight plaintext">╭------------------------------------+-----------------+------+--------+------+---------╮
+| src/CacheBad.sol:CacheBad Contract |                 |      |        |      |         |
++=======================================================================================+
+| Deployment Cost                    | Deployment Size |      |        |      |         |
+|------------------------------------+-----------------+------+--------+------+---------|
+| 179452                             | 515             |      |        |      |         |
+|------------------------------------+-----------------+------+--------+------+---------|
+|                                    |                 |      |        |      |         |
+|------------------------------------+-----------------+------+--------+------+---------|
+| Function Name                      | Min             | Avg  | Median | Max  | # Calls |
+|------------------------------------+-----------------+------+--------+------+---------|
+| add                                | 9701            | 9701 | 9701   | 9701 | 1       |
+╰------------------------------------+-----------------+------+--------+------+---------╯
+
+╭--------------------------------------+-----------------+------+--------+------+---------╮
+| src/CacheGood.sol:CacheGood Contract |                 |      |        |      |         |
++=========================================================================================+
+| Deployment Cost                      | Deployment Size |      |        |      |         |
+|--------------------------------------+-----------------+------+--------+------+---------|
+| 180532                               | 520             |      |        |      |         |
+|--------------------------------------+-----------------+------+--------+------+---------|
+|                                      |                 |      |        |      |         |
+|--------------------------------------+-----------------+------+--------+------+---------|
+| Function Name                        | Min             | Avg  | Median | Max  | # Calls |
+|--------------------------------------+-----------------+------+--------+------+---------|
+| add                                  | 7733            | 7733 | 7733   | 7733 | 1       |
+╰--------------------------------------+-----------------+------+--------+------+---------╯</code></pre>
+
+<p>我们可以观察到将存储变量缓存到内存后，在循环调用过程中节省了大量 gas。</p>
+<h2 id="Calldata与memory"><a href="#Calldata与memory" class="headerlink" title="Calldata与memory"></a>Calldata与memory</h2><p>calldata与memory是EVM的两个重要区域，calldata区域存储来自用户或者其它合约的请求参数，内容不可变，可以通过<code>CALLDATALOAD</code>操作码把内容读取到栈上，也可以通过<code>CALLDATACOPY</code>将内容读取到内存中。其中<code>CALLDATALOAD</code>消耗3gas，<code>CALLDATACOPY</code>取决于具体长度。</p>
+<p>直接看代码：</p>
+<pre><code class="highlight solidity">// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract CallDataBad &#123;
+    string public name;
+
+    function setName(string memory _name) external &#123;
+        name = _name;
+    &#125;
+&#125;</code></pre>
+
+<pre><code class="highlight solidity">// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract CallDataGood &#123;
+    string public name;
+    
+    function setName(string calldata _name) external &#123;
+        name = _name;
+    &#125;
+&#125;</code></pre>
+
+<pre><code class="highlight plaintext">╭------------------------------------------+-----------------+-------+--------+-------+---------╮
+| src/CalldataBad.sol:CallDataBad Contract |                 |       |        |       |         |
++===============================================================================================+
+| Deployment Cost                          | Deployment Size |       |        |       |         |
+|------------------------------------------+-----------------+-------+--------+-------+---------|
+| 394679                                   | 1610            |       |        |       |         |
+|------------------------------------------+-----------------+-------+--------+-------+---------|
+|                                          |                 |       |        |       |         |
+|------------------------------------------+-----------------+-------+--------+-------+---------|
+| Function Name                            | Min             | Avg   | Median | Max   | # Calls |
+|------------------------------------------+-----------------+-------+--------+-------+---------|
+| name                                     | 3298            | 3298  | 3298   | 3298  | 1       |
+|------------------------------------------+-----------------+-------+--------+-------+---------|
+| setName                                  | 45164           | 45164 | 45164  | 45164 | 1       |
+╰------------------------------------------+-----------------+-------+--------+-------+---------╯
+
+╭--------------------------------------------+-----------------+-------+--------+-------+---------╮
+| src/CalldataGood.sol:CallDataGood Contract |                 |       |        |       |         |
++=================================================================================================+
+| Deployment Cost                            | Deployment Size |       |        |       |         |
+|--------------------------------------------+-----------------+-------+--------+-------+---------|
+| 361806                                     | 1458            |       |        |       |         |
+|--------------------------------------------+-----------------+-------+--------+-------+---------|
+|                                            |                 |       |        |       |         |
+|--------------------------------------------+-----------------+-------+--------+-------+---------|
+| Function Name                              | Min             | Avg   | Median | Max   | # Calls |
+|--------------------------------------------+-----------------+-------+--------+-------+---------|
+| name                                       | 3298            | 3298  | 3298   | 3298  | 1       |
+|--------------------------------------------+-----------------+-------+--------+-------+---------|
+| setName                                    | 44701           | 44701 | 44701  | 44701 | 1       |
+╰--------------------------------------------+-----------------+-------+--------+-------+---------╯</code></pre>
+
+<p>上述代码中 CalldataBad 使用 <code>string memory input</code> 作为参数的类型标注，使用此类型标注后就意味着 input 会被从 calldata 内被复制到内存中，而 CalldataGood 使用了 <code>string calldata input</code> 作为类型标注，使用此类型标注不会进行 calldata 的复制转移。</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
