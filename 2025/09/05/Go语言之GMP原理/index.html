@@ -1,0 +1,483 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Go语言之GMP原理</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Go语言之GMP原理</h1><div class="time">2025-09-05</div><ul class="tags"><li><span>#</span><a href="/tags/Go语言/">Go语言</a></li></ul><h2 id="协程的设计"><a href="#协程的设计" class="headerlink" title="协程的设计"></a>协程的设计</h2><p>线程是操作系统调度CPU中执行的基本单元，多线程总是交替的抢占CPU时间片，线程在上下文的切换过程中需要经过操作系统的用户态和内核态的切换。</p>
+<p>Go语言中的协程（G）依然是运行在线程之上的，但是借助语言的调度器，协程只需要在用户态即可完成切换，工作线程是感受不到协程存在的。</p>
+<p>Go在设计上通过逻辑处理器（P）建立起了工作线程与协程之间的关系，最简单的关系模型如下图：</p>
+<p><img src="/../img/gmp.png" alt="GMP关系模型"></p>
+<h3 id="工作线程M"><a href="#工作线程M" class="headerlink" title="工作线程M"></a>工作线程M</h3><p>工作线程是最终运行协程的实体。操作系统中的线程与在运行时代表线程的m结构体进行了绑定：</p>
+<pre><code class="highlight go"><span class="comment">// go/src/runtime/runtime2.go</span>
+
+<span class="keyword">type</span> m <span class="keyword">struct</span> &#123;
+    g0      *g     <span class="comment">// goroutine with scheduling stack</span>
+    tls           [tlsSlots]<span class="type">uintptr</span> <span class="comment">// thread-local storage (for x86 extern register)</span>
+    curg          *g       <span class="comment">// current running goroutine</span>
+    p             puintptr <span class="comment">// attached p for executing go code (nil if not executing go code)</span>
+    nextp         puintptr
+    oldp          puintptr <span class="comment">// the p that was attached before executing a syscall</span>
+    park          note
+  ...</code></pre>
+
+<p>为了执行Go代码，每一个工作线程m都与逻辑处理器p进行绑定，同时记录了线程当前正在运行的用户协程curg。</p>
+<p>每一个工作线程都有一个特殊的协程go0，称为调度协程，其主要作用是执行协程调度，而普通的协程g用于执行用户代码。</p>
+<p>当用户协程g主动让渡、退出或者被抢占时，m内部就需要重新执行协程调度，这时需要从用户协程g切换到调度协程g0，g0调度一个普通协程g来执行用户代码，便从g0又切换回普通协程g。每个工作线程内部都在完成g→g0→g这样的调度循环。</p>
+<p>操作系统的线程与m结构体是通过线程本地存储进行绑定的。普通的全局变量对进程中的所有线程可见，而线程本地存储（tls）中的变量只对当前线程可见。系统线程通过m.tls即可在任意时刻获取到当前线程上的正在运行的协程g，逻辑处理器p，特殊协程g0，线程结构体m等信息。</p>
+<h3 id="逻辑处理器P"><a href="#逻辑处理器P" class="headerlink" title="逻辑处理器P"></a>逻辑处理器P</h3><p>系统线程m想要运行用户协程g，必须先绑定逻辑处理器p。在代码中可以通过<code>runtime.GOMAXPROCS()</code>来具体指定程序需要使用多少个逻辑处理器p。通常指定多少个逻辑处理器p最多就可以同时使用到多少个CPU核心数。</p>
+<p>逻辑处理器p通过结构体p进行定义：</p>
+<pre><code class="highlight go"><span class="keyword">type</span> p <span class="keyword">struct</span> &#123;
+    id          <span class="type">int32</span>
+    status      <span class="type">uint32</span> <span class="comment">// one of pidle/prunning/...</span>
+    schedtick   <span class="type">uint32</span>     <span class="comment">// incremented on every scheduler call</span>
+    syscalltick <span class="type">uint32</span>     <span class="comment">// incremented on every system call</span>
+    m           muintptr   <span class="comment">// back-link to associated m (nil if idle)</span>
+    <span class="comment">// Queue of runnable goroutines. Accessed without lock.</span>
+    runqhead <span class="type">uint32</span>
+    runqtail <span class="type">uint32</span>
+    runq     [<span class="number">256</span>]guintptr
+    runnext guintptr
+  ... 
+&#125;</code></pre>
+
+<p>在p中通过字段m维护其与工作线程m的绑定关系。每一个逻辑处理器p都具有唯一id，以及当前的状态status。如果p的状态为正在运行中，则必然绑定到一个工作线程m上。当逻辑解处理成后，解绑工作线程（m&#x3D;nil），p的状态便是空闲的。</p>
+<p>需要注意的是m与p的数量关系没有绝对的，当m阻塞时，p就会切换到一个空闲的m，当不存在空闲的m，便会创建一个m。所以即使p的数量为1，也会可能创建很多个m出来。</p>
+<p>程序中往往有成千上万的协程存在，不可能同时被执行，协程需要进行调度执行，而那些等待被调度的协程存在运行队列中。go语言的调度器将运行队列分为全局运行队列和局部运行队列。逻辑处理器p中维护着局部运行队列runq。</p>
+<p>局部运行队列是每个p特有的长度为256的数组，该数组模拟了一个循环队列，p.runqhead为对头，p.runqtail为队尾。协程g都从队尾入队，从队头获取。全局运行队列维护在schedt.runq中。</p>
+<p>p中还有一个特殊的runnext字段，用于标识下一个要执行的协程g，如果p.runnext不为空，则会直接执行runnext指向的协程，而不会去p.runq数组中寻找。</p>
+<h3 id="协程g"><a href="#协程g" class="headerlink" title="协程g"></a>协程g</h3><p>协程通常分为特殊的调度协程g0和执行用户代码的普通协程g。它们都是通过结构体g来进行定义：</p>
+<pre><code class="highlight go"><span class="comment">// go/src/runtime/runtime2.go</span>
+
+<span class="keyword">type</span> g <span class="keyword">struct</span> &#123;
+    stack       stack   <span class="comment">// offset known to runtime/cgo</span>
+    m         *m      <span class="comment">// current m; offset known to arm liblink</span>
+    sched     gobuf
+  ...
+&#125;
+
+<span class="comment">// Stack describes a Go execution stack.</span>
+<span class="keyword">type</span> stack <span class="keyword">struct</span> &#123;
+    lo <span class="type">uintptr</span>
+    hi <span class="type">uintptr</span>
+&#125;
+
+<span class="keyword">type</span> gobuf <span class="keyword">struct</span> &#123;
+    sp   <span class="type">uintptr</span>
+    pc   <span class="type">uintptr</span>
+    g    guintptr
+    ctxt unsafe.Pointer
+    ret  <span class="type">uintptr</span>
+    lr   <span class="type">uintptr</span>
+    bp   <span class="type">uintptr</span> <span class="comment">// for framepointer-enabled architectures</span>
+&#125;</code></pre>
+
+<p>协程g中包含了协程的执行栈空间（stack），执行当前协程的工作线程m以及执行现场sched。协程g执行上下文切换时需要保存当前的执行现场，以便在切回协程g时能够继续正常执行。协程g中的执行现场由结构题gobuf定义，其保存了CPU中几个重要寄存器的值以及执行现场属于哪个协程g。</p>
+<h3 id="全局调度信息schedt"><a href="#全局调度信息schedt" class="headerlink" title="全局调度信息schedt"></a>全局调度信息schedt</h3><p>go协程设计中，除了工作线程m，逻辑处理器p，协程g以外，还存在一个存储全局调度信息的的结构体schedt：</p>
+<pre><code class="highlight go"><span class="comment">// go/src/runtime/runtime2.go</span>
+
+<span class="keyword">type</span> schedt <span class="keyword">struct</span> &#123;
+    lock mutex
+
+    midle        muintptr <span class="comment">// idle m&#x27;s waiting for work</span>
+    nmidle       <span class="type">int32</span>    <span class="comment">// number of idle m&#x27;s waiting for work</span>
+    nmidlelocked <span class="type">int32</span>    <span class="comment">// number of locked m&#x27;s waiting for work</span>
+    mnext        <span class="type">int64</span>    <span class="comment">// number of m&#x27;s that have been created and next M ID</span>
+    maxmcount    <span class="type">int32</span>    <span class="comment">// maximum number of m&#x27;s allowed (or die)</span>
+    nmsys        <span class="type">int32</span>    <span class="comment">// number of system m&#x27;s not counted for deadlock</span>
+    nmfreed      <span class="type">int64</span>    <span class="comment">// cumulative number of freed m&#x27;s</span>
+
+    ngsys <span class="type">uint32</span> <span class="comment">// number of system goroutines; updated atomically</span>
+
+    pidle      puintptr <span class="comment">// idle p&#x27;s</span>
+    npidle     <span class="type">uint32</span>
+    nmspinning <span class="type">uint32</span> <span class="comment">// See &quot;Worker thread parking/unparking&quot; comment in proc.go.</span>
+
+    <span class="comment">// Global runnable queue.</span>
+    runq     gQueue
+    runqsize <span class="type">int32</span>
+  
+  <span class="comment">// Global cache of dead G&#x27;s.</span>
+    gFree <span class="keyword">struct</span> &#123;
+        lock    mutex
+        stack   gList <span class="comment">// Gs with stacks</span>
+        noStack gList <span class="comment">// Gs without stacks</span>
+        n       <span class="type">int32</span>
+    &#125;
+  
+    <span class="comment">// freem is the list of m&#x27;s waiting to be freed when their</span>
+    <span class="comment">// m.exited is set. Linked through m.freelink.</span>
+    freem *m
+    ...
+&#125;</code></pre>
+
+<p>schedt中维护了空闲的工作线程midle、空闲的工作线程数量nmidle、等待被释放的线程列表freem、系统协程g的数量ngsys、空闲逻辑处理器pidle、空闲逻辑处理器的数量npidle以及全局运行队列runq及全局运行队列的大小runqsize和处于新建或者被销毁状态的协程g列表gFree等信息。</p>
+<p>schedt中的信息是全局共享的，例如全局运行队列runq被所有p共享，所以schedt中也持有一个锁lock以保证原子性访问。</p>
+<p><img src="/../img/gmp-detail.png" alt="GMP详细示意图"></p>
+<h2 id="协程调度"><a href="#协程调度" class="headerlink" title="协程调度"></a>协程调度</h2><p>我们已经知晓每个工作线程都有一个调度协程g0，专门执行协程的循环调度（g-&gt;g0-&gt;g-&gt;g0），在循环调度中，协程g具体被怎么调度的呢，go语言调度器实现了自己的调度策略。</p>
+<h3 id="调度策略"><a href="#调度策略" class="headerlink" title="调度策略"></a>调度策略</h3><p>工作线程m需要通过协程调度获得具体可运行的某一协程g。获得协程g的一般策略主要包含三大步：</p>
+<ul>
+<li>1、查找p本地的局部运行队列</li>
+<li>2、查找schedt中全局运行队列</li>
+<li>3、窃取其它p中的局部运行队列</li>
+</ul>
+<p>在运行时通过findRunable()函数获取可运行的协程g：</p>
+<pre><code class="highlight go"><span class="comment">// go/src/runtime/proc.go</span>
+
+<span class="comment">// Finds a runnable goroutine to execute.</span>
+<span class="function"><span class="keyword">func</span> <span class="title">findRunnable</span><span class="params">()</span></span> (gp *g, inheritTime, tryWakeP <span class="type">bool</span>) &#123;
+  ...
+  <span class="comment">// Check the global runnable queue once in a while to ensure fairness.</span>
+    <span class="comment">// Otherwise two goroutines can completely occupy the local runqueue</span>
+    <span class="comment">// by constantly respawning each other.</span>
+    <span class="keyword">if</span> _p_.schedtick%<span class="number">61</span> == <span class="number">0</span> &amp;&amp; sched.runqsize &gt; <span class="number">0</span> &#123;
+        lock(&amp;sched.lock)
+        gp = globrunqget(_p_, <span class="number">1</span>)
+        unlock(&amp;sched.lock)
+        <span class="keyword">if</span> gp != <span class="literal">nil</span> &#123;
+            <span class="keyword">return</span> gp, <span class="literal">false</span>, <span class="literal">false</span>
+        &#125;
+    &#125;
+  ...
+  <span class="comment">// local runq</span>
+    <span class="keyword">if</span> gp, inheritTime := runqget(_p_); gp != <span class="literal">nil</span> &#123;
+        <span class="keyword">return</span> gp, inheritTime, <span class="literal">false</span>
+    &#125;
+
+    <span class="comment">// global runq</span>
+    <span class="keyword">if</span> sched.runqsize != <span class="number">0</span> &#123;
+        lock(&amp;sched.lock)
+        gp := globrunqget(_p_, <span class="number">0</span>)
+        unlock(&amp;sched.lock)
+        <span class="keyword">if</span> gp != <span class="literal">nil</span> &#123;
+            <span class="keyword">return</span> gp, <span class="literal">false</span>, <span class="literal">false</span>
+        &#125;
+    &#125;
+  ...
+    <span class="comment">// Spinning Ms: steal work from other Ps.</span>
+    <span class="comment">//</span>
+    <span class="comment">// Limit the number of spinning Ms to half the number of busy Ps.</span>
+    <span class="comment">// This is necessary to prevent excessive CPU consumption when</span>
+    <span class="comment">// GOMAXPROCS&gt;&gt;1 but the program parallelism is low.</span>
+    procs := <span class="type">uint32</span>(gomaxprocs)
+    <span class="keyword">if</span> _g_.m.spinning || <span class="number">2</span>*atomic.Load(&amp;sched.nmspinning) &lt; procs-atomic.Load(&amp;sched.npidle) &#123;
+        <span class="keyword">if</span> !_g_.m.spinning &#123;
+            _g_.m.spinning = <span class="literal">true</span>
+            atomic.Xadd(&amp;sched.nmspinning, <span class="number">1</span>)
+        &#125;
+
+        gp, inheritTime, tnow, w, newWork := stealWork(now)
+        now = tnow
+        <span class="keyword">if</span> gp != <span class="literal">nil</span> &#123;
+            <span class="comment">// Successfully stole.</span>
+            <span class="keyword">return</span> gp, inheritTime, <span class="literal">false</span>
+        &#125;
+    ...
+    &#125;
+&#125;</code></pre>
+
+<p><strong>获取本地运行队列</strong></p>
+<p>在查找可运行的协程g时，首先通过函数runqget()从p本地的运行队列中获取：</p>
+<p>首先尝试从runnext中获取下一个执行的g。当runnext不为空时则返回对应的协程g，如果为空则继续从局部运行队列runq中查找。</p>
+<p>当循环队列的队头runhead和队尾runtail相同时，说明循环队列中没有任何可运行的协程，否则从队列头部获取一个协程返回。</p>
+<p>由于可能存在其它逻辑处理器p来窃取协程，从二造成当前p与其它p同时访问局部队列的情况，因此在此处需要加锁访问，访问结束后释放锁。</p>
+<pre><code class="highlight go"><span class="comment">// go/src/runtime/proc.go</span>
+
+<span class="function"><span class="keyword">func</span> <span class="title">runqget</span><span class="params">(_p_ *p)</span></span> (gp *g, inheritTime <span class="type">bool</span>) &#123;
+    <span class="comment">// If there&#x27;s a runnext, it&#x27;s the next G to run.</span>
+    next := _p_.runnext
+    <span class="comment">// If the runnext is non-0 and the CAS fails, it could only have been stolen by another P,</span>
+    <span class="comment">// because other Ps can race to set runnext to 0, but only the current P can set it to non-0.</span>
+    <span class="comment">// Hence, there&#x27;s no need to retry this CAS if it falls.</span>
+    <span class="keyword">if</span> next != <span class="number">0</span> &amp;&amp; _p_.runnext.cas(next, <span class="number">0</span>) &#123;
+        <span class="keyword">return</span> next.ptr(), <span class="literal">true</span>
+    &#125;
+
+    <span class="keyword">for</span> &#123;
+        h := atomic.LoadAcq(&amp;_p_.runqhead) <span class="comment">// load-acquire, synchronize with other consumers</span>
+        t := _p_.runqtail
+        <span class="keyword">if</span> t == h &#123;
+            <span class="keyword">return</span> <span class="literal">nil</span>, <span class="literal">false</span>
+        &#125;
+        gp := _p_.runq[h%<span class="type">uint32</span>(<span class="built_in">len</span>(_p_.runq))].ptr()
+        <span class="keyword">if</span> atomic.CasRel(&amp;_p_.runqhead, h, h+<span class="number">1</span>) &#123; <span class="comment">// cas-release, commits consume</span>
+            <span class="keyword">return</span> gp, <span class="literal">false</span>
+        &#125;
+    &#125;
+&#125;</code></pre>
+
+<p>协程调度时由于总是优先查询局部运行队列中的协程g，如果只是循环往复的执行局部队列中的g，那么全局队列中的g可能一个都不会被调用到。因此，为了保证调度的公平性，p中每执行61次调度，就会优先从全局队列中获取一个g到当前p中执行：</p>
+<pre><code class="highlight go"><span class="comment">// go/src/runtime/proc.go</span>
+
+<span class="function"><span class="keyword">func</span> <span class="title">findRunnable</span><span class="params">()</span></span> (gp *g, inheritTime, tryWakeP <span class="type">bool</span>) &#123;
+  ...
+    <span class="keyword">if</span> _p_.schedtick%<span class="number">61</span> == <span class="number">0</span> &amp;&amp; sched.runqsize &gt; <span class="number">0</span> &#123;
+        lock(&amp;sched.lock)
+        gp = globrunqget(_p_, <span class="number">1</span>)
+        unlock(&amp;sched.lock)
+        <span class="keyword">if</span> gp != <span class="literal">nil</span> &#123;
+            <span class="keyword">return</span> gp, <span class="literal">false</span>, <span class="literal">false</span>
+        &#125;
+    &#125;
+  ...
+&#125;</code></pre>
+
+<p><strong>获取全局运行队列</strong></p>
+<p>当p每执行61次调度，或者p本地运行队列不存在可运行的协程时，需要从全局队列中获取一批协程分配给本地运行队列。由于每个p共享了全局运行队列，因此为了保证公平性，需要将全局运行队列中的g按照p的数量进行平分，平分后数量也不能超过局部运行队列的容量的一半（即256&#x2F;2&#x3D;128）。最后通过循环调用runqput将全局队列中的g放入到p的局部运行队列中。</p>
+<p><img src="/../img/global-runqu-to-local-runqu.png" alt="从全局队列中拿一些到本地队列中"></p>
+<pre><code class="highlight go"><span class="comment">// go/src/runtime/proc.go</span>
+
+<span class="comment">// Try get a batch of G&#x27;s from the global runnable queue.</span>
+<span class="comment">// sched.lock must be held.</span>
+<span class="function"><span class="keyword">func</span> <span class="title">globrunqget</span><span class="params">(_p_ *p, max <span class="type">int32</span>)</span></span> *g &#123;
+    assertLockHeld(&amp;sched.lock)
+
+    <span class="keyword">if</span> sched.runqsize == <span class="number">0</span> &#123;
+        <span class="keyword">return</span> <span class="literal">nil</span>
+    &#125;
+
+    n := sched.runqsize/gomaxprocs + <span class="number">1</span>
+    <span class="keyword">if</span> n &gt; sched.runqsize &#123;
+        n = sched.runqsize
+    &#125;
+    <span class="keyword">if</span> max &gt; <span class="number">0</span> &amp;&amp; n &gt; max &#123;
+        n = max
+    &#125;
+    <span class="keyword">if</span> n &gt; <span class="type">int32</span>(<span class="built_in">len</span>(_p_.runq))/<span class="number">2</span> &#123;
+        n = <span class="type">int32</span>(<span class="built_in">len</span>(_p_.runq)) / <span class="number">2</span>
+    &#125;
+
+    sched.runqsize -= n
+
+    gp := sched.runq.pop()
+    n--
+    <span class="keyword">for</span> ; n &gt; <span class="number">0</span>; n-- &#123;
+        gp1 := sched.runq.pop()
+        runqput(_p_, gp1, <span class="literal">false</span>)
+    &#125;
+    <span class="keyword">return</span> gp
+&#125;</code></pre>
+
+<p><strong>协程窃取</strong></p>
+<p>当p在局部运行队列、全局运行队列中都找不到可运行的协程时，就需要从其它p的本地运行队列中窃取一批可用的协程。所有的p都存储在全局的allp []*p变量中，调度器随机在其中选择一个p来进行协程窃取工作。窃取工作总共会执行不超过4次，当窃取成功时即返回。</p>
+<pre><code class="highlight go"><span class="comment">// go/src/runtime/proc.go</span>
+
+<span class="comment">// stealWork attempts to steal a runnable goroutine or timer from any P.</span>
+<span class="function"><span class="keyword">func</span> <span class="title">stealWork</span><span class="params">(now <span class="type">int64</span>)</span></span> (gp *g, inheritTime <span class="type">bool</span>, rnow, pollUntil <span class="type">int64</span>, newWork <span class="type">bool</span>) &#123;
+    pp := getg().m.p.ptr()
+
+    ranTimer := <span class="literal">false</span>
+
+    <span class="keyword">const</span> stealTries = <span class="number">4</span>
+    <span class="keyword">for</span> i := <span class="number">0</span>; i &lt; stealTries; i++ &#123;
+        stealTimersOrRunNextG := i == stealTries<span class="number">-1</span>
+
+        <span class="keyword">for</span> enum := stealOrder.start(fastrand()); !enum.done(); enum.next() &#123;
+            <span class="keyword">if</span> sched.gcwaiting != <span class="number">0</span> &#123;
+                <span class="comment">// GC work may be available.</span>
+                <span class="keyword">return</span> <span class="literal">nil</span>, <span class="literal">false</span>, now, pollUntil, <span class="literal">true</span>
+            &#125;
+            p2 := allp[enum.position()]
+            <span class="keyword">if</span> pp == p2 &#123;
+                <span class="keyword">continue</span>
+            &#125;
+            ...
+            <span class="comment">// Don&#x27;t bother to attempt to steal if p2 is idle.</span>
+            <span class="keyword">if</span> !idlepMask.read(enum.position()) &#123;
+                <span class="keyword">if</span> gp := runqsteal(pp, p2, stealTimersOrRunNextG); gp != <span class="literal">nil</span> &#123;
+                    <span class="keyword">return</span> gp, <span class="literal">false</span>, now, pollUntil, ranTimer
+                &#125;
+            &#125;
+        &#125;
+    &#125;
+  ...
+&#125;</code></pre>
+
+<p>协程窃取的主要执行逻辑通过runqsteal以及runqgrab函数实现，窃取的核心逻辑是：将要窃取的p本地运行队列中的g的个数的一半放入到自己的运行队列中。</p>
+<p><img src="/../img/go-steal.png" alt="协程窃取"></p>
+<pre><code class="highlight go"><span class="comment">// Steal half of elements from local runnable queue of p2</span>
+<span class="comment">// and put onto local runnable queue of p.</span>
+<span class="comment">// Returns one of the stolen elements (or nil if failed).</span>
+<span class="function"><span class="keyword">func</span> <span class="title">runqsteal</span><span class="params">(_p_, p2 *p, stealRunNextG <span class="type">bool</span>)</span></span> *g &#123;
+    t := _p_.runqtail
+    n := runqgrab(p2, &amp;_p_.runq, t, stealRunNextG)
+    <span class="keyword">if</span> n == <span class="number">0</span> &#123;
+        <span class="keyword">return</span> <span class="literal">nil</span>
+    &#125;
+    n--
+    gp := _p_.runq[(t+n)%<span class="type">uint32</span>(<span class="built_in">len</span>(_p_.runq))].ptr()
+    <span class="keyword">if</span> n == <span class="number">0</span> &#123;
+        <span class="keyword">return</span> gp
+    &#125;
+    h := atomic.LoadAcq(&amp;_p_.runqhead) <span class="comment">// load-acquire, synchronize with consumers</span>
+    <span class="keyword">if</span> t-h+n &gt;= <span class="type">uint32</span>(<span class="built_in">len</span>(_p_.runq)) &#123;
+        throw(<span class="string">&quot;runqsteal: runq overflow&quot;</span>)
+    &#125;
+    atomic.StoreRel(&amp;_p_.runqtail, t+n) <span class="comment">// store-release, makes the item available for consumption</span>
+    <span class="keyword">return</span> gp
+&#125;
+
+<span class="comment">// Grabs a batch of goroutines from _p_&#x27;s runnable queue into batch.</span>
+<span class="function"><span class="keyword">func</span> <span class="title">runqgrab</span><span class="params">(_p_ *p, batch *[256]guintptr, batchHead <span class="type">uint32</span>, stealRunNextG <span class="type">bool</span>)</span></span> <span class="type">uint32</span> &#123;
+    <span class="keyword">for</span> &#123;
+        h := atomic.LoadAcq(&amp;_p_.runqhead) <span class="comment">// load-acquire, synchronize with other consumers</span>
+        t := atomic.LoadAcq(&amp;_p_.runqtail) <span class="comment">// load-acquire, synchronize with the producer</span>
+        n := t - h
+        n = n - n/<span class="number">2</span>
+        ...
+        <span class="keyword">for</span> i := <span class="type">uint32</span>(<span class="number">0</span>); i &lt; n; i++ &#123;
+            g := _p_.runq[(h+i)%<span class="type">uint32</span>(<span class="built_in">len</span>(_p_.runq))]
+            batch[(batchHead+i)%<span class="type">uint32</span>(<span class="built_in">len</span>(batch))] = g
+        &#125;
+        <span class="keyword">if</span> atomic.CasRel(&amp;_p_.runqhead, h, h+n) &#123; <span class="comment">// cas-release, commits consume</span>
+            <span class="keyword">return</span> n
+        &#125;
+    &#125;
+&#125;</code></pre>
+
+<h3 id="调度时机"><a href="#调度时机" class="headerlink" title="调度时机"></a>调度时机</h3><p>调度策略让我们知道了协程是如何调度的，下面看下什么时候会发生协程调度</p>
+<p><strong>主动调度</strong></p>
+<p>协程可以选择主动让渡自己的执行权，着主要通过在代码中主动执行runtime.Gosched()函数实现。</p>
+<ul>
+<li>主动调度会从当前协程g切换到g0并更新协程状态由运行中_Grunning变为可运行_Grunable；</li>
+<li>然后通过dropg()取消g与m的绑定关系；</li>
+<li>接着通过globrunqput将g放入到全局运行队列中；</li>
+<li>最后调用schedule()函数开启新一轮的调度循环</li>
+</ul>
+<pre><code class="highlight GO"><span class="comment">// go/src/runtime/proc.go</span>
+
+<span class="comment">// Gosched yields the processor, allowing other goroutines to run. It does not</span>
+<span class="comment">// suspend the current goroutine, so execution resumes automatically.</span>
+<span class="function"><span class="keyword">func</span> <span class="title">Gosched</span><span class="params">()</span></span> &#123;
+    checkTimeouts()
+    mcall(gosched_m) <span class="comment">//</span>
+&#125;
+
+<span class="comment">// Gosched continuation on g0.</span>
+<span class="function"><span class="keyword">func</span> <span class="title">gosched_m</span><span class="params">(gp *g)</span></span> &#123;
+    ...
+    goschedImpl(gp) <span class="comment">//</span>
+&#125;
+
+<span class="function"><span class="keyword">func</span> <span class="title">goschedImpl</span><span class="params">(gp *g)</span></span> &#123;
+    ...
+    casgstatus(gp, _Grunning, _Grunnable)
+    dropg() <span class="comment">//</span>
+    lock(&amp;sched.lock)
+    globrunqput(gp)
+    unlock(&amp;sched.lock)
+
+    schedule()
+&#125;
+
+<span class="comment">// dropg removes the association between m and the current goroutine m-&gt;curg (gp for short).</span>
+<span class="function"><span class="keyword">func</span> <span class="title">dropg</span><span class="params">()</span></span> &#123;
+    _g_ := getg()
+
+    setMNoWB(&amp;_g_.m.curg.m, <span class="literal">nil</span>)
+    setGNoWB(&amp;_g_.m.curg, <span class="literal">nil</span>)
+&#125;</code></pre>
+
+<p><strong>被动调度</strong></p>
+<p>当协程休眠、通道堵塞、网络堵塞、垃圾回收导致暂停时，协程会被动让渡出执行的权利给其它可运行的协程继续执行。调度器调用gopark()函数执行被动调度逻辑。gopark()函数最终调用park_m()函数来完成调度逻辑。</p>
+<ul>
+<li>首先会从当前协程g切换到g0并更新协程状态由运行中_Grunning变为等待中_Gwaiting；</li>
+<li>然后通过dropg()取消g与m的绑定关系；</li>
+<li>接着执行waitunlockf()函数，如果该函数返回false，则协程g立即恢复执行，否则等待唤醒；</li>
+<li>最后调用schedule()函数开启新一轮的调度循环；</li>
+</ul>
+<pre><code class="highlight GO"><span class="comment">// go/src/runtime/proc.go</span>
+
+<span class="comment">// Puts the current goroutine into a waiting state and calls unlockf on the</span>
+<span class="comment">// system stack.</span>
+<span class="function"><span class="keyword">func</span> <span class="title">gopark</span><span class="params">(unlockf <span class="keyword">func</span>(*g, unsafe.Pointer)</span></span> <span class="type">bool</span>, lock unsafe.Pointer, reason waitReason, traceEv <span class="type">byte</span>, traceskip <span class="type">int</span>) &#123;
+    ...
+    mcall(park_m)
+&#125;
+
+<span class="comment">// park continuation on g0.</span>
+<span class="function"><span class="keyword">func</span> <span class="title">park_m</span><span class="params">(gp *g)</span></span> &#123;
+    ...
+    casgstatus(gp, _Grunning, _Gwaiting)
+    dropg()
+
+    <span class="keyword">if</span> fn := _g_.m.waitunlockf; fn != <span class="literal">nil</span> &#123;
+        ok := fn(gp, _g_.m.waitlock)
+        _g_.m.waitunlockf = <span class="literal">nil</span>
+        _g_.m.waitlock = <span class="literal">nil</span>
+        <span class="keyword">if</span> !ok &#123;
+            ...
+            casgstatus(gp, _Gwaiting, _Grunnable)
+            execute(gp, <span class="literal">true</span>) <span class="comment">// Schedule it back, never returns.</span>
+        &#125;
+    &#125;
+    schedule()
+&#125;</code></pre>
+
+<p>与主动调度不同的是，被动调度的协程g不会放入到全局队列中进行调度。而是一直处于等待中_Gwaiting状态等待被唤醒。当等待中的协程被唤醒时，协程的状态由_Gwaiting变为可运行_Grunable状态，然后被添加到当前p的局部运行队列中。唤醒逻辑通过函数goready()调用ready()实现：</p>
+<pre><code class="highlight GO"><span class="comment">// go/src/runtime/proc.go</span>
+
+<span class="function"><span class="keyword">func</span> <span class="title">goready</span><span class="params">(gp *g, traceskip <span class="type">int</span>)</span></span> &#123;
+    systemstack(<span class="function"><span class="keyword">func</span><span class="params">()</span></span> &#123;
+        ready(gp, traceskip, <span class="literal">true</span>)
+    &#125;)
+&#125;
+
+<span class="comment">// Mark gp ready to run.</span>
+<span class="function"><span class="keyword">func</span> <span class="title">ready</span><span class="params">(gp *g, traceskip <span class="type">int</span>, next <span class="type">bool</span>)</span></span> &#123;
+    ...
+    <span class="comment">// status is Gwaiting or Gscanwaiting, make Grunnable and put on runq</span>
+    casgstatus(gp, _Gwaiting, _Grunnable)
+    runqput(_g_.m.p.ptr(), gp, next)
+    wakep()
+    ...
+&#125;</code></pre>
+
+<p><strong>抢占调度</strong></p>
+<p>GO应用程序在启动时会开启一个特殊的线程来执行系统监控任务，系统监控运行在一个独立的工作线程m上，该线程不用绑定逻辑处理器p。系统监控每个10ms会检测是否有准备就绪的网络协程，并放置到全局队列中。</p>
+<p>为了保证每个协程都有执行的机会，系统监控服务会对执行时间过长（大于10ms）的协程、或者处于系统调用（大于20微秒）的协程进行抢占。抢占的核心逻辑通过retake()函数实现：</p>
+<pre><code class="highlight GO"><span class="comment">// go/src/runtime/proc.go</span>
+
+<span class="comment">// forcePreemptNS is the time slice given to a G before it is</span>
+<span class="comment">// preempted.</span>
+<span class="keyword">const</span> forcePreemptNS = <span class="number">10</span> * <span class="number">1000</span> * <span class="number">1000</span> <span class="comment">// 10ms</span>
+
+<span class="function"><span class="keyword">func</span> <span class="title">retake</span><span class="params">(now <span class="type">int64</span>)</span></span> <span class="type">uint32</span> &#123;
+    n := <span class="number">0</span>
+    lock(&amp;allpLock)
+    <span class="keyword">for</span> i := <span class="number">0</span>; i &lt; <span class="built_in">len</span>(allp); i++ &#123;
+        _p_ := allp[i]
+        <span class="keyword">if</span> _p_ == <span class="literal">nil</span> &#123;
+            <span class="keyword">continue</span>
+        &#125;
+        pd := &amp;_p_.sysmontick
+        s := _p_.status
+        sysretake := <span class="literal">false</span>
+        <span class="keyword">if</span> s == _Prunning || s == _Psyscall &#123;
+            <span class="comment">// Preempt G if it&#x27;s running for too long.</span>
+            t := <span class="type">int64</span>(_p_.schedtick)
+            <span class="keyword">if</span> <span class="type">int64</span>(pd.schedtick) != t &#123;
+                pd.schedtick = <span class="type">uint32</span>(t)
+                pd.schedwhen = now
+            &#125; <span class="keyword">else</span> <span class="keyword">if</span> pd.schedwhen+forcePreemptNS &lt;= now &#123;
+                preemptone(_p_)
+                <span class="comment">// In case of syscall, preemptone() doesn&#x27;t</span>
+                <span class="comment">// work, because there is no M wired to P.</span>
+                sysretake = <span class="literal">true</span>
+            &#125;
+        &#125;
+        <span class="keyword">if</span> s == _Psyscall &#123;
+            <span class="comment">// Retake P from syscall if it&#x27;s there for more than 1 sysmon tick (at least 20us).</span>
+      t := <span class="type">int64</span>(_p_.syscalltick)
+            <span class="keyword">if</span> !sysretake &amp;&amp; <span class="type">int64</span>(pd.syscalltick) != t &#123;
+                pd.syscalltick = <span class="type">uint32</span>(t)
+                pd.syscallwhen = now
+                <span class="keyword">continue</span>
+            &#125;
+            <span class="keyword">if</span> runqempty(_p_) &amp;&amp; atomic.Load(&amp;sched.nmspinning)+atomic.Load(&amp;sched.npidle) &gt; <span class="number">0</span> &amp;&amp; pd.syscallwhen+<span class="number">10</span>*<span class="number">1000</span>*<span class="number">1000</span> &gt; now &#123;
+                <span class="keyword">continue</span>
+            &#125;
+      ...
+    &#125;
+    unlock(&amp;allpLock)
+    <span class="keyword">return</span> <span class="type">uint32</span>(n)
+&#125;</code></pre></div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
