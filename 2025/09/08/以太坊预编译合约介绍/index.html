@@ -1,0 +1,102 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>以太坊预编译合约介绍</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>以太坊预编译合约介绍</h1><div class="time">2025-09-08</div><ul class="tags"><li><span>#</span><a href="/tags/Ethereum/">Ethereum</a></li></ul><h2 id="系统-预编译-合约介绍"><a href="#系统-预编译-合约介绍" class="headerlink" title="系统(预编译)合约介绍"></a>系统(预编译)合约介绍</h2><p>在solidity中，有一些功能使用solidity无法实现，这时采用go编写成为预编译合约，嵌在以太坊执行层源码中(go-ethereum)。</p>
+<p>预编译合约是一些特殊的合约，通常都是实现某一具体功能，比如计算hash，看源码如下：</p>
+<pre><code class="highlight go"><span class="comment">// 预编译合约接口</span>
+<span class="keyword">type</span> PrecompiledContract <span class="keyword">interface</span> &#123;
+	RequiredGas(input []<span class="type">byte</span>) <span class="type">uint64</span>  <span class="comment">// 计算gas</span>
+	Run(input []<span class="type">byte</span>) ([]<span class="type">byte</span>, <span class="type">error</span>) <span class="comment">// Run runs the precompiled contract</span>
+	Name() <span class="type">string</span>
+&#125;
+
+<span class="comment">// 用于区分某一次以太坊升级支持的预编译合约</span>
+<span class="keyword">type</span> PrecompiledContracts <span class="keyword">map</span>[common.Address]PrecompiledContract</code></pre>
+
+<p>预编译合约就是一个结构体，这个结构题需要实现上面的<code>PrecompiledContract</code>接口，这就是某一个预编预功能合约。</p>
+<p>以太坊中，预编预合约地址从0x01开始，依次加1，地址就是上面的map的key值，value就是具体的实现<code>PrecompiledContract</code>的结构体。</p>
+<pre><code class="highlight go"><span class="keyword">var</span> PrecompiledContractsCancun = PrecompiledContracts&#123;
+	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x1</span>&#125;): &amp;ecrecover&#123;&#125;,
+	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x2</span>&#125;): &amp;sha256hash&#123;&#125;,
+	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x3</span>&#125;): &amp;ripemd160hash&#123;&#125;,
+	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x4</span>&#125;): &amp;dataCopy&#123;&#125;,
+	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x5</span>&#125;): &amp;bigModExp&#123;eip2565: <span class="literal">true</span>, eip7823: <span class="literal">false</span>, eip7883: <span class="literal">false</span>&#125;,
+	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x6</span>&#125;): &amp;bn256AddIstanbul&#123;&#125;,
+	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x7</span>&#125;): &amp;bn256ScalarMulIstanbul&#123;&#125;,
+	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x8</span>&#125;): &amp;bn256PairingIstanbul&#123;&#125;,
+	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0x9</span>&#125;): &amp;blake2F&#123;&#125;,
+	common.BytesToAddress([]<span class="type">byte</span>&#123;<span class="number">0xa</span>&#125;): &amp;kzgPointEvaluation&#123;&#125;,
+&#125;</code></pre>
+
+<p>上面列出来的是坎昆升级后支持的预编译合约，主要就是hash计算，签名恢复这些solidity难以实现的功能。</p>
+<p>我们以<code>sha256hash</code>为例，看它的具体实现：</p>
+<pre><code class="highlight go"><span class="keyword">type</span> sha256hash <span class="keyword">struct</span>&#123;&#125;
+
+<span class="function"><span class="keyword">func</span> <span class="params">(c *sha256hash)</span></span> RequiredGas(input []<span class="type">byte</span>) <span class="type">uint64</span> &#123;
+	<span class="keyword">return</span> <span class="type">uint64</span>(<span class="built_in">len</span>(input)+<span class="number">31</span>)/<span class="number">32</span>*params.Sha256PerWordGas + params.Sha256BaseGas
+&#125;
+<span class="function"><span class="keyword">func</span> <span class="params">(c *sha256hash)</span></span> Run(input []<span class="type">byte</span>) ([]<span class="type">byte</span>, <span class="type">error</span>) &#123;
+	h := sha256.Sum256(input)
+	<span class="keyword">return</span> h[:], <span class="literal">nil</span>
+&#125;
+
+<span class="function"><span class="keyword">func</span> <span class="params">(c *sha256hash)</span></span> Name() <span class="type">string</span> &#123;
+	<span class="keyword">return</span> <span class="string">&quot;SHA256&quot;</span>
+&#125;</code></pre>
+
+<p>上面就是它的具体实现，它的合约地址是0x2，下面我们写一个合约，尝试去调用预编译合约0x2。</p>
+<pre><code class="highlight solidity">// Function to call the SHA256 precompiled contract using inline assembly
+  function computeSha256(bytes memory data) public view returns (bytes32 hash) &#123;
+      // Allocate memory for the result (32 bytes for SHA256 hash)
+      assembly &#123;
+          // Get pointer to free memory
+          let ptr := mload(0x40)
+          
+          // Store input data length and data
+          let inputLen := mload(data)
+          let inputPtr := add(data, 32)
+          
+          // Perform staticcall to SHA256 precompiled contract
+          let success := staticcall(
+              gas(),              // Forward all available gas
+              0x2,               // SHA256 precompiled contract address
+              inputPtr,          // Input data pointer
+              inputLen,          // Input data length
+              ptr,               // Output pointer
+              32                 // Expected output size (32 bytes for SHA256)
+          )
+          
+          // Check if the call was successful
+          if iszero(success) &#123;
+              revert(0, 0)
+          &#125;
+          
+          // Load the result into hash
+          hash := mload(ptr)
+          
+          // Update free memory pointer
+          mstore(0x40, add(ptr, 32))
+      &#125;
+  &#125;</code></pre>
+
+<p>go语言计算如下：</p>
+<pre><code class="highlight go"><span class="keyword">package</span> main
+
+<span class="keyword">import</span> (
+	<span class="string">&quot;crypto/sha256&quot;</span>
+	<span class="string">&quot;fmt&quot;</span>
+)
+
+<span class="function"><span class="keyword">func</span> <span class="title">main</span><span class="params">()</span></span> &#123;
+	input := []<span class="type">byte</span>(<span class="string">&quot;Hello, world!&quot;</span>)
+
+	h := sha256.Sum256(input)
+
+	<span class="comment">// 315f5bdb76d078c43b8ac0064e4a0164612b1fce77c869345bfc94c75894edd3</span>
+	fmt.Printf(<span class="string">&quot;SHA256 hash of &#x27;%s&#x27;: %x\n&quot;</span>, input, h)
+&#125;</code></pre>
+
+<p>在执行调用合约的时候，EVM会根据合约地址来区分是系统合约还是普通合约，如果是系统预编译合约，就会最终调用<code>PrecompiledContract</code>接口的<code>Run</code>方法。</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
