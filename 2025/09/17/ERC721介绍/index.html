@@ -1,0 +1,320 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>ERC721介绍</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>ERC721介绍</h1><div class="time">2025-09-17</div><ul class="tags"><li><span>#</span><a href="/tags/Ethereum/">Ethereum</a></li></ul><h2 id="ERC721"><a href="#ERC721" class="headerlink" title="ERC721"></a>ERC721</h2><p>ERC721是一个非同质化代币标准，相比较于ERC20标准，它更加复杂，包含多个可选扩展，并且分布在多个合约中。</p>
+<p>它具有9个方法和3个事件：</p>
+<pre><code class="highlight solidity">function balanceOf(address _owner) external view returns (uint256);
+function ownerOf(uint256 _tokenId) external view returns (address);
+function safeTransferFrom(address _from, address _to, uint256 _tokenId, bytes data) external payable;
+function safeTransferFrom(address _from, address _to, uint256 _tokenId) external payable;
+function transferFrom(address _from, address _to, uint256 _tokenId) external payable;
+function approve(address _approved, uint256 _tokenId) external payable;
+function setApprovalForAll(address _operator, bool _approved) external;
+function getApproved(uint256 _tokenId) external view returns (address);
+function isApprovedForAll(address _owner, address _operator) external view returns (bool);</code></pre>
+
+<p>3个事件：</p>
+<pre><code class="highlight solidity">event Transfer(address indexed _from, address indexed _to, uint256 indexed _tokenId);
+event Approval(address indexed _owner, address indexed _approved, uint256 indexed _tokenId);
+event ApprovalForAll(address indexed _owner, address indexed _operator, bool _approved);</code></pre>
+
+<h2 id="OpenZeppelin-实现的抽象合约"><a href="#OpenZeppelin-实现的抽象合约" class="headerlink" title="OpenZeppelin 实现的抽象合约"></a>OpenZeppelin 实现的抽象合约</h2><pre><code class="highlight solidity">abstract contract ERC721 is Context, ERC165, IERC721, IERC721Metadata, IERC721Errors &#123;
+    using Strings for uint256;
+    // ERC721名字
+    string private _name;
+    // Token符号
+    string private _symbol;
+    // 记录对应的tokenId拥有者
+    mapping(uint256 tokenId =&gt; address) private _owners;
+    // 记录某个地址拥有的ERC721 token的数目
+    mapping(address owner =&gt; uint256) private _balances;
+    // 
+    mapping(uint256 tokenId =&gt; address) private _tokenApprovals;
+
+    mapping(address owner =&gt; mapping(address operator =&gt; bool)) private _operatorApprovals;
+
+    // 以上状态变量都是 private类型
+
+    /**
+     * 构造方法
+     */
+    constructor(string memory name_, string memory symbol_) &#123;
+        _name = name_;
+        _symbol = symbol_;
+    &#125;
+
+    /// @inheritdoc IERC165
+    function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165, IERC165) returns (bool) &#123;
+        return
+            interfaceId == type(IERC721).interfaceId ||
+            interfaceId == type(IERC721Metadata).interfaceId ||
+            super.supportsInterface(interfaceId);
+    &#125;
+
+    /// 返回给定地址的数目
+    function balanceOf(address owner) public view virtual returns (uint256) &#123;
+        if (owner == address(0)) &#123;
+            revert ERC721InvalidOwner(address(0));
+        &#125;
+        return _balances[owner];
+    &#125;
+
+    /// @inheritdoc IERC721
+    function ownerOf(uint256 tokenId) public view virtual returns (address) &#123;
+        return _requireOwned(tokenId);
+    &#125;
+
+    /// 
+    function name() public view virtual returns (string memory) &#123;
+        return _name;
+    &#125;
+
+    /// 
+    function symbol() public view virtual returns (string memory) &#123;
+        return _symbol;
+    &#125;
+
+    /// @inheritdoc IERC721Metadata
+    function tokenURI(uint256 tokenId) public view virtual returns (string memory) &#123;
+        _requireOwned(tokenId);
+
+        string memory baseURI = _baseURI();
+        return bytes(baseURI).length &gt; 0 ? string.concat(baseURI, tokenId.toString()) : &quot;&quot;;
+    &#125;
+
+    // 
+    function _baseURI() internal view virtual returns (string memory) &#123;
+        return &quot;&quot;;
+    &#125;
+
+    /// @inheritdoc IERC721
+    function approve(address to, uint256 tokenId) public virtual &#123;
+        _approve(to, tokenId, _msgSender());
+    &#125;
+
+    /// @inheritdoc IERC721
+    function getApproved(uint256 tokenId) public view virtual returns (address) &#123;
+        _requireOwned(tokenId);
+
+        return _getApproved(tokenId);
+    &#125;
+
+    /// @inheritdoc IERC721
+    function setApprovalForAll(address operator, bool approved) public virtual &#123;
+        _setApprovalForAll(_msgSender(), operator, approved);
+    &#125;
+
+    /// @inheritdoc IERC721
+    function isApprovedForAll(address owner, address operator) public view virtual returns (bool) &#123;
+        return _operatorApprovals[owner][operator];
+    &#125;
+
+    /// @inheritdoc IERC721
+    function transferFrom(address from, address to, uint256 tokenId) public virtual &#123;
+        if (to == address(0)) &#123;
+            revert ERC721InvalidReceiver(address(0));
+        &#125;
+        // Setting an &quot;auth&quot; arguments enables the `_isAuthorized` check which verifies that the token exists
+        // (from != 0). Therefore, it is not needed to verify that the return value is not 0 here.
+        address previousOwner = _update(to, tokenId, _msgSender());
+        if (previousOwner != from) &#123;
+            revert ERC721IncorrectOwner(from, tokenId, previousOwner);
+        &#125;
+    &#125;
+
+    /// @inheritdoc IERC721
+    function safeTransferFrom(address from, address to, uint256 tokenId) public &#123;
+        safeTransferFrom(from, to, tokenId, &quot;&quot;);
+    &#125;
+
+    /// @inheritdoc IERC721
+    function safeTransferFrom(address from, address to, uint256 tokenId, bytes memory data) public virtual &#123;
+        transferFrom(from, to, tokenId);
+        ERC721Utils.checkOnERC721Received(_msgSender(), from, to, tokenId, data);
+    &#125;
+
+    /**
+     * 获取某个tokenId的拥有者地址
+     */
+    function _ownerOf(uint256 tokenId) internal view virtual returns (address) &#123;
+        return _owners[tokenId];
+    &#125;
+
+    /**
+     * @dev Returns the approved address for `tokenId`. Returns 0 if `tokenId` is not minted.
+     */
+    function _getApproved(uint256 tokenId) internal view virtual returns (address) &#123;
+        return _tokenApprovals[tokenId];
+    &#125;
+
+    function _isAuthorized(address owner, address spender, uint256 tokenId) internal view virtual returns (bool) &#123;
+        return
+            spender != address(0) &amp;&amp;
+            (owner == spender || isApprovedForAll(owner, spender) || _getApproved(tokenId) == spender);
+    &#125;
+
+    // 
+    function _checkAuthorized(address owner, address spender, uint256 tokenId) internal view virtual &#123;
+        if (!_isAuthorized(owner, spender, tokenId)) &#123;
+            if (owner == address(0)) &#123;
+                revert ERC721NonexistentToken(tokenId);
+            &#125; else &#123;
+                revert ERC721InsufficientApproval(spender, tokenId);
+            &#125;
+        &#125;
+    &#125;
+
+    function _increaseBalance(address account, uint128 value) internal virtual &#123;
+        unchecked &#123;
+            _balances[account] += value;
+        &#125;
+    &#125;
+
+    // 
+    function _update(address to, uint256 tokenId, address auth) internal virtual returns (address) &#123;
+        address from = _ownerOf(tokenId);
+
+        // Perform (optional) operator check
+        if (auth != address(0)) &#123;
+            _checkAuthorized(from, auth, tokenId);
+        &#125;
+
+        // Execute the update
+        if (from != address(0)) &#123;
+            // Clear approval. No need to re-authorize or emit the Approval event
+            _approve(address(0), tokenId, address(0), false);
+
+            unchecked &#123;
+                _balances[from] -= 1;
+            &#125;
+        &#125;
+
+        if (to != address(0)) &#123;
+            unchecked &#123;
+                _balances[to] += 1;
+            &#125;
+        &#125;
+
+        _owners[tokenId] = to;
+
+        emit Transfer(from, to, tokenId);
+
+        return from;
+    &#125;
+
+    // 
+    function _mint(address to, uint256 tokenId) internal &#123;
+        if (to == address(0)) &#123;
+            revert ERC721InvalidReceiver(address(0));
+        &#125;
+        address previousOwner = _update(to, tokenId, address(0));
+        if (previousOwner != address(0)) &#123;
+            revert ERC721InvalidSender(address(0));
+        &#125;
+    &#125;
+
+    // Mint tokenId给to地址
+    function _safeMint(address to, uint256 tokenId) internal &#123;
+        _safeMint(to, tokenId, &quot;&quot;);
+    &#125;
+
+    // Mint tokenId给to地址（带有data信息）
+    function _safeMint(address to, uint256 tokenId, bytes memory data) internal virtual &#123;
+        _mint(to, tokenId);
+        ERC721Utils.checkOnERC721Received(_msgSender(), address(0), to, tokenId, data);
+    &#125;
+
+    // 销毁tokenId对应的代币
+    function _burn(uint256 tokenId) internal &#123;
+        address previousOwner = _update(address(0), tokenId, address(0));
+        if (previousOwner == address(0)) &#123;
+            revert ERC721NonexistentToken(tokenId);
+        &#125;
+    &#125;
+
+    // 转账
+    function _transfer(address from, address to, uint256 tokenId) internal &#123;
+        if (to == address(0)) &#123;
+            revert ERC721InvalidReceiver(address(0));
+        &#125;
+        address previousOwner = _update(to, tokenId, address(0));
+        if (previousOwner == address(0)) &#123;
+            revert ERC721NonexistentToken(tokenId);
+        &#125; else if (previousOwner != from) &#123;
+            revert ERC721IncorrectOwner(from, tokenId, previousOwner);
+        &#125;
+    &#125;
+
+    // 转账
+    function _safeTransfer(address from, address to, uint256 tokenId) internal &#123;
+        _safeTransfer(from, to, tokenId, &quot;&quot;);
+    &#125;
+
+    // 转账
+    function _safeTransfer(address from, address to, uint256 tokenId, bytes memory data) internal virtual &#123;
+        _transfer(from, to, tokenId);
+        ERC721Utils.checkOnERC721Received(_msgSender(), from, to, tokenId, data);
+    &#125;
+
+    // 
+    function _approve(address to, uint256 tokenId, address auth) internal &#123;
+        _approve(to, tokenId, auth, true);
+    &#125;
+    
+    // 
+    function _approve(address to, uint256 tokenId, address auth, bool emitEvent) internal virtual &#123;
+        // Avoid reading the owner unless necessary
+        if (emitEvent || auth != address(0)) &#123;
+            address owner = _requireOwned(tokenId);
+
+            // We do not use _isAuthorized because single-token approvals should not be able to call approve
+            if (auth != address(0) &amp;&amp; owner != auth &amp;&amp; !isApprovedForAll(owner, auth)) &#123;
+                revert ERC721InvalidApprover(auth);
+            &#125;
+
+            if (emitEvent) &#123;
+                emit Approval(owner, to, tokenId);
+            &#125;
+        &#125;
+
+        _tokenApprovals[tokenId] = to;
+    &#125;
+
+    // 
+    function _setApprovalForAll(address owner, address operator, bool approved) internal virtual &#123;
+        if (operator == address(0)) &#123;
+            revert ERC721InvalidOperator(operator);
+        &#125;
+        _operatorApprovals[owner][operator] = approved;
+        emit ApprovalForAll(owner, operator, approved);
+    &#125;
+
+    //
+    function _requireOwned(uint256 tokenId) internal view returns (address) &#123;
+        address owner = _ownerOf(tokenId);
+        if (owner == address(0)) &#123;
+            revert ERC721NonexistentToken(tokenId);
+        &#125;
+        return owner;
+    &#125;
+&#125;</code></pre>
+
+<h2 id="使用库快速编写ERC721合约"><a href="#使用库快速编写ERC721合约" class="headerlink" title="使用库快速编写ERC721合约"></a>使用库快速编写ERC721合约</h2><pre><code class="highlight solidity">pragma solidity ^0.8.20;
+
+import &#123;ERC721URIStorage, ERC721&#125; from &quot;@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol&quot;;
+
+contract GameItem is ERC721URIStorage &#123;
+    uint256 private _nextTokenId;
+
+    constructor() ERC721(&quot;GameItem&quot;, &quot;ITM&quot;) &#123;&#125;
+
+    function awardItem(address player, string memory tokenURI) public returns (uint256) &#123;
+        uint256 tokenId = _nextTokenId++;
+        _mint(player, tokenId);
+        _setTokenURI(tokenId, tokenURI);
+
+        return tokenId;
+    &#125;
+&#125;</code></pre></div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
