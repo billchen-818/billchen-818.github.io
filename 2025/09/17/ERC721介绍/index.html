@@ -27,7 +27,7 @@ event ApprovalForAll(address indexed _owner, address indexed _operator, bool _ap
     mapping(uint256 tokenId =&gt; address) private _owners;
     // 记录某个地址拥有的ERC721 token的数目
     mapping(address owner =&gt; uint256) private _balances;
-    // 
+    // 授权tokenId对应的代币给某地址
     mapping(uint256 tokenId =&gt; address) private _tokenApprovals;
 
     mapping(address owner =&gt; mapping(address operator =&gt; bool)) private _operatorApprovals;
