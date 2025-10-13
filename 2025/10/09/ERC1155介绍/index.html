@@ -1,0 +1,22 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>ERC1155介绍</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>ERC1155介绍</h1><div class="time">2025-10-09</div><ul class="tags"><li><span>#</span><a href="/tags/Ethereum/">Ethereum</a></li></ul><h2 id="ERC1155"><a href="#ERC1155" class="headerlink" title="ERC1155"></a>ERC1155</h2><p>ERC1155是用于多种代币管理的合约标准接口，单个部署的合约可以包含同质化代币、非同质化代币等。所以ERC1155代币就具有与ERC20和ERC721代币相同的功能。</p>
+<h3 id="功能与特点"><a href="#功能与特点" class="headerlink" title="功能与特点"></a>功能与特点</h3><p><strong>批量转账</strong></p>
+<pre><code class="highlight solidity">function safeBatchTransferFrom(
+    address _from,
+    address _to,
+    uint256[] calldata _ids,
+    uint256[] calldata _values,
+    bytes calldata _data
+) external;</code></pre>
+
+<p>批量转账需要传id数组和value数组。</p>
+<p><strong>批量余额</strong></p>
+<p>可以获取多个地址，多种代币的余额情况。</p>
+<pre><code class="highlight solidity">function balanceOfBatch(
+    address[] calldata _owners,
+    uint256[] calldata _ids
+) external view returns (uint256[] memory);</code></pre></div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
