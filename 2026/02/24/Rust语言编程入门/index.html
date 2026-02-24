@@ -1,0 +1,697 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust语言编程入门</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust语言编程入门</h1><div class="time">2026-02-24</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><h2 id="1-Rust-简介"><a href="#1-Rust-简介" class="headerlink" title="1. Rust 简介"></a>1. Rust 简介</h2><p>Rust 是一门由 Mozilla 研发的系统级编程语言，专注于 <strong>安全性</strong>、<strong>并发性</strong> 和 <strong>高性能</strong>。它在没有垃圾回收机制的前提下，通过独特的 <strong>所有权系统</strong> 保证内存安全，是替代 C&#x2F;C++ 的现代化选择。</p>
+<h3 id="核心优势"><a href="#核心优势" class="headerlink" title="核心优势"></a>核心优势</h3><ul>
+<li><strong>内存安全</strong>：编译期消除空指针、悬垂指针、数据竞争等问题</li>
+<li><strong>零成本抽象</strong>：高层抽象不带来额外运行时开销</li>
+<li><strong>无垃圾回收</strong>：通过所有权系统管理内存，性能可预测</li>
+<li><strong>优秀的并发模型</strong>：在编译期就能防止数据竞争</li>
+<li><strong>丰富的类型系统</strong>：强类型 + 类型推导，代码更安全也更简洁</li>
+</ul>
+<hr>
+<h2 id="2-环境搭建"><a href="#2-环境搭建" class="headerlink" title="2. 环境搭建"></a>2. 环境搭建</h2><h3 id="安装-Rust"><a href="#安装-Rust" class="headerlink" title="安装 Rust"></a>安装 Rust</h3><p>通过官方工具 <code>rustup</code> 安装：</p>
+<pre><code class="highlight bash"><span class="comment"># macOS / Linux</span>
+curl --proto <span class="string">&#x27;=https&#x27;</span> --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+<span class="comment"># 验证安装</span>
+rustc --version
+cargo --version</code></pre>
+
+<h3 id="核心工具链"><a href="#核心工具链" class="headerlink" title="核心工具链"></a>核心工具链</h3><table>
+<thead>
+<tr>
+<th>工具</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>rustc</code></td>
+<td>Rust 编译器</td>
+</tr>
+<tr>
+<td><code>cargo</code></td>
+<td>包管理器 &amp; 构建工具</td>
+</tr>
+<tr>
+<td><code>rustup</code></td>
+<td>工具链管理器</td>
+</tr>
+<tr>
+<td><code>rustfmt</code></td>
+<td>代码格式化工具</td>
+</tr>
+<tr>
+<td><code>clippy</code></td>
+<td>代码静态分析工具</td>
+</tr>
+</tbody></table>
+<h3 id="创建项目"><a href="#创建项目" class="headerlink" title="创建项目"></a>创建项目</h3><pre><code class="highlight bash"><span class="comment"># 创建新项目</span>
+cargo new hello_rust
+<span class="built_in">cd</span> hello_rust
+
+<span class="comment"># 运行项目</span>
+cargo run
+
+<span class="comment"># 编译（调试模式）</span>
+cargo build
+
+<span class="comment"># 编译（发布模式，开启优化）</span>
+cargo build --release</code></pre>
+
+<hr>
+<h2 id="3-基本语法"><a href="#3-基本语法" class="headerlink" title="3. 基本语法"></a>3. 基本语法</h2><h3 id="3-1-Hello-World"><a href="#3-1-Hello-World" class="headerlink" title="3.1 Hello, World!"></a>3.1 Hello, World!</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="built_in">println!</span>(<span class="string">&quot;Hello, World!&quot;</span>);
+&#125;</code></pre>
+
+<blockquote>
+<p><code>println!</code> 是一个 <strong>宏</strong>（macro），不是函数，注意后面的 <code>!</code>。</p>
+</blockquote>
+<h3 id="3-2-变量与可变性"><a href="#3-2-变量与可变性" class="headerlink" title="3.2 变量与可变性"></a>3.2 变量与可变性</h3><p>Rust 中的变量 <strong>默认不可变</strong>（immutable），需要显式声明 <code>mut</code> 才能修改。</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">x</span> = <span class="number">5</span>;          <span class="comment">// 不可变变量</span>
+    <span class="comment">// x = 6;           // ❌ 编译错误！</span>
+
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">y</span> = <span class="number">10</span>;     <span class="comment">// 可变变量</span>
+    y = <span class="number">20</span>;             <span class="comment">// ✅ 可以修改</span>
+
+    <span class="keyword">let</span> <span class="variable">z</span>: <span class="type">i32</span> = <span class="number">42</span>;    <span class="comment">// 显式指定类型</span>
+
+    <span class="comment">// 变量遮蔽（Shadowing）</span>
+    <span class="keyword">let</span> <span class="variable">x</span> = x + <span class="number">1</span>;      <span class="comment">// ✅ 重新绑定，允许改变类型</span>
+    <span class="keyword">let</span> <span class="variable">x</span> = <span class="string">&quot;hello&quot;</span>;    <span class="comment">// ✅ 甚至可以变成不同类型</span>
+&#125;</code></pre>
+
+<h3 id="3-3-常量"><a href="#3-3-常量" class="headerlink" title="3.3 常量"></a>3.3 常量</h3><pre><code class="highlight rust"><span class="keyword">const</span> MAX_POINTS: <span class="type">u32</span> = <span class="number">100_000</span>;  <span class="comment">// 常量必须标注类型，使用大写蛇形命名</span></code></pre>
+
+<hr>
+<h2 id="4-数据类型"><a href="#4-数据类型" class="headerlink" title="4. 数据类型"></a>4. 数据类型</h2><h3 id="4-1-标量类型"><a href="#4-1-标量类型" class="headerlink" title="4.1 标量类型"></a>4.1 标量类型</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// 整数类型：i8, i16, i32, i64, i128, isize</span>
+    <span class="comment">//          u8, u16, u32, u64, u128, usize</span>
+    <span class="keyword">let</span> <span class="variable">a</span>: <span class="type">i32</span> = -<span class="number">42</span>;
+    <span class="keyword">let</span> <span class="variable">b</span>: <span class="type">u64</span> = <span class="number">100</span>;
+
+    <span class="comment">// 浮点数：f32, f64（默认 f64）</span>
+    <span class="keyword">let</span> <span class="variable">pi</span>: <span class="type">f64</span> = <span class="number">3.14159</span>;
+
+    <span class="comment">// 布尔类型</span>
+    <span class="keyword">let</span> <span class="variable">is_active</span>: <span class="type">bool</span> = <span class="literal">true</span>;
+
+    <span class="comment">// 字符类型（4 字节，支持 Unicode）</span>
+    <span class="keyword">let</span> <span class="variable">c</span>: <span class="type">char</span> = <span class="string">&#x27;中&#x27;</span>;
+    <span class="keyword">let</span> <span class="variable">emoji</span>: <span class="type">char</span> = <span class="string">&#x27;🦀&#x27;</span>;
+&#125;</code></pre>
+
+<h3 id="4-2-复合类型"><a href="#4-2-复合类型" class="headerlink" title="4.2 复合类型"></a>4.2 复合类型</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// 元组（Tuple）—— 固定长度，可包含不同类型</span>
+    <span class="keyword">let</span> <span class="variable">tup</span>: (<span class="type">i32</span>, <span class="type">f64</span>, <span class="type">char</span>) = (<span class="number">500</span>, <span class="number">6.4</span>, <span class="string">&#x27;A&#x27;</span>);
+    <span class="keyword">let</span> (x, y, z) = tup;           <span class="comment">// 解构</span>
+    <span class="keyword">let</span> <span class="variable">first</span> = tup.<span class="number">0</span>;             <span class="comment">// 索引访问</span>
+
+    <span class="comment">// 数组（Array）—— 固定长度，同一类型</span>
+    <span class="keyword">let</span> <span class="variable">arr</span>: [<span class="type">i32</span>; <span class="number">5</span>] = [<span class="number">1</span>, <span class="number">2</span>, <span class="number">3</span>, <span class="number">4</span>, <span class="number">5</span>];
+    <span class="keyword">let</span> <span class="variable">first</span> = arr[<span class="number">0</span>];
+
+    <span class="keyword">let</span> <span class="variable">zeros</span> = [<span class="number">0</span>; <span class="number">10</span>];           <span class="comment">// 10 个 0</span>
+&#125;</code></pre>
+
+<hr>
+<h2 id="5-函数"><a href="#5-函数" class="headerlink" title="5. 函数"></a>5. 函数</h2><pre><code class="highlight rust"><span class="comment">// 基本函数</span>
+<span class="keyword">fn</span> <span class="title function_">add</span>(x: <span class="type">i32</span>, y: <span class="type">i32</span>) <span class="punctuation">-&gt;</span> <span class="type">i32</span> &#123;
+    x + y   <span class="comment">// 最后一个表达式作为返回值（无分号）</span>
+&#125;
+
+<span class="comment">// 无返回值（返回单元类型 ()）</span>
+<span class="keyword">fn</span> <span class="title function_">greet</span>(name: &amp;<span class="type">str</span>) &#123;
+    <span class="built_in">println!</span>(<span class="string">&quot;Hello, &#123;&#125;!&quot;</span>, name);
+&#125;
+
+<span class="comment">// 提前返回</span>
+<span class="keyword">fn</span> <span class="title function_">abs</span>(x: <span class="type">i32</span>) <span class="punctuation">-&gt;</span> <span class="type">i32</span> &#123;
+    <span class="keyword">if</span> x &lt; <span class="number">0</span> &#123;
+        <span class="keyword">return</span> -x;
+    &#125;
+    x
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">result</span> = <span class="title function_ invoke__">add</span>(<span class="number">3</span>, <span class="number">5</span>);
+    <span class="built_in">println!</span>(<span class="string">&quot;3 + 5 = &#123;&#125;&quot;</span>, result);
+    <span class="title function_ invoke__">greet</span>(<span class="string">&quot;Rust&quot;</span>);
+&#125;</code></pre>
+
+<hr>
+<h2 id="6-控制流"><a href="#6-控制流" class="headerlink" title="6. 控制流"></a>6. 控制流</h2><h3 id="6-1-条件判断"><a href="#6-1-条件判断" class="headerlink" title="6.1 条件判断"></a>6.1 条件判断</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">number</span> = <span class="number">7</span>;
+
+    <span class="keyword">if</span> number &gt; <span class="number">5</span> &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;大于 5&quot;</span>);
+    &#125; <span class="keyword">else</span> <span class="keyword">if</span> number &gt; <span class="number">0</span> &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;大于 0 但不大于 5&quot;</span>);
+    &#125; <span class="keyword">else</span> &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;小于等于 0&quot;</span>);
+    &#125;
+
+    <span class="comment">// if 是表达式，可以用于赋值</span>
+    <span class="keyword">let</span> <span class="variable">status</span> = <span class="keyword">if</span> number &gt; <span class="number">0</span> &#123; <span class="string">&quot;正数&quot;</span> &#125; <span class="keyword">else</span> &#123; <span class="string">&quot;非正数&quot;</span> &#125;;
+&#125;</code></pre>
+
+<h3 id="6-2-循环"><a href="#6-2-循环" class="headerlink" title="6.2 循环"></a>6.2 循环</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// loop —— 无限循环</span>
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">count</span> = <span class="number">0</span>;
+    <span class="keyword">let</span> <span class="variable">result</span> = <span class="keyword">loop</span> &#123;
+        count += <span class="number">1</span>;
+        <span class="keyword">if</span> count == <span class="number">10</span> &#123;
+            <span class="keyword">break</span> count * <span class="number">2</span>;    <span class="comment">// break 可以返回值</span>
+        &#125;
+    &#125;;
+
+    <span class="comment">// while 循环</span>
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">n</span> = <span class="number">3</span>;
+    <span class="keyword">while</span> n &gt; <span class="number">0</span> &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;!&quot;</span>, n);
+        n -= <span class="number">1</span>;
+    &#125;
+
+    <span class="comment">// for 循环（推荐方式）</span>
+    <span class="keyword">let</span> <span class="variable">arr</span> = [<span class="number">10</span>, <span class="number">20</span>, <span class="number">30</span>, <span class="number">40</span>, <span class="number">50</span>];
+    <span class="keyword">for</span> <span class="variable">element</span> <span class="keyword">in</span> arr.<span class="title function_ invoke__">iter</span>() &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;值: &#123;&#125;&quot;</span>, element);
+    &#125;
+
+    <span class="comment">// 范围迭代</span>
+    <span class="keyword">for</span> <span class="variable">i</span> <span class="keyword">in</span> <span class="number">0</span>..<span class="number">5</span> &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;i = &#123;&#125;&quot;</span>, i);     <span class="comment">// 0, 1, 2, 3, 4</span>
+    &#125;
+
+    <span class="keyword">for</span> <span class="variable">i</span> <span class="keyword">in</span> (<span class="number">1</span>..=<span class="number">3</span>).<span class="title function_ invoke__">rev</span>() &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;倒数: &#123;&#125;&quot;</span>, i);   <span class="comment">// 3, 2, 1</span>
+    &#125;
+&#125;</code></pre>
+
+<hr>
+<h2 id="7-所有权系统（核心概念）"><a href="#7-所有权系统（核心概念）" class="headerlink" title="7. 所有权系统（核心概念）"></a>7. 所有权系统（核心概念）</h2><p>所有权是 Rust 最独特的特性，它让 Rust 无需垃圾回收器即可保证内存安全。</p>
+<h3 id="7-1-所有权规则"><a href="#7-1-所有权规则" class="headerlink" title="7.1 所有权规则"></a>7.1 所有权规则</h3><ol>
+<li>Rust 中每个值都有一个 <strong>所有者</strong>（owner）</li>
+<li>值在任意时刻有且只有 <strong>一个所有者</strong></li>
+<li>当所有者离开作用域时，值将被 <strong>自动丢弃</strong>（drop）</li>
+</ol>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">s1</span> = <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;hello&quot;</span>);
+    <span class="keyword">let</span> <span class="variable">s2</span> = s1;        <span class="comment">// s1 的所有权转移（move）给 s2</span>
+    <span class="comment">// println!(&quot;&#123;&#125;&quot;, s1);  // ❌ 编译错误！s1 已失效</span>
+
+    <span class="keyword">let</span> <span class="variable">s3</span> = s2.<span class="title function_ invoke__">clone</span>(); <span class="comment">// 深拷贝，s2 仍然有效</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;s2 = &#123;&#125;, s3 = &#123;&#125;&quot;</span>, s2, s3);  <span class="comment">// ✅</span>
+&#125;</code></pre>
+
+<h3 id="7-2-引用与借用"><a href="#7-2-引用与借用" class="headerlink" title="7.2 引用与借用"></a>7.2 引用与借用</h3><pre><code class="highlight rust"><span class="comment">// 不可变引用（可以有多个）</span>
+<span class="keyword">fn</span> <span class="title function_">calculate_length</span>(s: &amp;<span class="type">String</span>) <span class="punctuation">-&gt;</span> <span class="type">usize</span> &#123;
+    s.<span class="title function_ invoke__">len</span>()
+&#125;
+
+<span class="comment">// 可变引用（同一作用域只能有一个）</span>
+<span class="keyword">fn</span> <span class="title function_">push_str</span>(s: &amp;<span class="keyword">mut</span> <span class="type">String</span>) &#123;
+    s.<span class="title function_ invoke__">push_str</span>(<span class="string">&quot; world&quot;</span>);
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">s</span> = <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;hello&quot;</span>);
+
+    <span class="keyword">let</span> <span class="variable">len</span> = <span class="title function_ invoke__">calculate_length</span>(&amp;s);       <span class="comment">// 不可变借用</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;长度: &#123;&#125;&quot;</span>, len);
+
+    <span class="title function_ invoke__">push_str</span>(&amp;<span class="keyword">mut</span> s);                     <span class="comment">// 可变借用</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;修改后: &#123;&#125;&quot;</span>, s);
+
+    <span class="comment">// 规则：不可变引用和可变引用不能同时存在</span>
+    <span class="keyword">let</span> <span class="variable">r1</span> = &amp;s;
+    <span class="keyword">let</span> <span class="variable">r2</span> = &amp;s;       <span class="comment">// ✅ 多个不可变引用</span>
+    <span class="comment">// let r3 = &amp;mut s; // ❌ 已有不可变引用时不能可变借用</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;, &#123;&#125;&quot;</span>, r1, r2);
+&#125;</code></pre>
+
+<h3 id="7-3-生命周期（Lifetime）"><a href="#7-3-生命周期（Lifetime）" class="headerlink" title="7.3 生命周期（Lifetime）"></a>7.3 生命周期（Lifetime）</h3><p>生命周期确保引用始终有效，编译器通常能自动推断，复杂场景需手动标注。</p>
+<pre><code class="highlight rust"><span class="comment">// &#x27;a 是生命周期标注，表示返回值的生命周期与参数一致</span>
+<span class="keyword">fn</span> <span class="title function_">longest</span>&lt;<span class="symbol">&#x27;a</span>&gt;(x: &amp;<span class="symbol">&#x27;a</span> <span class="type">str</span>, y: &amp;<span class="symbol">&#x27;a</span> <span class="type">str</span>) <span class="punctuation">-&gt;</span> &amp;<span class="symbol">&#x27;a</span> <span class="type">str</span> &#123;
+    <span class="keyword">if</span> x.<span class="title function_ invoke__">len</span>() &gt; y.<span class="title function_ invoke__">len</span>() &#123; x &#125; <span class="keyword">else</span> &#123; y &#125;
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">s1</span> = <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;long string&quot;</span>);
+    <span class="keyword">let</span> <span class="variable">result</span>;
+    &#123;
+        <span class="keyword">let</span> <span class="variable">s2</span> = <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;hi&quot;</span>);
+        result = <span class="title function_ invoke__">longest</span>(s1.<span class="title function_ invoke__">as_str</span>(), s2.<span class="title function_ invoke__">as_str</span>());
+        <span class="built_in">println!</span>(<span class="string">&quot;最长的是: &#123;&#125;&quot;</span>, result);
+    &#125;
+&#125;</code></pre>
+
+<hr>
+<h2 id="8-结构体与枚举"><a href="#8-结构体与枚举" class="headerlink" title="8. 结构体与枚举"></a>8. 结构体与枚举</h2><h3 id="8-1-结构体（Struct）"><a href="#8-1-结构体（Struct）" class="headerlink" title="8.1 结构体（Struct）"></a>8.1 结构体（Struct）</h3><pre><code class="highlight rust"><span class="comment">// 定义结构体</span>
+<span class="keyword">struct</span> <span class="title class_">User</span> &#123;
+    username: <span class="type">String</span>,
+    email: <span class="type">String</span>,
+    age: <span class="type">u32</span>,
+    active: <span class="type">bool</span>,
+&#125;
+
+<span class="comment">// 为结构体实现方法</span>
+<span class="keyword">impl</span> <span class="title class_">User</span> &#123;
+    <span class="comment">// 关联函数（类似构造函数）</span>
+    <span class="keyword">fn</span> <span class="title function_">new</span>(username: <span class="type">String</span>, email: <span class="type">String</span>, age: <span class="type">u32</span>) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123;
+        User &#123;
+            username,
+            email,
+            age,
+            active: <span class="literal">true</span>,
+        &#125;
+    &#125;
+
+    <span class="comment">// 方法（&amp;self 为不可变引用）</span>
+    <span class="keyword">fn</span> <span class="title function_">summary</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> <span class="type">String</span> &#123;
+        <span class="built_in">format!</span>(<span class="string">&quot;&#123;&#125; &lt;&#123;&#125;&gt;, &#123;&#125;岁&quot;</span>, <span class="keyword">self</span>.username, <span class="keyword">self</span>.email, <span class="keyword">self</span>.age)
+    &#125;
+
+    <span class="comment">// 可变方法</span>
+    <span class="keyword">fn</span> <span class="title function_">deactivate</span>(&amp;<span class="keyword">mut</span> <span class="keyword">self</span>) &#123;
+        <span class="keyword">self</span>.active = <span class="literal">false</span>;
+    &#125;
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">user</span> = User::<span class="title function_ invoke__">new</span>(
+        <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;张三&quot;</span>),
+        <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;zhangsan@example.com&quot;</span>),
+        <span class="number">25</span>,
+    );
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, user.<span class="title function_ invoke__">summary</span>());
+    user.<span class="title function_ invoke__">deactivate</span>();
+&#125;</code></pre>
+
+<h3 id="8-2-枚举（Enum）"><a href="#8-2-枚举（Enum）" class="headerlink" title="8.2 枚举（Enum）"></a>8.2 枚举（Enum）</h3><pre><code class="highlight rust"><span class="comment">// 枚举可以携带数据</span>
+<span class="keyword">enum</span> <span class="title class_">Message</span> &#123;
+    Quit,
+    <span class="title function_ invoke__">Echo</span>(<span class="type">String</span>),
+    Move &#123; x: <span class="type">i32</span>, y: <span class="type">i32</span> &#125;,
+    <span class="title function_ invoke__">Color</span>(<span class="type">u8</span>, <span class="type">u8</span>, <span class="type">u8</span>),
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">Message</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">call</span>(&amp;<span class="keyword">self</span>) &#123;
+        <span class="keyword">match</span> <span class="keyword">self</span> &#123;
+            Message::Quit =&gt; <span class="built_in">println!</span>(<span class="string">&quot;退出&quot;</span>),
+            Message::<span class="title function_ invoke__">Echo</span>(text) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;回显: &#123;&#125;&quot;</span>, text),
+            Message::Move &#123; x, y &#125; =&gt; <span class="built_in">println!</span>(<span class="string">&quot;移动到 (&#123;&#125;, &#123;&#125;)&quot;</span>, x, y),
+            Message::<span class="title function_ invoke__">Color</span>(r, g, b) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;颜色: (&#123;&#125;, &#123;&#125;, &#123;&#125;)&quot;</span>, r, g, b),
+        &#125;
+    &#125;
+&#125;
+
+<span class="comment">// Option 枚举 —— Rust 用它替代 null</span>
+<span class="keyword">fn</span> <span class="title function_">find_item</span>(id: <span class="type">u32</span>) <span class="punctuation">-&gt;</span> <span class="type">Option</span>&lt;<span class="type">String</span>&gt; &#123;
+    <span class="keyword">if</span> id == <span class="number">1</span> &#123;
+        <span class="title function_ invoke__">Some</span>(<span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;找到了&quot;</span>))
+    &#125; <span class="keyword">else</span> &#123;
+        <span class="literal">None</span>
+    &#125;
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">msg</span> = Message::Move &#123; x: <span class="number">10</span>, y: <span class="number">20</span> &#125;;
+    msg.<span class="title function_ invoke__">call</span>();
+
+    <span class="comment">// 处理 Option</span>
+    <span class="keyword">match</span> <span class="title function_ invoke__">find_item</span>(<span class="number">1</span>) &#123;
+        <span class="title function_ invoke__">Some</span>(item) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, item),
+        <span class="literal">None</span> =&gt; <span class="built_in">println!</span>(<span class="string">&quot;未找到&quot;</span>),
+    &#125;
+
+    <span class="comment">// 更简洁的写法</span>
+    <span class="keyword">if</span> <span class="keyword">let</span> <span class="variable">Some</span>(item) = <span class="title function_ invoke__">find_item</span>(<span class="number">1</span>) &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, item);
+    &#125;
+&#125;</code></pre>
+
+<hr>
+<h2 id="9-模式匹配"><a href="#9-模式匹配" class="headerlink" title="9. 模式匹配"></a>9. 模式匹配</h2><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">x</span> = <span class="number">5</span>;
+
+    <span class="comment">// match 表达式（必须穷尽所有可能）</span>
+    <span class="keyword">match</span> x &#123;
+        <span class="number">1</span> =&gt; <span class="built_in">println!</span>(<span class="string">&quot;一&quot;</span>),
+        <span class="number">2</span> | <span class="number">3</span> =&gt; <span class="built_in">println!</span>(<span class="string">&quot;二或三&quot;</span>),       <span class="comment">// 多个值</span>
+        <span class="number">4</span>..=<span class="number">9</span> =&gt; <span class="built_in">println!</span>(<span class="string">&quot;四到九&quot;</span>),        <span class="comment">// 范围</span>
+        _ =&gt; <span class="built_in">println!</span>(<span class="string">&quot;其他&quot;</span>),              <span class="comment">// 通配符</span>
+    &#125;
+
+    <span class="comment">// 解构匹配</span>
+    <span class="keyword">let</span> <span class="variable">point</span> = (<span class="number">3</span>, -<span class="number">5</span>);
+    <span class="keyword">match</span> point &#123;
+        (<span class="number">0</span>, <span class="number">0</span>) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;原点&quot;</span>),
+        (x, <span class="number">0</span>) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;x 轴上, x = &#123;&#125;&quot;</span>, x),
+        (<span class="number">0</span>, y) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;y 轴上, y = &#123;&#125;&quot;</span>, y),
+        (x, y) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;点 (&#123;&#125;, &#123;&#125;)&quot;</span>, x, y),
+    &#125;
+
+    <span class="comment">// 带守卫的匹配</span>
+    <span class="keyword">let</span> <span class="variable">num</span> = <span class="title function_ invoke__">Some</span>(<span class="number">42</span>);
+    <span class="keyword">match</span> num &#123;
+        <span class="title function_ invoke__">Some</span>(n) <span class="keyword">if</span> n &lt; <span class="number">0</span> =&gt; <span class="built_in">println!</span>(<span class="string">&quot;负数&quot;</span>),
+        <span class="title function_ invoke__">Some</span>(n) <span class="keyword">if</span> n &gt; <span class="number">0</span> =&gt; <span class="built_in">println!</span>(<span class="string">&quot;正数: &#123;&#125;&quot;</span>, n),
+        <span class="title function_ invoke__">Some</span>(<span class="number">0</span>) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;零&quot;</span>),
+        <span class="literal">None</span> =&gt; <span class="built_in">println!</span>(<span class="string">&quot;无值&quot;</span>),
+        _ =&gt; <span class="built_in">unreachable!</span>(),
+    &#125;
+&#125;</code></pre>
+
+<hr>
+<h2 id="10-错误处理"><a href="#10-错误处理" class="headerlink" title="10. 错误处理"></a>10. 错误处理</h2><p>Rust 没有异常机制，使用 <code>Result&lt;T, E&gt;</code> 和 <code>Option&lt;T&gt;</code> 处理错误。</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> std::fs;
+<span class="keyword">use</span> std::io;
+
+<span class="comment">// Result 表示可能失败的操作</span>
+<span class="keyword">fn</span> <span class="title function_">read_config</span>(path: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="type">String</span>, io::Error&gt; &#123;
+    fs::<span class="title function_ invoke__">read_to_string</span>(path)
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// match 处理</span>
+    <span class="keyword">match</span> <span class="title function_ invoke__">read_config</span>(<span class="string">&quot;config.toml&quot;</span>) &#123;
+        <span class="title function_ invoke__">Ok</span>(content) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;配置内容: &#123;&#125;&quot;</span>, content),
+        <span class="title function_ invoke__">Err</span>(e) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;读取失败: &#123;&#125;&quot;</span>, e),
+    &#125;
+
+    <span class="comment">// unwrap_or_else</span>
+    <span class="keyword">let</span> <span class="variable">content</span> = <span class="title function_ invoke__">read_config</span>(<span class="string">&quot;config.toml&quot;</span>)
+        .<span class="title function_ invoke__">unwrap_or_else</span>(|_| <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;默认配置&quot;</span>));
+
+    <span class="comment">// ? 运算符 —— 自动传播错误（只能在返回 Result 的函数中使用）</span>
+    <span class="comment">// fn load() -&gt; Result&lt;String, io::Error&gt; &#123;</span>
+    <span class="comment">//     let content = fs::read_to_string(&quot;file.txt&quot;)?;</span>
+    <span class="comment">//     Ok(content)</span>
+    <span class="comment">// &#125;</span>
+&#125;</code></pre>
+
+<h3 id="运算符链式调用"><a href="#运算符链式调用" class="headerlink" title="? 运算符链式调用"></a><code>?</code> 运算符链式调用</h3><pre><code class="highlight rust"><span class="keyword">use</span> std::fs::File;
+<span class="keyword">use</span> std::io::&#123;<span class="keyword">self</span>, Read&#125;;
+
+<span class="keyword">fn</span> <span class="title function_">read_username_from_file</span>() <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="type">String</span>, io::Error&gt; &#123;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">s</span> = <span class="type">String</span>::<span class="title function_ invoke__">new</span>();
+    File::<span class="title function_ invoke__">open</span>(<span class="string">&quot;username.txt&quot;</span>)?.<span class="title function_ invoke__">read_to_string</span>(&amp;<span class="keyword">mut</span> s)?;
+    <span class="title function_ invoke__">Ok</span>(s)
+&#125;</code></pre>
+
+<hr>
+<h2 id="11-泛型与-Trait"><a href="#11-泛型与-Trait" class="headerlink" title="11. 泛型与 Trait"></a>11. 泛型与 Trait</h2><h3 id="11-1-泛型"><a href="#11-1-泛型" class="headerlink" title="11.1 泛型"></a>11.1 泛型</h3><pre><code class="highlight rust"><span class="comment">// 泛型函数</span>
+<span class="keyword">fn</span> <span class="title function_">largest</span>&lt;T: <span class="built_in">PartialOrd</span>&gt;(list: &amp;[T]) <span class="punctuation">-&gt;</span> &amp;T &#123;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">max</span> = &amp;list[<span class="number">0</span>];
+    <span class="keyword">for</span> <span class="variable">item</span> <span class="keyword">in</span> &amp;list[<span class="number">1</span>..] &#123;
+        <span class="keyword">if</span> item &gt; max &#123;
+            max = item;
+        &#125;
+    &#125;
+    max
+&#125;
+
+<span class="comment">// 泛型结构体</span>
+<span class="keyword">struct</span> <span class="title class_">Point</span>&lt;T&gt; &#123;
+    x: T,
+    y: T,
+&#125;
+
+<span class="keyword">impl</span>&lt;T: std::fmt::Display&gt; Point&lt;T&gt; &#123;
+    <span class="keyword">fn</span> <span class="title function_">show</span>(&amp;<span class="keyword">self</span>) &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;(&#123;&#125;, &#123;&#125;)&quot;</span>, <span class="keyword">self</span>.x, <span class="keyword">self</span>.y);
+    &#125;
+&#125;</code></pre>
+
+<h3 id="11-2-Trait（类似接口）"><a href="#11-2-Trait（类似接口）" class="headerlink" title="11.2 Trait（类似接口）"></a>11.2 Trait（类似接口）</h3><pre><code class="highlight rust"><span class="comment">// 定义 Trait</span>
+<span class="keyword">trait</span> <span class="title class_">Summary</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">summarize</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> <span class="type">String</span>;
+
+    <span class="comment">// 可提供默认实现</span>
+    <span class="keyword">fn</span> <span class="title function_">preview</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> <span class="type">String</span> &#123;
+        <span class="built_in">format!</span>(<span class="string">&quot;&#123;&#125;...&quot;</span>, &amp;<span class="keyword">self</span>.<span class="title function_ invoke__">summarize</span>()[..<span class="number">20</span>])
+    &#125;
+&#125;
+
+<span class="keyword">struct</span> <span class="title class_">Article</span> &#123;
+    title: <span class="type">String</span>,
+    content: <span class="type">String</span>,
+&#125;
+
+<span class="comment">// 为类型实现 Trait</span>
+<span class="keyword">impl</span> <span class="title class_">Summary</span> <span class="keyword">for</span> <span class="title class_">Article</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">summarize</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> <span class="type">String</span> &#123;
+        <span class="built_in">format!</span>(<span class="string">&quot;&#123;&#125;: &#123;&#125;&quot;</span>, <span class="keyword">self</span>.title, <span class="keyword">self</span>.content)
+    &#125;
+&#125;
+
+<span class="comment">// Trait 作为参数</span>
+<span class="keyword">fn</span> <span class="title function_">notify</span>(item: &amp;<span class="keyword">impl</span> <span class="title class_">Summary</span>) &#123;
+    <span class="built_in">println!</span>(<span class="string">&quot;新消息: &#123;&#125;&quot;</span>, item.<span class="title function_ invoke__">summarize</span>());
+&#125;
+
+<span class="comment">// Trait Bound 写法（更灵活）</span>
+<span class="keyword">fn</span> <span class="title function_">notify_all</span>&lt;T: Summary + std::fmt::Display&gt;(item: &amp;T) &#123;
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, item);
+&#125;</code></pre>
+
+<hr>
+<h2 id="12-集合类型"><a href="#12-集合类型" class="headerlink" title="12. 集合类型"></a>12. 集合类型</h2><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// Vec&lt;T&gt; —— 动态数组</span>
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">vec</span>: <span class="type">Vec</span>&lt;<span class="type">i32</span>&gt; = <span class="type">Vec</span>::<span class="title function_ invoke__">new</span>();
+    vec.<span class="title function_ invoke__">push</span>(<span class="number">1</span>);
+    vec.<span class="title function_ invoke__">push</span>(<span class="number">2</span>);
+    vec.<span class="title function_ invoke__">push</span>(<span class="number">3</span>);
+
+    <span class="keyword">let</span> <span class="variable">vec2</span> = <span class="built_in">vec!</span>[<span class="number">10</span>, <span class="number">20</span>, <span class="number">30</span>];   <span class="comment">// 宏创建</span>
+
+    <span class="keyword">for</span> <span class="variable">v</span> <span class="keyword">in</span> &amp;vec2 &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, v);
+    &#125;
+
+    <span class="comment">// HashMap&lt;K, V&gt; —— 哈希映射</span>
+    <span class="keyword">use</span> std::collections::HashMap;
+
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">scores</span>: HashMap&lt;<span class="type">String</span>, <span class="type">i32</span>&gt; = HashMap::<span class="title function_ invoke__">new</span>();
+    scores.<span class="title function_ invoke__">insert</span>(<span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;Alice&quot;</span>), <span class="number">95</span>);
+    scores.<span class="title function_ invoke__">insert</span>(<span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;Bob&quot;</span>), <span class="number">87</span>);
+
+    <span class="comment">// 查询</span>
+    <span class="keyword">if</span> <span class="keyword">let</span> <span class="variable">Some</span>(score) = scores.<span class="title function_ invoke__">get</span>(<span class="string">&quot;Alice&quot;</span>) &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;Alice 的分数: &#123;&#125;&quot;</span>, score);
+    &#125;
+
+    <span class="comment">// 遍历</span>
+    <span class="keyword">for</span> (name, score) <span class="keyword">in</span> &amp;scores &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;: &#123;&#125;&quot;</span>, name, score);
+    &#125;
+
+    <span class="comment">// String —— UTF-8 字符串</span>
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">s</span> = <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;Hello&quot;</span>);
+    s.<span class="title function_ invoke__">push_str</span>(<span class="string">&quot;, Rust!&quot;</span>);
+    s.<span class="title function_ invoke__">push</span>(<span class="string">&#x27;🦀&#x27;</span>);
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, s);
+&#125;</code></pre>
+
+<hr>
+<h2 id="13-闭包与迭代器"><a href="#13-闭包与迭代器" class="headerlink" title="13. 闭包与迭代器"></a>13. 闭包与迭代器</h2><h3 id="13-1-闭包"><a href="#13-1-闭包" class="headerlink" title="13.1 闭包"></a>13.1 闭包</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// 闭包 —— 可以捕获环境变量的匿名函数</span>
+    <span class="keyword">let</span> <span class="variable">add</span> = |a: <span class="type">i32</span>, b: <span class="type">i32</span>| <span class="punctuation">-&gt;</span> <span class="type">i32</span> &#123; a + b &#125;;
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, <span class="title function_ invoke__">add</span>(<span class="number">2</span>, <span class="number">3</span>));
+
+    <span class="comment">// 类型推导，简写</span>
+    <span class="keyword">let</span> <span class="variable">square</span> = |x| x * x;
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, <span class="title function_ invoke__">square</span>(<span class="number">5</span>));
+
+    <span class="comment">// 捕获环境变量</span>
+    <span class="keyword">let</span> <span class="variable">factor</span> = <span class="number">10</span>;
+    <span class="keyword">let</span> <span class="variable">multiply</span> = |x| x * factor;
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, <span class="title function_ invoke__">multiply</span>(<span class="number">5</span>));   <span class="comment">// 50</span>
+&#125;</code></pre>
+
+<h3 id="13-2-迭代器"><a href="#13-2-迭代器" class="headerlink" title="13.2 迭代器"></a>13.2 迭代器</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">numbers</span> = <span class="built_in">vec!</span>[<span class="number">1</span>, <span class="number">2</span>, <span class="number">3</span>, <span class="number">4</span>, <span class="number">5</span>];
+
+    <span class="comment">// 链式调用</span>
+    <span class="keyword">let</span> <span class="variable">sum</span>: <span class="type">i32</span> = numbers.<span class="title function_ invoke__">iter</span>()
+        .<span class="title function_ invoke__">filter</span>(|&amp;&amp;x| x &gt; <span class="number">2</span>)
+        .<span class="title function_ invoke__">map</span>(|&amp;x| x * x)
+        .<span class="title function_ invoke__">sum</span>();
+    <span class="built_in">println!</span>(<span class="string">&quot;结果: &#123;&#125;&quot;</span>, sum);   <span class="comment">// 9 + 16 + 25 = 50</span>
+
+    <span class="comment">// collect 转换</span>
+    <span class="keyword">let</span> <span class="variable">doubled</span>: <span class="type">Vec</span>&lt;<span class="type">i32</span>&gt; = numbers.<span class="title function_ invoke__">iter</span>()
+        .<span class="title function_ invoke__">map</span>(|&amp;x| x * <span class="number">2</span>)
+        .<span class="title function_ invoke__">collect</span>();
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;:?&#125;&quot;</span>, doubled);   <span class="comment">// [2, 4, 6, 8, 10]</span>
+&#125;</code></pre>
+
+<hr>
+<h2 id="14-并发编程"><a href="#14-并发编程" class="headerlink" title="14. 并发编程"></a>14. 并发编程</h2><pre><code class="highlight rust"><span class="keyword">use</span> std::thread;
+<span class="keyword">use</span> std::sync::&#123;Arc, Mutex&#125;;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// 创建线程</span>
+    <span class="keyword">let</span> <span class="variable">handle</span> = thread::<span class="title function_ invoke__">spawn</span>(|| &#123;
+        <span class="keyword">for</span> <span class="variable">i</span> <span class="keyword">in</span> <span class="number">1</span>..<span class="number">5</span> &#123;
+            <span class="built_in">println!</span>(<span class="string">&quot;子线程: &#123;&#125;&quot;</span>, i);
+        &#125;
+    &#125;);
+
+    <span class="keyword">for</span> <span class="variable">i</span> <span class="keyword">in</span> <span class="number">1</span>..<span class="number">3</span> &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;主线程: &#123;&#125;&quot;</span>, i);
+    &#125;
+
+    handle.<span class="title function_ invoke__">join</span>().<span class="title function_ invoke__">unwrap</span>();   <span class="comment">// 等待子线程完成</span>
+
+    <span class="comment">// 使用 Arc + Mutex 安全共享数据</span>
+    <span class="keyword">let</span> <span class="variable">counter</span> = Arc::<span class="title function_ invoke__">new</span>(Mutex::<span class="title function_ invoke__">new</span>(<span class="number">0</span>));
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">handles</span> = <span class="built_in">vec!</span>[];
+
+    <span class="keyword">for</span> <span class="variable">_</span> <span class="keyword">in</span> <span class="number">0</span>..<span class="number">10</span> &#123;
+        <span class="keyword">let</span> <span class="variable">counter</span> = Arc::<span class="title function_ invoke__">clone</span>(&amp;counter);
+        <span class="keyword">let</span> <span class="variable">handle</span> = thread::<span class="title function_ invoke__">spawn</span>(<span class="keyword">move</span> || &#123;
+            <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">num</span> = counter.<span class="title function_ invoke__">lock</span>().<span class="title function_ invoke__">unwrap</span>();
+            *num += <span class="number">1</span>;
+        &#125;);
+        handles.<span class="title function_ invoke__">push</span>(handle);
+    &#125;
+
+    <span class="keyword">for</span> <span class="variable">handle</span> <span class="keyword">in</span> handles &#123;
+        handle.<span class="title function_ invoke__">join</span>().<span class="title function_ invoke__">unwrap</span>();
+    &#125;
+
+    <span class="built_in">println!</span>(<span class="string">&quot;计数器: &#123;&#125;&quot;</span>, *counter.<span class="title function_ invoke__">lock</span>().<span class="title function_ invoke__">unwrap</span>());   <span class="comment">// 10</span>
+&#125;</code></pre>
+
+<h3 id="消息传递（Channel）"><a href="#消息传递（Channel）" class="headerlink" title="消息传递（Channel）"></a>消息传递（Channel）</h3><pre><code class="highlight rust"><span class="keyword">use</span> std::sync::mpsc;
+<span class="keyword">use</span> std::thread;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> (tx, rx) = mpsc::<span class="title function_ invoke__">channel</span>();
+
+    thread::<span class="title function_ invoke__">spawn</span>(<span class="keyword">move</span> || &#123;
+        <span class="keyword">let</span> <span class="variable">messages</span> = <span class="built_in">vec!</span>[<span class="string">&quot;你好&quot;</span>, <span class="string">&quot;来自&quot;</span>, <span class="string">&quot;子线程&quot;</span>];
+        <span class="keyword">for</span> <span class="variable">msg</span> <span class="keyword">in</span> messages &#123;
+            tx.<span class="title function_ invoke__">send</span>(msg).<span class="title function_ invoke__">unwrap</span>();
+        &#125;
+    &#125;);
+
+    <span class="keyword">for</span> <span class="variable">received</span> <span class="keyword">in</span> rx &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;收到: &#123;&#125;&quot;</span>, received);
+    &#125;
+&#125;</code></pre>
+
+<hr>
+<h2 id="15-Cargo-与包管理"><a href="#15-Cargo-与包管理" class="headerlink" title="15. Cargo 与包管理"></a>15. Cargo 与包管理</h2><h3 id="Cargo-toml-配置"><a href="#Cargo-toml-配置" class="headerlink" title="Cargo.toml 配置"></a>Cargo.toml 配置</h3><pre><code class="highlight toml"><span class="section">[package]</span>
+<span class="attr">name</span> = <span class="string">&quot;my_project&quot;</span>
+<span class="attr">version</span> = <span class="string">&quot;0.1.0&quot;</span>
+<span class="attr">edition</span> = <span class="string">&quot;2021&quot;</span>
+
+<span class="section">[dependencies]</span>
+<span class="attr">serde</span> = &#123; version = <span class="string">&quot;1.0&quot;</span>, features = [<span class="string">&quot;derive&quot;</span>] &#125;
+<span class="attr">tokio</span> = &#123; version = <span class="string">&quot;1&quot;</span>, features = [<span class="string">&quot;full&quot;</span>] &#125;
+<span class="attr">reqwest</span> = <span class="string">&quot;0.11&quot;</span>
+
+<span class="section">[dev-dependencies]</span>
+<span class="attr">assert_cmd</span> = <span class="string">&quot;2.0&quot;</span></code></pre>
+
+<h3 id="常用-Cargo-命令"><a href="#常用-Cargo-命令" class="headerlink" title="常用 Cargo 命令"></a>常用 Cargo 命令</h3><pre><code class="highlight bash">cargo new project_name    <span class="comment"># 创建项目</span>
+cargo build               <span class="comment"># 编译</span>
+cargo run                 <span class="comment"># 编译并运行</span>
+cargo <span class="built_in">test</span>                <span class="comment"># 运行测试</span>
+cargo doc --open          <span class="comment"># 生成并打开文档</span>
+cargo <span class="built_in">fmt</span>                 <span class="comment"># 格式化代码</span>
+cargo clippy              <span class="comment"># 代码检查</span>
+cargo add serde           <span class="comment"># 添加依赖（需 cargo-edit）</span>
+cargo update              <span class="comment"># 更新依赖</span></code></pre>
+
+<hr>
+<h2 id="16-测试"><a href="#16-测试" class="headerlink" title="16. 测试"></a>16. 测试</h2><pre><code class="highlight rust"><span class="comment">// 单元测试（写在同一文件中）</span>
+<span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">add</span>(a: <span class="type">i32</span>, b: <span class="type">i32</span>) <span class="punctuation">-&gt;</span> <span class="type">i32</span> &#123;
+    a + b
+&#125;
+
+<span class="meta">#[cfg(test)]</span>
+<span class="keyword">mod</span> tests &#123;
+    <span class="keyword">use</span> super::*;
+
+    <span class="meta">#[test]</span>
+    <span class="keyword">fn</span> <span class="title function_">test_add</span>() &#123;
+        <span class="built_in">assert_eq!</span>(<span class="title function_ invoke__">add</span>(<span class="number">2</span>, <span class="number">3</span>), <span class="number">5</span>);
+    &#125;
+
+    <span class="meta">#[test]</span>
+    <span class="keyword">fn</span> <span class="title function_">test_add_negative</span>() &#123;
+        <span class="built_in">assert_eq!</span>(<span class="title function_ invoke__">add</span>(-<span class="number">1</span>, <span class="number">1</span>), <span class="number">0</span>);
+    &#125;
+
+    <span class="meta">#[test]</span>
+    <span class="meta">#[should_panic(expected = <span class="string">&quot;溢出&quot;</span>)]</span>
+    <span class="keyword">fn</span> <span class="title function_">test_overflow</span>() &#123;
+        <span class="built_in">panic!</span>(<span class="string">&quot;溢出&quot;</span>);
+    &#125;
+&#125;</code></pre>
+
+<hr>
+<h2 id="17-常用宏速览"><a href="#17-常用宏速览" class="headerlink" title="17. 常用宏速览"></a>17. 常用宏速览</h2><table>
+<thead>
+<tr>
+<th>宏</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>println!</code> &#x2F; <code>eprintln!</code></td>
+<td>标准输出 &#x2F; 错误输出</td>
+</tr>
+<tr>
+<td><code>format!</code></td>
+<td>格式化字符串</td>
+</tr>
+<tr>
+<td><code>vec!</code></td>
+<td>创建 Vec</td>
+</tr>
+<tr>
+<td><code>dbg!</code></td>
+<td>调试打印（含文件名和行号）</td>
+</tr>
+<tr>
+<td><code>todo!</code></td>
+<td>标记未完成代码</td>
+</tr>
+<tr>
+<td><code>unimplemented!</code></td>
+<td>标记未实现代码</td>
+</tr>
+<tr>
+<td><code>assert!</code> &#x2F; <code>assert_eq!</code> &#x2F; <code>assert_ne!</code></td>
+<td>断言</td>
+</tr>
+<tr>
+<td><code>cfg!</code></td>
+<td>编译期条件检查</td>
+</tr>
+</tbody></table>
+<hr>
+<h2 id="总结"><a href="#总结" class="headerlink" title="总结"></a>总结</h2><p>Rust 的学习曲线虽然较陡，但一旦掌握所有权、借用和生命周期这些核心概念，就能编写出既安全又高效的代码。建议按以下路径学习：</p>
+<ol>
+<li><strong>基础语法</strong> → 变量、数据类型、函数、控制流</li>
+<li><strong>核心概念</strong> → 所有权、借用、生命周期</li>
+<li><strong>类型系统</strong> → 结构体、枚举、泛型、Trait</li>
+<li><strong>实用技能</strong> → 错误处理、集合、迭代器、闭包</li>
+<li><strong>进阶主题</strong> → 并发编程、智能指针、异步编程</li>
+</ol>
+<h3 id="推荐学习资源"><a href="#推荐学习资源" class="headerlink" title="推荐学习资源"></a>推荐学习资源</h3><ul>
+<li>📖 <a href="https://doc.rust-lang.org/book/">The Rust Programming Language</a>（官方教程）</li>
+<li>🏋️ <a href="https://github.com/rust-lang/rustlings">Rustlings</a>（交互式练习）</li>
+<li>📝 <a href="https://doc.rust-lang.org/rust-by-example/">Rust by Example</a>（示例学习）</li>
+<li>🔍 <a href="https://crates.io/">crates.io</a>（第三方库仓库）</li>
+</ul>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>

@@ -1,0 +1,21 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>深入学习Uniswap V3</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>深入学习Uniswap V3</h1><div class="time">2025-10-13</div><ul class="tags"><li><span>#</span><a href="/tags/Uniswap/">Uniswap</a></li></ul><h2 id="设计原理"><a href="#设计原理" class="headerlink" title="设计原理"></a>设计原理</h2><p>Uniswap V3允许用户只在一段价格区间内提供流动性，如下图：</p>
+<p><img src="/../img/v3-virtual-liquidity.png" alt="GMP关系模型"></p>
+<p>用户可以在区间<code>[a,b]</code>提供流动性，对于图中的区间<code>[a,b]</code>都有以下公式：</p>
+<p><img src="/../img/20251015095433_278_98.png"></p>
+<blockquote>
+<p>说明：1、Xreal和Yreal为用户实际提供的流动性数量，即x token和y token的实际数量。2、virtual则为流动池虚拟出的token，只是为了满足计算（x*y&#x3D;k）。</p>
+</blockquote>
+<blockquote>
+<p>注意在a点时，y token的真实数量为0，在b点时，x token的真实数量为0。</p>
+</blockquote>
+<p>引入虚拟token的概念，用户可以在某一个区间内提供流动性，然而每个用户提供够流动性的区间不一定都相同。所以Uniswap V3的流动性价格关系如下图第三个所示：</p>
+<p><img src="/../img/20251015181441_279_98.png"></p>
+<h2 id="tick介绍"><a href="#tick介绍" class="headerlink" title="tick介绍"></a>tick介绍</h2><p>tick就是一个价格的索引，价格P与tick之间有以下关系：</p>
+<p>$$<br>P &#x3D; 1.0001^{tick}<br>$$</p>
+<p>其中，tick的取值为$[-887272,887272]$之间，</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
