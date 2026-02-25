@@ -1,0 +1,917 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust 错误处理完全指南</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust 错误处理完全指南</h1><div class="time">2026-02-25</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><blockquote>
+<p>Rust 没有异常（Exception）机制，而是采用<strong>类型系统</strong>来处理错误。这种设计让错误处理变得显式、可靠，编译器会强制你处理每一个可能的错误——再也不会有”忘记 try-catch”的问题。</p>
+</blockquote>
+<hr>
+<h2 id="一、Rust-错误处理的两大类别"><a href="#一、Rust-错误处理的两大类别" class="headerlink" title="一、Rust 错误处理的两大类别"></a>一、Rust 错误处理的两大类别</h2><table>
+<thead>
+<tr>
+<th>类别</th>
+<th>类型</th>
+<th>说明</th>
+<th>典型场景</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>不可恢复错误</strong></td>
+<td><code>panic!</code></td>
+<td>程序遇到不可修复的错误，立即终止</td>
+<td>数组越界、不变量被破坏</td>
+</tr>
+<tr>
+<td><strong>可恢复错误</strong></td>
+<td><code>Result&lt;T, E&gt;</code></td>
+<td>操作可能失败，但可以优雅处理</td>
+<td>文件不存在、网络超时</td>
+</tr>
+</tbody></table>
+<hr>
+<h2 id="二、不可恢复错误：panic"><a href="#二、不可恢复错误：panic" class="headerlink" title="二、不可恢复错误：panic!"></a>二、不可恢复错误：<code>panic!</code></h2><h3 id="2-1-基本用法"><a href="#2-1-基本用法" class="headerlink" title="2.1 基本用法"></a>2.1 基本用法</h3><p>当程序遇到无法继续执行的情况时，使用 <code>panic!</code> 终止程序：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="built_in">panic!</span>(<span class="string">&quot;程序崩溃了！&quot;</span>);
+&#125;</code></pre>
+
+<p>输出：</p>
+<pre><code class="highlight plaintext">thread &#x27;main&#x27; panicked at &#x27;程序崩溃了！&#x27;, src/main.rs:2:5</code></pre>
+
+<h3 id="2-2-隐式-panic"><a href="#2-2-隐式-panic" class="headerlink" title="2.2 隐式 panic"></a>2.2 隐式 panic</h3><p>有些操作在失败时会自动 panic：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// 数组越界 —— 自动 panic</span>
+    <span class="keyword">let</span> <span class="variable">v</span> = <span class="built_in">vec!</span>[<span class="number">1</span>, <span class="number">2</span>, <span class="number">3</span>];
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, v[<span class="number">99</span>]);   <span class="comment">// thread &#x27;main&#x27; panicked at &#x27;index out of bounds&#x27;</span>
+
+    <span class="comment">// unwrap 在值为 None 时 panic</span>
+    <span class="keyword">let</span> <span class="variable">x</span>: <span class="type">Option</span>&lt;<span class="type">i32</span>&gt; = <span class="literal">None</span>;
+    x.<span class="title function_ invoke__">unwrap</span>();              <span class="comment">// thread &#x27;main&#x27; panicked at &#x27;called `Option::unwrap()` on a `None` value&#x27;</span>
+&#125;</code></pre>
+
+<h3 id="2-3-查看完整的-panic-调用栈"><a href="#2-3-查看完整的-panic-调用栈" class="headerlink" title="2.3 查看完整的 panic 调用栈"></a>2.3 查看完整的 panic 调用栈</h3><pre><code class="highlight bash"><span class="comment"># 设置环境变量，显示完整回溯信息</span>
+RUST_BACKTRACE=1 cargo run
+
+<span class="comment"># 更详细的回溯</span>
+RUST_BACKTRACE=full cargo run</code></pre>
+
+<h3 id="2-4-何时使用-panic"><a href="#2-4-何时使用-panic" class="headerlink" title="2.4 何时使用 panic!"></a>2.4 何时使用 panic!</h3><ul>
+<li>✅ 原型开发、快速验证想法</li>
+<li>✅ 测试代码中断言失败</li>
+<li>✅ 逻辑上”不可能”发生的情况（代表代码 bug）</li>
+<li>❌ 不要用于可预期的失败（文件不存在、用户输入错误等）</li>
+</ul>
+<hr>
+<h2 id="三、可恢复错误：Option"><a href="#三、可恢复错误：Option" class="headerlink" title="三、可恢复错误：Option&lt;T&gt;"></a>三、可恢复错误：<code>Option&lt;T&gt;</code></h2><p><code>Option</code> 用于表示”值可能不存在”的情况，替代其他语言中的 <code>null</code>。</p>
+<h3 id="3-1-Option-的定义"><a href="#3-1-Option-的定义" class="headerlink" title="3.1 Option 的定义"></a>3.1 Option 的定义</h3><pre><code class="highlight rust"><span class="comment">// 标准库中的定义</span>
+<span class="keyword">enum</span> <span class="title class_">Option</span>&lt;T&gt; &#123;
+    <span class="title function_ invoke__">Some</span>(T),    <span class="comment">// 有值</span>
+    <span class="literal">None</span>,       <span class="comment">// 无值</span>
+&#125;</code></pre>
+
+<h3 id="3-2-基本使用"><a href="#3-2-基本使用" class="headerlink" title="3.2 基本使用"></a>3.2 基本使用</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">find_user</span>(id: <span class="type">u32</span>) <span class="punctuation">-&gt;</span> <span class="type">Option</span>&lt;<span class="type">String</span>&gt; &#123;
+    <span class="keyword">match</span> id &#123;
+        <span class="number">1</span> =&gt; <span class="title function_ invoke__">Some</span>(<span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;Alice&quot;</span>)),
+        <span class="number">2</span> =&gt; <span class="title function_ invoke__">Some</span>(<span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;Bob&quot;</span>)),
+        _ =&gt; <span class="literal">None</span>,
+    &#125;
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// 方式一：match 匹配</span>
+    <span class="keyword">match</span> <span class="title function_ invoke__">find_user</span>(<span class="number">1</span>) &#123;
+        <span class="title function_ invoke__">Some</span>(name) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;找到用户: &#123;&#125;&quot;</span>, name),
+        <span class="literal">None</span> =&gt; <span class="built_in">println!</span>(<span class="string">&quot;用户不存在&quot;</span>),
+    &#125;
+
+    <span class="comment">// 方式二：if let 简洁写法</span>
+    <span class="keyword">if</span> <span class="keyword">let</span> <span class="variable">Some</span>(name) = <span class="title function_ invoke__">find_user</span>(<span class="number">2</span>) &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;找到用户: &#123;&#125;&quot;</span>, name);
+    &#125;
+&#125;</code></pre>
+
+<h3 id="3-3-Option-的常用方法"><a href="#3-3-Option-的常用方法" class="headerlink" title="3.3 Option 的常用方法"></a>3.3 Option 的常用方法</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">some_value</span>: <span class="type">Option</span>&lt;<span class="type">i32</span>&gt; = <span class="title function_ invoke__">Some</span>(<span class="number">42</span>);
+    <span class="keyword">let</span> <span class="variable">no_value</span>: <span class="type">Option</span>&lt;<span class="type">i32</span>&gt; = <span class="literal">None</span>;
+
+    <span class="comment">// unwrap —— 有值返回，无值 panic（仅用于确定有值或快速原型）</span>
+    <span class="keyword">let</span> <span class="variable">val</span> = some_value.<span class="title function_ invoke__">unwrap</span>();           <span class="comment">// 42</span>
+    <span class="comment">// no_value.unwrap();                    // ❌ panic!</span>
+
+    <span class="comment">// unwrap_or —— 提供默认值</span>
+    <span class="keyword">let</span> <span class="variable">val</span> = no_value.<span class="title function_ invoke__">unwrap_or</span>(<span class="number">0</span>);         <span class="comment">// 0</span>
+
+    <span class="comment">// unwrap_or_else —— 通过闭包计算默认值（惰性求值）</span>
+    <span class="keyword">let</span> <span class="variable">val</span> = no_value.<span class="title function_ invoke__">unwrap_or_else</span>(|| &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;使用默认值&quot;</span>);
+        <span class="number">100</span>
+    &#125;);
+
+    <span class="comment">// expect —— 类似 unwrap，但可自定义 panic 信息</span>
+    <span class="keyword">let</span> <span class="variable">val</span> = some_value.<span class="title function_ invoke__">expect</span>(<span class="string">&quot;值不应为空&quot;</span>); <span class="comment">// 42</span>
+
+    <span class="comment">// is_some / is_none —— 检查是否有值</span>
+    <span class="built_in">assert!</span>(some_value.<span class="title function_ invoke__">is_some</span>());
+    <span class="built_in">assert!</span>(no_value.<span class="title function_ invoke__">is_none</span>());
+
+    <span class="comment">// map —— 对内部值进行转换</span>
+    <span class="keyword">let</span> <span class="variable">doubled</span> = some_value.<span class="title function_ invoke__">map</span>(|x| x * <span class="number">2</span>);     <span class="comment">// Some(84)</span>
+    <span class="keyword">let</span> <span class="variable">doubled</span> = no_value.<span class="title function_ invoke__">map</span>(|x| x * <span class="number">2</span>);       <span class="comment">// None</span>
+
+    <span class="comment">// and_then（flatMap）—— 链式操作，避免 Option 嵌套</span>
+    <span class="keyword">let</span> <span class="variable">result</span> = some_value
+        .<span class="title function_ invoke__">and_then</span>(|x| <span class="keyword">if</span> x &gt; <span class="number">10</span> &#123; <span class="title function_ invoke__">Some</span>(x) &#125; <span class="keyword">else</span> &#123; <span class="literal">None</span> &#125;)
+        .<span class="title function_ invoke__">and_then</span>(|x| <span class="title function_ invoke__">Some</span>(x.<span class="title function_ invoke__">to_string</span>()));
+    <span class="comment">// Some(&quot;42&quot;)</span>
+
+    <span class="comment">// filter —— 根据条件过滤</span>
+    <span class="keyword">let</span> <span class="variable">filtered</span> = some_value.<span class="title function_ invoke__">filter</span>(|&amp;x| x &gt; <span class="number">50</span>);  <span class="comment">// None（42 不大于 50）</span>
+
+    <span class="comment">// or —— 如果是 None，返回备选 Option</span>
+    <span class="keyword">let</span> <span class="variable">val</span> = no_value.<span class="title function_ invoke__">or</span>(<span class="title function_ invoke__">Some</span>(<span class="number">99</span>));                 <span class="comment">// Some(99)</span>
+
+    <span class="comment">// zip —— 合并两个 Option</span>
+    <span class="keyword">let</span> <span class="variable">a</span> = <span class="title function_ invoke__">Some</span>(<span class="number">1</span>);
+    <span class="keyword">let</span> <span class="variable">b</span> = <span class="title function_ invoke__">Some</span>(<span class="string">&quot;hello&quot;</span>);
+    <span class="keyword">let</span> <span class="variable">zipped</span> = a.<span class="title function_ invoke__">zip</span>(b);                           <span class="comment">// Some((1, &quot;hello&quot;))</span>
+&#125;</code></pre>
+
+<h3 id="3-4-Option-在实际场景中的应用"><a href="#3-4-Option-在实际场景中的应用" class="headerlink" title="3.4 Option 在实际场景中的应用"></a>3.4 Option 在实际场景中的应用</h3><pre><code class="highlight rust"><span class="comment">// 在集合中查找元素</span>
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">numbers</span> = <span class="built_in">vec!</span>[<span class="number">1</span>, <span class="number">5</span>, <span class="number">9</span>, <span class="number">14</span>, <span class="number">20</span>];
+
+    <span class="comment">// Vec::iter().find() 返回 Option</span>
+    <span class="keyword">let</span> <span class="variable">first_even</span> = numbers.<span class="title function_ invoke__">iter</span>().<span class="title function_ invoke__">find</span>(|&amp;&amp;x| x % <span class="number">2</span> == <span class="number">0</span>);
+    <span class="keyword">match</span> first_even &#123;
+        <span class="title function_ invoke__">Some</span>(n) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;第一个偶数: &#123;&#125;&quot;</span>, n),
+        <span class="literal">None</span> =&gt; <span class="built_in">println!</span>(<span class="string">&quot;没有偶数&quot;</span>),
+    &#125;
+
+    <span class="comment">// HashMap::get() 返回 Option</span>
+    <span class="keyword">use</span> std::collections::HashMap;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">scores</span> = HashMap::<span class="title function_ invoke__">new</span>();
+    scores.<span class="title function_ invoke__">insert</span>(<span class="string">&quot;Alice&quot;</span>, <span class="number">95</span>);
+
+    <span class="keyword">let</span> <span class="variable">alice_score</span> = scores.<span class="title function_ invoke__">get</span>(<span class="string">&quot;Alice&quot;</span>);   <span class="comment">// Some(&amp;95)</span>
+    <span class="keyword">let</span> <span class="variable">bob_score</span> = scores.<span class="title function_ invoke__">get</span>(<span class="string">&quot;Bob&quot;</span>);       <span class="comment">// None</span>
+
+    <span class="comment">// 字符串解析</span>
+    <span class="keyword">let</span> <span class="variable">parsed</span>: <span class="type">Option</span>&lt;<span class="type">i32</span>&gt; = <span class="string">&quot;42&quot;</span>.<span class="title function_ invoke__">parse</span>().<span class="title function_ invoke__">ok</span>();      <span class="comment">// Some(42)</span>
+    <span class="keyword">let</span> <span class="variable">failed</span>: <span class="type">Option</span>&lt;<span class="type">i32</span>&gt; = <span class="string">&quot;abc&quot;</span>.<span class="title function_ invoke__">parse</span>().<span class="title function_ invoke__">ok</span>();     <span class="comment">// None</span>
+&#125;</code></pre>
+
+<hr>
+<h2 id="四、可恢复错误：Result"><a href="#四、可恢复错误：Result" class="headerlink" title="四、可恢复错误：Result&lt;T, E&gt;"></a>四、可恢复错误：<code>Result&lt;T, E&gt;</code></h2><p><code>Result</code> 是 Rust 错误处理的核心，用于表示”操作可能成功也可能失败”。</p>
+<h3 id="4-1-Result-的定义"><a href="#4-1-Result-的定义" class="headerlink" title="4.1 Result 的定义"></a>4.1 Result 的定义</h3><pre><code class="highlight rust"><span class="comment">// 标准库中的定义</span>
+<span class="keyword">enum</span> <span class="title class_">Result</span>&lt;T, E&gt; &#123;
+    <span class="title function_ invoke__">Ok</span>(T),      <span class="comment">// 成功，携带结果值</span>
+    <span class="title function_ invoke__">Err</span>(E),     <span class="comment">// 失败，携带错误信息</span>
+&#125;</code></pre>
+
+<h3 id="4-2-基本使用"><a href="#4-2-基本使用" class="headerlink" title="4.2 基本使用"></a>4.2 基本使用</h3><pre><code class="highlight rust"><span class="keyword">use</span> std::fs::File;
+<span class="keyword">use</span> std::io::Read;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// File::open 返回 Result&lt;File, io::Error&gt;</span>
+    <span class="keyword">let</span> <span class="variable">file_result</span> = File::<span class="title function_ invoke__">open</span>(<span class="string">&quot;hello.txt&quot;</span>);
+
+    <span class="comment">// 方式一：match 处理</span>
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">file</span> = <span class="keyword">match</span> file_result &#123;
+        <span class="title function_ invoke__">Ok</span>(f) =&gt; f,
+        <span class="title function_ invoke__">Err</span>(e) =&gt; &#123;
+            <span class="built_in">println!</span>(<span class="string">&quot;打开文件失败: &#123;&#125;&quot;</span>, e);
+            <span class="keyword">return</span>;
+        &#125;
+    &#125;;
+
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">content</span> = <span class="type">String</span>::<span class="title function_ invoke__">new</span>();
+    <span class="keyword">match</span> file.<span class="title function_ invoke__">read_to_string</span>(&amp;<span class="keyword">mut</span> content) &#123;
+        <span class="title function_ invoke__">Ok</span>(bytes) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;读取了 &#123;&#125; 字节: &#123;&#125;&quot;</span>, bytes, content),
+        <span class="title function_ invoke__">Err</span>(e) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;读取失败: &#123;&#125;&quot;</span>, e),
+    &#125;
+&#125;</code></pre>
+
+<h3 id="4-3-根据错误类型分别处理"><a href="#4-3-根据错误类型分别处理" class="headerlink" title="4.3 根据错误类型分别处理"></a>4.3 根据错误类型分别处理</h3><pre><code class="highlight rust"><span class="keyword">use</span> std::fs::File;
+<span class="keyword">use</span> std::io::ErrorKind;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">file</span> = <span class="keyword">match</span> File::<span class="title function_ invoke__">open</span>(<span class="string">&quot;config.toml&quot;</span>) &#123;
+        <span class="title function_ invoke__">Ok</span>(f) =&gt; f,
+        <span class="title function_ invoke__">Err</span>(e) =&gt; <span class="keyword">match</span> e.<span class="title function_ invoke__">kind</span>() &#123;
+            <span class="comment">// 文件不存在 → 创建文件</span>
+            ErrorKind::NotFound =&gt; <span class="keyword">match</span> File::<span class="title function_ invoke__">create</span>(<span class="string">&quot;config.toml&quot;</span>) &#123;
+                <span class="title function_ invoke__">Ok</span>(fc) =&gt; &#123;
+                    <span class="built_in">println!</span>(<span class="string">&quot;配置文件不存在，已创建&quot;</span>);
+                    fc
+                &#125;
+                <span class="title function_ invoke__">Err</span>(ce) =&gt; <span class="built_in">panic!</span>(<span class="string">&quot;创建文件失败: &#123;&#125;&quot;</span>, ce),
+            &#125;,
+            <span class="comment">// 权限不足</span>
+            ErrorKind::PermissionDenied =&gt; &#123;
+                <span class="built_in">panic!</span>(<span class="string">&quot;没有权限打开文件&quot;</span>);
+            &#125;
+            <span class="comment">// 其他错误</span>
+            other =&gt; <span class="built_in">panic!</span>(<span class="string">&quot;打开文件时发生未知错误: &#123;:?&#125;&quot;</span>, other),
+        &#125;,
+    &#125;;
+&#125;</code></pre>
+
+<h3 id="4-4-使用闭包简化（推荐）"><a href="#4-4-使用闭包简化（推荐）" class="headerlink" title="4.4 使用闭包简化（推荐）"></a>4.4 使用闭包简化（推荐）</h3><pre><code class="highlight rust"><span class="keyword">use</span> std::fs::File;
+<span class="keyword">use</span> std::io::ErrorKind;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// 用 unwrap_or_else 替代嵌套 match</span>
+    <span class="keyword">let</span> <span class="variable">file</span> = File::<span class="title function_ invoke__">open</span>(<span class="string">&quot;config.toml&quot;</span>).<span class="title function_ invoke__">unwrap_or_else</span>(|error| &#123;
+        <span class="keyword">if</span> error.<span class="title function_ invoke__">kind</span>() == ErrorKind::NotFound &#123;
+            File::<span class="title function_ invoke__">create</span>(<span class="string">&quot;config.toml&quot;</span>).<span class="title function_ invoke__">unwrap_or_else</span>(|e| &#123;
+                <span class="built_in">panic!</span>(<span class="string">&quot;创建文件失败: &#123;&#125;&quot;</span>, e);
+            &#125;)
+        &#125; <span class="keyword">else</span> &#123;
+            <span class="built_in">panic!</span>(<span class="string">&quot;打开文件失败: &#123;&#125;&quot;</span>, error);
+        &#125;
+    &#125;);
+&#125;</code></pre>
+
+<h3 id="4-5-Result-的常用方法"><a href="#4-5-Result-的常用方法" class="headerlink" title="4.5 Result 的常用方法"></a>4.5 Result 的常用方法</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">parse_number</span>(s: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="type">i32</span>, std::num::ParseIntError&gt; &#123;
+    s.parse::&lt;<span class="type">i32</span>&gt;()
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">ok_result</span> = <span class="title function_ invoke__">parse_number</span>(<span class="string">&quot;42&quot;</span>);
+    <span class="keyword">let</span> <span class="variable">err_result</span> = <span class="title function_ invoke__">parse_number</span>(<span class="string">&quot;abc&quot;</span>);
+
+    <span class="comment">// unwrap / expect</span>
+    <span class="keyword">let</span> <span class="variable">val</span> = ok_result.<span class="title function_ invoke__">unwrap</span>();                    <span class="comment">// 42</span>
+    <span class="keyword">let</span> <span class="variable">val</span> = <span class="title function_ invoke__">parse_number</span>(<span class="string">&quot;42&quot;</span>).<span class="title function_ invoke__">expect</span>(<span class="string">&quot;解析失败&quot;</span>); <span class="comment">// 42</span>
+
+    <span class="comment">// unwrap_or / unwrap_or_else / unwrap_or_default</span>
+    <span class="keyword">let</span> <span class="variable">val</span> = err_result.<span class="title function_ invoke__">unwrap_or</span>(<span class="number">0</span>);                             <span class="comment">// 0</span>
+    <span class="keyword">let</span> <span class="variable">val</span> = <span class="title function_ invoke__">parse_number</span>(<span class="string">&quot;abc&quot;</span>).<span class="title function_ invoke__">unwrap_or_else</span>(|_| -<span class="number">1</span>);          <span class="comment">// -1</span>
+    <span class="keyword">let</span> <span class="variable">val</span>: <span class="type">i32</span> = <span class="title function_ invoke__">parse_number</span>(<span class="string">&quot;abc&quot;</span>).<span class="title function_ invoke__">unwrap_or_default</span>();        <span class="comment">// 0 (i32 的 default)</span>
+
+    <span class="comment">// map —— 转换成功值</span>
+    <span class="keyword">let</span> <span class="variable">doubled</span> = <span class="title function_ invoke__">parse_number</span>(<span class="string">&quot;21&quot;</span>).<span class="title function_ invoke__">map</span>(|n| n * <span class="number">2</span>);   <span class="comment">// Ok(42)</span>
+
+    <span class="comment">// map_err —— 转换错误值</span>
+    <span class="keyword">let</span> <span class="variable">result</span> = <span class="title function_ invoke__">parse_number</span>(<span class="string">&quot;abc&quot;</span>)
+        .<span class="title function_ invoke__">map_err</span>(|e| <span class="built_in">format!</span>(<span class="string">&quot;解析错误: &#123;&#125;&quot;</span>, e));      <span class="comment">// Err(&quot;解析错误: ...&quot;)</span>
+
+    <span class="comment">// and_then —— 链式操作</span>
+    <span class="keyword">let</span> <span class="variable">result</span> = <span class="title function_ invoke__">parse_number</span>(<span class="string">&quot;42&quot;</span>)
+        .<span class="title function_ invoke__">and_then</span>(|n| &#123;
+            <span class="keyword">if</span> n &gt; <span class="number">0</span> &#123; <span class="title function_ invoke__">Ok</span>(n) &#125; <span class="keyword">else</span> &#123; <span class="title function_ invoke__">Err</span>(<span class="string">&quot;must be positive&quot;</span>.parse::&lt;<span class="type">i32</span>&gt;().<span class="title function_ invoke__">unwrap_err</span>()) &#125;
+        &#125;);
+
+    <span class="comment">// is_ok / is_err</span>
+    <span class="built_in">assert!</span>(<span class="title function_ invoke__">parse_number</span>(<span class="string">&quot;42&quot;</span>).<span class="title function_ invoke__">is_ok</span>());
+    <span class="built_in">assert!</span>(<span class="title function_ invoke__">parse_number</span>(<span class="string">&quot;abc&quot;</span>).<span class="title function_ invoke__">is_err</span>());
+
+    <span class="comment">// ok() —— Result 转 Option（丢弃错误信息）</span>
+    <span class="keyword">let</span> <span class="variable">opt</span>: <span class="type">Option</span>&lt;<span class="type">i32</span>&gt; = <span class="title function_ invoke__">parse_number</span>(<span class="string">&quot;42&quot;</span>).<span class="title function_ invoke__">ok</span>();     <span class="comment">// Some(42)</span>
+
+    <span class="comment">// err() —— 提取错误</span>
+    <span class="keyword">let</span> <span class="variable">opt_err</span> = <span class="title function_ invoke__">parse_number</span>(<span class="string">&quot;abc&quot;</span>).<span class="title function_ invoke__">err</span>();             <span class="comment">// Some(ParseIntError)</span>
+&#125;</code></pre>
+
+<hr>
+<h2 id="五、-运算符：错误传播的利器"><a href="#五、-运算符：错误传播的利器" class="headerlink" title="五、? 运算符：错误传播的利器"></a>五、<code>?</code> 运算符：错误传播的利器</h2><p><code>?</code> 是 Rust 中最优雅的错误处理方式，它会自动传播错误，大幅减少样板代码。</p>
+<h3 id="5-1-基本用法"><a href="#5-1-基本用法" class="headerlink" title="5.1 基本用法"></a>5.1 基本用法</h3><pre><code class="highlight rust"><span class="keyword">use</span> std::fs;
+<span class="keyword">use</span> std::io;
+
+<span class="comment">// 不用 ? 的写法（繁琐）</span>
+<span class="keyword">fn</span> <span class="title function_">read_file_verbose</span>(path: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="type">String</span>, io::Error&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">content</span> = <span class="keyword">match</span> fs::<span class="title function_ invoke__">read_to_string</span>(path) &#123;
+        <span class="title function_ invoke__">Ok</span>(c) =&gt; c,
+        <span class="title function_ invoke__">Err</span>(e) =&gt; <span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(e),
+    &#125;;
+    <span class="title function_ invoke__">Ok</span>(content)
+&#125;
+
+<span class="comment">// 使用 ? 的写法（简洁）</span>
+<span class="keyword">fn</span> <span class="title function_">read_file</span>(path: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="type">String</span>, io::Error&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">content</span> = fs::<span class="title function_ invoke__">read_to_string</span>(path)?;   <span class="comment">// 失败时自动 return Err(e)</span>
+    <span class="title function_ invoke__">Ok</span>(content)
+&#125;
+
+<span class="comment">// 更简洁：直接返回</span>
+<span class="keyword">fn</span> <span class="title function_">read_file_short</span>(path: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="type">String</span>, io::Error&gt; &#123;
+    fs::<span class="title function_ invoke__">read_to_string</span>(path)
+&#125;</code></pre>
+
+<h3 id="5-2-链式调用"><a href="#5-2-链式调用" class="headerlink" title="5.2 链式调用"></a>5.2 链式调用</h3><pre><code class="highlight rust"><span class="keyword">use</span> std::fs::File;
+<span class="keyword">use</span> std::io::&#123;<span class="keyword">self</span>, Read&#125;;
+
+<span class="keyword">fn</span> <span class="title function_">read_username</span>() <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="type">String</span>, io::Error&gt; &#123;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">s</span> = <span class="type">String</span>::<span class="title function_ invoke__">new</span>();
+    File::<span class="title function_ invoke__">open</span>(<span class="string">&quot;username.txt&quot;</span>)?.<span class="title function_ invoke__">read_to_string</span>(&amp;<span class="keyword">mut</span> s)?;
+    <span class="title function_ invoke__">Ok</span>(s)
+&#125;</code></pre>
+
+<h3 id="5-3-在-Option-上使用"><a href="#5-3-在-Option-上使用" class="headerlink" title="5.3 在 Option 上使用 ?"></a>5.3 在 Option 上使用 <code>?</code></h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">first_even</span>(numbers: &amp;[<span class="type">i32</span>]) <span class="punctuation">-&gt;</span> <span class="type">Option</span>&lt;<span class="type">i32</span>&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">first</span> = numbers.<span class="title function_ invoke__">first</span>()?;   <span class="comment">// 如果是 None，提前返回 None</span>
+    <span class="keyword">if</span> first % <span class="number">2</span> == <span class="number">0</span> &#123;
+        <span class="title function_ invoke__">Some</span>(*first)
+    &#125; <span class="keyword">else</span> &#123;
+        <span class="literal">None</span>
+    &#125;
+&#125;
+
+<span class="comment">// 链式使用</span>
+<span class="keyword">fn</span> <span class="title function_">get_middle_char</span>(s: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">Option</span>&lt;<span class="type">char</span>&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">len</span> = s.<span class="title function_ invoke__">len</span>();
+    <span class="keyword">if</span> len == <span class="number">0</span> &#123;
+        <span class="keyword">return</span> <span class="literal">None</span>;
+    &#125;
+    s.<span class="title function_ invoke__">chars</span>().<span class="title function_ invoke__">nth</span>(len / <span class="number">2</span>)
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">get_user_initial</span>(user_id: <span class="type">u32</span>) <span class="punctuation">-&gt;</span> <span class="type">Option</span>&lt;<span class="type">char</span>&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">name</span> = <span class="title function_ invoke__">find_user_name</span>(user_id)?;   <span class="comment">// None 则直接返回 None</span>
+    <span class="keyword">let</span> <span class="variable">initial</span> = name.<span class="title function_ invoke__">chars</span>().<span class="title function_ invoke__">next</span>()?;     <span class="comment">// None 则直接返回 None</span>
+    <span class="title function_ invoke__">Some</span>(initial.<span class="title function_ invoke__">to_uppercase</span>().<span class="title function_ invoke__">next</span>()?)
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">find_user_name</span>(id: <span class="type">u32</span>) <span class="punctuation">-&gt;</span> <span class="type">Option</span>&lt;<span class="type">String</span>&gt; &#123;
+    <span class="keyword">match</span> id &#123;
+        <span class="number">1</span> =&gt; <span class="title function_ invoke__">Some</span>(<span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;alice&quot;</span>)),
+        _ =&gt; <span class="literal">None</span>,
+    &#125;
+&#125;</code></pre>
+
+<h3 id="5-4-在-main-函数中使用"><a href="#5-4-在-main-函数中使用" class="headerlink" title="5.4 在 main 函数中使用 ?"></a>5.4 在 main 函数中使用 <code>?</code></h3><pre><code class="highlight rust"><span class="keyword">use</span> std::fs;
+<span class="keyword">use</span> std::io;
+
+<span class="comment">// main 也可以返回 Result</span>
+<span class="keyword">fn</span> <span class="title function_">main</span>() <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;(), io::Error&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">content</span> = fs::<span class="title function_ invoke__">read_to_string</span>(<span class="string">&quot;config.toml&quot;</span>)?;
+    <span class="built_in">println!</span>(<span class="string">&quot;配置: &#123;&#125;&quot;</span>, content);
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;</code></pre>
+
+<p>使用 <code>Box&lt;dyn Error&gt;</code> 处理不同类型的错误：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> std::error::Error;
+<span class="keyword">use</span> std::fs;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;(), <span class="type">Box</span>&lt;<span class="keyword">dyn</span> Error&gt;&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">content</span> = fs::<span class="title function_ invoke__">read_to_string</span>(<span class="string">&quot;data.txt&quot;</span>)?;         <span class="comment">// io::Error</span>
+    <span class="keyword">let</span> <span class="variable">number</span>: <span class="type">i32</span> = content.<span class="title function_ invoke__">trim</span>().<span class="title function_ invoke__">parse</span>()?;              <span class="comment">// ParseIntError</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;数字: &#123;&#125;&quot;</span>, number);
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;</code></pre>
+
+<hr>
+<h2 id="六、自定义错误类型"><a href="#六、自定义错误类型" class="headerlink" title="六、自定义错误类型"></a>六、自定义错误类型</h2><h3 id="6-1-简单的自定义错误"><a href="#6-1-简单的自定义错误" class="headerlink" title="6.1 简单的自定义错误"></a>6.1 简单的自定义错误</h3><pre><code class="highlight rust"><span class="keyword">use</span> std::fmt;
+
+<span class="comment">// 定义错误枚举</span>
+<span class="meta">#[derive(Debug)]</span>
+<span class="keyword">enum</span> <span class="title class_">AppError</span> &#123;
+    <span class="title function_ invoke__">NotFound</span>(<span class="type">String</span>),
+    PermissionDenied,
+    InvalidInput &#123; field: <span class="type">String</span>, message: <span class="type">String</span> &#125;,
+    <span class="title function_ invoke__">DatabaseError</span>(<span class="type">String</span>),
+&#125;
+
+<span class="comment">// 实现 Display trait（用户友好的错误信息）</span>
+<span class="keyword">impl</span> <span class="title class_">fmt</span>::Display <span class="keyword">for</span> <span class="title class_">AppError</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">fmt</span>(&amp;<span class="keyword">self</span>, f: &amp;<span class="keyword">mut</span> fmt::Formatter&lt;<span class="symbol">&#x27;_</span>&gt;) <span class="punctuation">-&gt;</span> fmt::<span class="type">Result</span> &#123;
+        <span class="keyword">match</span> <span class="keyword">self</span> &#123;
+            AppError::<span class="title function_ invoke__">NotFound</span>(resource) =&gt; <span class="built_in">write!</span>(f, <span class="string">&quot;未找到: &#123;&#125;&quot;</span>, resource),
+            AppError::PermissionDenied =&gt; <span class="built_in">write!</span>(f, <span class="string">&quot;权限不足&quot;</span>),
+            AppError::InvalidInput &#123; field, message &#125; =&gt; &#123;
+                <span class="built_in">write!</span>(f, <span class="string">&quot;输入无效 - &#123;&#125;: &#123;&#125;&quot;</span>, field, message)
+            &#125;
+            AppError::<span class="title function_ invoke__">DatabaseError</span>(msg) =&gt; <span class="built_in">write!</span>(f, <span class="string">&quot;数据库错误: &#123;&#125;&quot;</span>, msg),
+        &#125;
+    &#125;
+&#125;
+
+<span class="comment">// 实现 Error trait</span>
+<span class="keyword">impl</span> <span class="title class_">std</span>::error::Error <span class="keyword">for</span> <span class="title class_">AppError</span> &#123;&#125;
+
+<span class="comment">// 使用自定义错误</span>
+<span class="keyword">fn</span> <span class="title function_">get_user</span>(id: <span class="type">u32</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="type">String</span>, AppError&gt; &#123;
+    <span class="keyword">if</span> id == <span class="number">0</span> &#123;
+        <span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(AppError::InvalidInput &#123;
+            field: <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;id&quot;</span>),
+            message: <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;ID 不能为 0&quot;</span>),
+        &#125;);
+    &#125;
+    <span class="keyword">if</span> id &gt; <span class="number">1000</span> &#123;
+        <span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(AppError::<span class="title function_ invoke__">NotFound</span>(<span class="built_in">format!</span>(<span class="string">&quot;用户 &#123;&#125;&quot;</span>, id)));
+    &#125;
+    <span class="title function_ invoke__">Ok</span>(<span class="built_in">format!</span>(<span class="string">&quot;User_&#123;&#125;&quot;</span>, id))
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">match</span> <span class="title function_ invoke__">get_user</span>(<span class="number">0</span>) &#123;
+        <span class="title function_ invoke__">Ok</span>(user) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;用户: &#123;&#125;&quot;</span>, user),
+        <span class="title function_ invoke__">Err</span>(e) =&gt; <span class="built_in">eprintln!</span>(<span class="string">&quot;错误: &#123;&#125;&quot;</span>, e),
+        <span class="comment">// 输出: 错误: 输入无效 - id: ID 不能为 0</span>
+    &#125;
+&#125;</code></pre>
+
+<h3 id="6-2-实现-From-trait-自动转换错误"><a href="#6-2-实现-From-trait-自动转换错误" class="headerlink" title="6.2 实现 From trait 自动转换错误"></a>6.2 实现 <code>From</code> trait 自动转换错误</h3><p><code>?</code> 运算符会自动调用 <code>From::from()</code> 转换错误类型，因此实现 <code>From</code> 可以让不同错误类型无缝转换。</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> std::fmt;
+<span class="keyword">use</span> std::io;
+<span class="keyword">use</span> std::num::ParseIntError;
+
+<span class="meta">#[derive(Debug)]</span>
+<span class="keyword">enum</span> <span class="title class_">AppError</span> &#123;
+    <span class="title function_ invoke__">Io</span>(io::Error),
+    <span class="title function_ invoke__">Parse</span>(ParseIntError),
+    <span class="title function_ invoke__">Custom</span>(<span class="type">String</span>),
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">fmt</span>::Display <span class="keyword">for</span> <span class="title class_">AppError</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">fmt</span>(&amp;<span class="keyword">self</span>, f: &amp;<span class="keyword">mut</span> fmt::Formatter&lt;<span class="symbol">&#x27;_</span>&gt;) <span class="punctuation">-&gt;</span> fmt::<span class="type">Result</span> &#123;
+        <span class="keyword">match</span> <span class="keyword">self</span> &#123;
+            AppError::<span class="title function_ invoke__">Io</span>(e) =&gt; <span class="built_in">write!</span>(f, <span class="string">&quot;IO 错误: &#123;&#125;&quot;</span>, e),
+            AppError::<span class="title function_ invoke__">Parse</span>(e) =&gt; <span class="built_in">write!</span>(f, <span class="string">&quot;解析错误: &#123;&#125;&quot;</span>, e),
+            AppError::<span class="title function_ invoke__">Custom</span>(msg) =&gt; <span class="built_in">write!</span>(f, <span class="string">&quot;错误: &#123;&#125;&quot;</span>, msg),
+        &#125;
+    &#125;
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">std</span>::error::Error <span class="keyword">for</span> <span class="title class_">AppError</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">source</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> <span class="type">Option</span>&lt;&amp;(<span class="keyword">dyn</span> std::error::Error + <span class="symbol">&#x27;static</span>)&gt; &#123;
+        <span class="keyword">match</span> <span class="keyword">self</span> &#123;
+            AppError::<span class="title function_ invoke__">Io</span>(e) =&gt; <span class="title function_ invoke__">Some</span>(e),
+            AppError::<span class="title function_ invoke__">Parse</span>(e) =&gt; <span class="title function_ invoke__">Some</span>(e),
+            AppError::<span class="title function_ invoke__">Custom</span>(_) =&gt; <span class="literal">None</span>,
+        &#125;
+    &#125;
+&#125;
+
+<span class="comment">// 实现 From，自动转换</span>
+<span class="keyword">impl</span> <span class="title class_">From</span>&lt;io::Error&gt; <span class="keyword">for</span> <span class="title class_">AppError</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">from</span>(e: io::Error) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123;
+        AppError::<span class="title function_ invoke__">Io</span>(e)
+    &#125;
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">From</span>&lt;ParseIntError&gt; <span class="keyword">for</span> <span class="title class_">AppError</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">from</span>(e: ParseIntError) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123;
+        AppError::<span class="title function_ invoke__">Parse</span>(e)
+    &#125;
+&#125;
+
+<span class="comment">// 现在可以在同一个函数中用 ? 处理不同类型的错误</span>
+<span class="keyword">fn</span> <span class="title function_">read_and_parse</span>(path: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="type">i32</span>, AppError&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">content</span> = std::fs::<span class="title function_ invoke__">read_to_string</span>(path)?;    <span class="comment">// io::Error → AppError::Io</span>
+    <span class="keyword">let</span> <span class="variable">number</span> = content.<span class="title function_ invoke__">trim</span>().parse::&lt;<span class="type">i32</span>&gt;()?;      <span class="comment">// ParseIntError → AppError::Parse</span>
+    <span class="keyword">if</span> number &lt; <span class="number">0</span> &#123;
+        <span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(AppError::<span class="title function_ invoke__">Custom</span>(<span class="string">&quot;数字不能为负&quot;</span>.<span class="title function_ invoke__">into</span>()));
+    &#125;
+    <span class="title function_ invoke__">Ok</span>(number)
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">match</span> <span class="title function_ invoke__">read_and_parse</span>(<span class="string">&quot;number.txt&quot;</span>) &#123;
+        <span class="title function_ invoke__">Ok</span>(n) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;读取到数字: &#123;&#125;&quot;</span>, n),
+        <span class="title function_ invoke__">Err</span>(e) =&gt; &#123;
+            <span class="built_in">eprintln!</span>(<span class="string">&quot;发生错误: &#123;&#125;&quot;</span>, e);
+            <span class="comment">// 获取底层错误</span>
+            <span class="keyword">if</span> <span class="keyword">let</span> <span class="variable">Some</span>(source) = std::error::Error::<span class="title function_ invoke__">source</span>(&amp;e) &#123;
+                <span class="built_in">eprintln!</span>(<span class="string">&quot;原因: &#123;&#125;&quot;</span>, source);
+            &#125;
+        &#125;
+    &#125;
+&#125;</code></pre>
+
+<hr>
+<h2 id="七、使用-thiserror-简化自定义错误（推荐）"><a href="#七、使用-thiserror-简化自定义错误（推荐）" class="headerlink" title="七、使用 thiserror 简化自定义错误（推荐）"></a>七、使用 <code>thiserror</code> 简化自定义错误（推荐）</h2><p>手动实现 <code>Display</code>、<code>Error</code>、<code>From</code> 非常繁琐，<code>thiserror</code> 库通过派生宏自动完成。</p>
+<pre><code class="highlight toml"><span class="comment"># Cargo.toml</span>
+<span class="section">[dependencies]</span>
+<span class="attr">thiserror</span> = <span class="string">&quot;1&quot;</span></code></pre>
+
+<pre><code class="highlight rust"><span class="keyword">use</span> thiserror::Error;
+
+<span class="meta">#[derive(Debug, Error)]</span>
+<span class="keyword">enum</span> <span class="title class_">AppError</span> &#123;
+    <span class="meta">#[error(<span class="string">&quot;文件未找到: &#123;0&#125;&quot;</span>)]</span>
+    <span class="title function_ invoke__">NotFound</span>(<span class="type">String</span>),
+
+    <span class="meta">#[error(<span class="string">&quot;权限不足: &#123;action&#125;&quot;</span>)]</span>
+    PermissionDenied &#123; action: <span class="type">String</span> &#125;,
+
+    <span class="meta">#[error(<span class="string">&quot;IO 错误&quot;</span>)]</span>
+    <span class="title function_ invoke__">Io</span>(<span class="meta">#[from]</span> std::io::Error),              <span class="comment">// 自动实现 From&lt;io::Error&gt;</span>
+
+    <span class="meta">#[error(<span class="string">&quot;解析错误&quot;</span>)]</span>
+    <span class="title function_ invoke__">Parse</span>(<span class="meta">#[from]</span> std::num::ParseIntError),  <span class="comment">// 自动实现 From&lt;ParseIntError&gt;</span>
+
+    <span class="meta">#[error(<span class="string">&quot;数据库连接失败: &#123;0&#125;&quot;</span>)]</span>
+    <span class="title function_ invoke__">Database</span>(<span class="type">String</span>),
+
+    <span class="meta">#[error(transparent)]</span>                     <span class="comment">// 透传底层错误的信息</span>
+    <span class="title function_ invoke__">Other</span>(<span class="meta">#[from]</span> <span class="type">Box</span>&lt;<span class="keyword">dyn</span> std::error::Error + <span class="built_in">Send</span> + <span class="built_in">Sync</span>&gt;),
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">process_file</span>(path: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="type">i32</span>, AppError&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">content</span> = std::fs::<span class="title function_ invoke__">read_to_string</span>(path)?;       <span class="comment">// 自动转换</span>
+    <span class="keyword">let</span> <span class="variable">number</span>: <span class="type">i32</span> = content.<span class="title function_ invoke__">trim</span>().<span class="title function_ invoke__">parse</span>()?;           <span class="comment">// 自动转换</span>
+    <span class="title function_ invoke__">Ok</span>(number * <span class="number">2</span>)
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">match</span> <span class="title function_ invoke__">process_file</span>(<span class="string">&quot;data.txt&quot;</span>) &#123;
+        <span class="title function_ invoke__">Ok</span>(result) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;结果: &#123;&#125;&quot;</span>, result),
+        <span class="title function_ invoke__">Err</span>(e) =&gt; <span class="built_in">eprintln!</span>(<span class="string">&quot;错误: &#123;&#125;&quot;</span>, e),
+    &#125;
+&#125;</code></pre>
+
+<hr>
+<h2 id="八、使用-anyhow-快速处理错误（应用层推荐）"><a href="#八、使用-anyhow-快速处理错误（应用层推荐）" class="headerlink" title="八、使用 anyhow 快速处理错误（应用层推荐）"></a>八、使用 <code>anyhow</code> 快速处理错误（应用层推荐）</h2><p><code>anyhow</code> 适合<strong>应用程序</strong>（不是库），提供方便的错误处理，无需定义自定义错误类型。</p>
+<pre><code class="highlight toml"><span class="comment"># Cargo.toml</span>
+<span class="section">[dependencies]</span>
+<span class="attr">anyhow</span> = <span class="string">&quot;1&quot;</span></code></pre>
+
+<h3 id="8-1-基本用法"><a href="#8-1-基本用法" class="headerlink" title="8.1 基本用法"></a>8.1 基本用法</h3><pre><code class="highlight rust"><span class="keyword">use</span> anyhow::&#123;<span class="type">Result</span>, Context, bail, ensure&#125;;
+
+<span class="comment">// 使用 anyhow::Result 代替 Result&lt;T, E&gt;</span>
+<span class="keyword">fn</span> <span class="title function_">read_config</span>(path: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="type">String</span>&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">content</span> = std::fs::<span class="title function_ invoke__">read_to_string</span>(path)
+        .<span class="title function_ invoke__">context</span>(<span class="built_in">format!</span>(<span class="string">&quot;无法读取配置文件: &#123;&#125;&quot;</span>, path))?;   <span class="comment">// 添加上下文信息</span>
+    <span class="title function_ invoke__">Ok</span>(content)
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">parse_port</span>(config: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="type">u16</span>&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">port</span>: <span class="type">u16</span> = config.<span class="title function_ invoke__">trim</span>().<span class="title function_ invoke__">parse</span>()
+        .<span class="title function_ invoke__">context</span>(<span class="string">&quot;端口号解析失败&quot;</span>)?;
+
+    <span class="comment">// ensure! 宏 —— 条件不满足时返回错误</span>
+    ensure!(port &gt;= <span class="number">1024</span>, <span class="string">&quot;端口号 &#123;&#125; 不能小于 1024&quot;</span>, port);
+
+    <span class="comment">// bail! 宏 —— 直接返回错误</span>
+    <span class="keyword">if</span> port &gt; <span class="number">65535</span> &#123;
+        bail!(<span class="string">&quot;端口号 &#123;&#125; 超出范围&quot;</span>, port);
+    &#125;
+
+    <span class="title function_ invoke__">Ok</span>(port)
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;()&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">config</span> = <span class="title function_ invoke__">read_config</span>(<span class="string">&quot;server.conf&quot;</span>)
+        .<span class="title function_ invoke__">context</span>(<span class="string">&quot;加载服务器配置失败&quot;</span>)?;
+
+    <span class="keyword">let</span> <span class="variable">port</span> = <span class="title function_ invoke__">parse_port</span>(&amp;config)?;
+    <span class="built_in">println!</span>(<span class="string">&quot;服务器端口: &#123;&#125;&quot;</span>, port);
+
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;</code></pre>
+
+<h3 id="8-2-错误链（Error-Chain）"><a href="#8-2-错误链（Error-Chain）" class="headerlink" title="8.2 错误链（Error Chain）"></a>8.2 错误链（Error Chain）</h3><p><code>anyhow</code> 自动维护错误链，方便调试：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> anyhow::&#123;<span class="type">Result</span>, Context&#125;;
+
+<span class="keyword">fn</span> <span class="title function_">connect_db</span>(url: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;()&gt; &#123;
+    <span class="title function_ invoke__">Err</span>(std::io::Error::<span class="title function_ invoke__">new</span>(std::io::ErrorKind::ConnectionRefused, <span class="string">&quot;连接被拒绝&quot;</span>))
+        .<span class="title function_ invoke__">context</span>(<span class="built_in">format!</span>(<span class="string">&quot;无法连接数据库: &#123;&#125;&quot;</span>, url))?;
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">init_app</span>() <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;()&gt; &#123;
+    <span class="title function_ invoke__">connect_db</span>(<span class="string">&quot;postgres://localhost/mydb&quot;</span>)
+        .<span class="title function_ invoke__">context</span>(<span class="string">&quot;应用初始化失败&quot;</span>)?;
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">if</span> <span class="keyword">let</span> <span class="variable">Err</span>(e) = <span class="title function_ invoke__">init_app</span>() &#123;
+        <span class="comment">// 打印完整的错误链</span>
+        <span class="built_in">eprintln!</span>(<span class="string">&quot;错误: &#123;&#125;&quot;</span>, e);
+        <span class="keyword">for</span> <span class="variable">cause</span> <span class="keyword">in</span> e.<span class="title function_ invoke__">chain</span>().<span class="title function_ invoke__">skip</span>(<span class="number">1</span>) &#123;
+            <span class="built_in">eprintln!</span>(<span class="string">&quot;  原因: &#123;&#125;&quot;</span>, cause);
+        &#125;
+        <span class="comment">// 输出:</span>
+        <span class="comment">// 错误: 应用初始化失败</span>
+        <span class="comment">//   原因: 无法连接数据库: postgres://localhost/mydb</span>
+        <span class="comment">//   原因: 连接被拒绝</span>
+    &#125;
+&#125;</code></pre>
+
+<h3 id="8-3-thiserror-vs-anyhow-选择指南"><a href="#8-3-thiserror-vs-anyhow-选择指南" class="headerlink" title="8.3 thiserror vs anyhow 选择指南"></a>8.3 <code>thiserror</code> vs <code>anyhow</code> 选择指南</h3><table>
+<thead>
+<tr>
+<th>场景</th>
+<th>推荐</th>
+<th>原因</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>编写库（library）</strong></td>
+<td><code>thiserror</code></td>
+<td>用户需要匹配具体错误类型进行处理</td>
+</tr>
+<tr>
+<td><strong>编写应用（binary）</strong></td>
+<td><code>anyhow</code></td>
+<td>快速方便，关注错误信息而非类型</td>
+</tr>
+<tr>
+<td><strong>需要精确错误匹配</strong></td>
+<td><code>thiserror</code></td>
+<td>提供枚举变体供调用者 match</td>
+</tr>
+<tr>
+<td><strong>快速原型开发</strong></td>
+<td><code>anyhow</code></td>
+<td>省去定义错误类型的工作</td>
+</tr>
+<tr>
+<td><strong>两者结合</strong></td>
+<td>都用</td>
+<td>库用 <code>thiserror</code> 定义错误，应用用 <code>anyhow</code> 组合</td>
+</tr>
+</tbody></table>
+<hr>
+<h2 id="九、高级技巧"><a href="#九、高级技巧" class="headerlink" title="九、高级技巧"></a>九、高级技巧</h2><h3 id="9-1-为多个函数统一错误类型（类型别名）"><a href="#9-1-为多个函数统一错误类型（类型别名）" class="headerlink" title="9.1 为多个函数统一错误类型（类型别名）"></a>9.1 为多个函数统一错误类型（类型别名）</h3><pre><code class="highlight rust"><span class="keyword">use</span> std::io;
+
+<span class="comment">// 定义一个类型别名，避免重复写错误类型</span>
+<span class="keyword">type</span> <span class="title class_">Result</span>&lt;T&gt; = std::result::<span class="type">Result</span>&lt;T, io::Error&gt;;
+
+<span class="keyword">fn</span> <span class="title function_">read_file</span>(path: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="type">String</span>&gt; &#123;
+    std::fs::<span class="title function_ invoke__">read_to_string</span>(path)
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">write_file</span>(path: &amp;<span class="type">str</span>, content: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;()&gt; &#123;
+    std::fs::<span class="title function_ invoke__">write</span>(path, content)
+&#125;</code></pre>
+
+<h3 id="9-2-用-map-err-转换错误信息"><a href="#9-2-用-map-err-转换错误信息" class="headerlink" title="9.2 用 map_err 转换错误信息"></a>9.2 用 <code>map_err</code> 转换错误信息</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">parse_config</span>(input: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="type">u32</span>, <span class="type">String</span>&gt; &#123;
+    input.parse::&lt;<span class="type">u32</span>&gt;()
+        .<span class="title function_ invoke__">map_err</span>(|e| <span class="built_in">format!</span>(<span class="string">&quot;配置解析失败 &#x27;&#123;&#125;&#x27;: &#123;&#125;&quot;</span>, input, e))
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">match</span> <span class="title function_ invoke__">parse_config</span>(<span class="string">&quot;not_a_number&quot;</span>) &#123;
+        <span class="title function_ invoke__">Ok</span>(val) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;值: &#123;&#125;&quot;</span>, val),
+        <span class="title function_ invoke__">Err</span>(msg) =&gt; <span class="built_in">eprintln!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, msg),
+        <span class="comment">// 输出: 配置解析失败 &#x27;not_a_number&#x27;: invalid digit found in string</span>
+    &#125;
+&#125;</code></pre>
+
+<h3 id="9-3-组合多个-Option-Result"><a href="#9-3-组合多个-Option-Result" class="headerlink" title="9.3 组合多个 Option&#x2F;Result"></a>9.3 组合多个 Option&#x2F;Result</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// 多个 Option 组合</span>
+    <span class="keyword">let</span> <span class="variable">a</span>: <span class="type">Option</span>&lt;<span class="type">i32</span>&gt; = <span class="title function_ invoke__">Some</span>(<span class="number">10</span>);
+    <span class="keyword">let</span> <span class="variable">b</span>: <span class="type">Option</span>&lt;<span class="type">i32</span>&gt; = <span class="title function_ invoke__">Some</span>(<span class="number">20</span>);
+    <span class="keyword">let</span> <span class="variable">c</span>: <span class="type">Option</span>&lt;<span class="type">i32</span>&gt; = <span class="literal">None</span>;
+
+    <span class="comment">// zip 合并</span>
+    <span class="keyword">let</span> <span class="variable">sum</span> = a.<span class="title function_ invoke__">zip</span>(b).<span class="title function_ invoke__">map</span>(|(x, y)| x + y);  <span class="comment">// Some(30)</span>
+    <span class="keyword">let</span> <span class="variable">sum</span> = a.<span class="title function_ invoke__">zip</span>(c).<span class="title function_ invoke__">map</span>(|(x, y)| x + y);  <span class="comment">// None</span>
+
+    <span class="comment">// 将 Vec&lt;Result&lt;T, E&gt;&gt; 转为 Result&lt;Vec&lt;T&gt;, E&gt;</span>
+    <span class="keyword">let</span> <span class="variable">results</span>: <span class="type">Vec</span>&lt;<span class="type">Result</span>&lt;<span class="type">i32</span>, <span class="type">String</span>&gt;&gt; = <span class="built_in">vec!</span>[
+        <span class="title function_ invoke__">Ok</span>(<span class="number">1</span>),
+        <span class="title function_ invoke__">Ok</span>(<span class="number">2</span>),
+        <span class="title function_ invoke__">Ok</span>(<span class="number">3</span>),
+    ];
+    <span class="keyword">let</span> <span class="variable">collected</span>: <span class="type">Result</span>&lt;<span class="type">Vec</span>&lt;<span class="type">i32</span>&gt;, <span class="type">String</span>&gt; = results.<span class="title function_ invoke__">into_iter</span>().<span class="title function_ invoke__">collect</span>();
+    <span class="built_in">assert_eq!</span>(collected, <span class="title function_ invoke__">Ok</span>(<span class="built_in">vec!</span>[<span class="number">1</span>, <span class="number">2</span>, <span class="number">3</span>]));
+
+    <span class="comment">// 如果有一个 Err，整体就是 Err</span>
+    <span class="keyword">let</span> <span class="variable">results</span>: <span class="type">Vec</span>&lt;<span class="type">Result</span>&lt;<span class="type">i32</span>, <span class="type">String</span>&gt;&gt; = <span class="built_in">vec!</span>[
+        <span class="title function_ invoke__">Ok</span>(<span class="number">1</span>),
+        <span class="title function_ invoke__">Err</span>(<span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;失败&quot;</span>)),
+        <span class="title function_ invoke__">Ok</span>(<span class="number">3</span>),
+    ];
+    <span class="keyword">let</span> <span class="variable">collected</span>: <span class="type">Result</span>&lt;<span class="type">Vec</span>&lt;<span class="type">i32</span>&gt;, <span class="type">String</span>&gt; = results.<span class="title function_ invoke__">into_iter</span>().<span class="title function_ invoke__">collect</span>();
+    <span class="built_in">assert_eq!</span>(collected, <span class="title function_ invoke__">Err</span>(<span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;失败&quot;</span>)));
+&#125;</code></pre>
+
+<h3 id="9-4-ok-or-ok-or-else：Option-转-Result"><a href="#9-4-ok-or-ok-or-else：Option-转-Result" class="headerlink" title="9.4 ok_or &#x2F; ok_or_else：Option 转 Result"></a>9.4 <code>ok_or</code> &#x2F; <code>ok_or_else</code>：Option 转 Result</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">find_user</span>(id: <span class="type">u32</span>) <span class="punctuation">-&gt;</span> <span class="type">Option</span>&lt;<span class="type">String</span>&gt; &#123;
+    <span class="keyword">if</span> id == <span class="number">1</span> &#123; <span class="title function_ invoke__">Some</span>(<span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;Alice&quot;</span>)) &#125; <span class="keyword">else</span> &#123; <span class="literal">None</span> &#125;
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">get_user</span>(id: <span class="type">u32</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="type">String</span>, <span class="type">String</span>&gt; &#123;
+    <span class="comment">// Option 转 Result</span>
+    <span class="title function_ invoke__">find_user</span>(id).<span class="title function_ invoke__">ok_or</span>(<span class="built_in">format!</span>(<span class="string">&quot;用户 &#123;&#125; 不存在&quot;</span>, id))
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">get_user_lazy</span>(id: <span class="type">u32</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="type">String</span>, <span class="type">String</span>&gt; &#123;
+    <span class="comment">// 惰性版本，只在 None 时计算错误消息</span>
+    <span class="title function_ invoke__">find_user</span>(id).<span class="title function_ invoke__">ok_or_else</span>(|| &#123;
+        <span class="built_in">eprintln!</span>(<span class="string">&quot;查询用户 &#123;&#125; 失败&quot;</span>, id);
+        <span class="built_in">format!</span>(<span class="string">&quot;用户 &#123;&#125; 不存在&quot;</span>, id)
+    &#125;)
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;:?&#125;&quot;</span>, <span class="title function_ invoke__">get_user</span>(<span class="number">1</span>));    <span class="comment">// Ok(&quot;Alice&quot;)</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;:?&#125;&quot;</span>, <span class="title function_ invoke__">get_user</span>(<span class="number">99</span>));   <span class="comment">// Err(&quot;用户 99 不存在&quot;)</span>
+&#125;</code></pre>
+
+<h3 id="9-5-自定义-panic-行为"><a href="#9-5-自定义-panic-行为" class="headerlink" title="9.5 自定义 panic 行为"></a>9.5 自定义 panic 行为</h3><pre><code class="highlight rust"><span class="keyword">use</span> std::panic;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// 捕获 panic（不推荐常用，但在特殊场景有用）</span>
+    <span class="keyword">let</span> <span class="variable">result</span> = panic::<span class="title function_ invoke__">catch_unwind</span>(|| &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;正常代码&quot;</span>);
+        <span class="built_in">panic!</span>(<span class="string">&quot;出错了！&quot;</span>);
+    &#125;);
+
+    <span class="keyword">match</span> result &#123;
+        <span class="title function_ invoke__">Ok</span>(_) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;一切正常&quot;</span>),
+        <span class="title function_ invoke__">Err</span>(_) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;捕获到了 panic&quot;</span>),
+    &#125;
+
+    <span class="comment">// 设置自定义 panic 处理器</span>
+    panic::<span class="title function_ invoke__">set_hook</span>(<span class="type">Box</span>::<span class="title function_ invoke__">new</span>(|info| &#123;
+        <span class="built_in">eprintln!</span>(<span class="string">&quot;❌ 程序异常: &#123;&#125;&quot;</span>, info);
+        <span class="comment">// 可以在这里写日志、发送告警等</span>
+    &#125;));
+&#125;</code></pre>
+
+<hr>
+<h2 id="十、实战项目：构建健壮的文件处理器"><a href="#十、实战项目：构建健壮的文件处理器" class="headerlink" title="十、实战项目：构建健壮的文件处理器"></a>十、实战项目：构建健壮的文件处理器</h2><p>综合运用所学知识，构建一个完整的错误处理示例：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> std::collections::HashMap;
+<span class="keyword">use</span> std::fs;
+<span class="keyword">use</span> std::path::Path;
+<span class="keyword">use</span> thiserror::Error;
+
+<span class="comment">// ========== 1. 定义错误类型 ==========</span>
+<span class="meta">#[derive(Debug, Error)]</span>
+<span class="keyword">enum</span> <span class="title class_">ConfigError</span> &#123;
+    <span class="meta">#[error(<span class="string">&quot;配置文件不存在: &#123;path&#125;&quot;</span>)]</span>
+    FileNotFound &#123; path: <span class="type">String</span> &#125;,
+
+    <span class="meta">#[error(<span class="string">&quot;读取文件失败: &#123;path&#125;&quot;</span>)]</span>
+    ReadError &#123;
+        path: <span class="type">String</span>,
+        <span class="meta">#[source]</span>
+        cause: std::io::Error,
+    &#125;,
+
+    <span class="meta">#[error(<span class="string">&quot;解析失败，第 &#123;line&#125; 行: &#123;message&#125;&quot;</span>)]</span>
+    ParseError &#123; line: <span class="type">usize</span>, message: <span class="type">String</span> &#125;,
+
+    <span class="meta">#[error(<span class="string">&quot;缺少必填配置项: &#123;0&#125;&quot;</span>)]</span>
+    <span class="title function_ invoke__">MissingKey</span>(<span class="type">String</span>),
+
+    <span class="meta">#[error(<span class="string">&quot;配置值无效: &#123;key&#125; = &#123;value&#125; (&#123;reason&#125;)&quot;</span>)]</span>
+    InvalidValue &#123;
+        key: <span class="type">String</span>,
+        value: <span class="type">String</span>,
+        reason: <span class="type">String</span>,
+    &#125;,
+&#125;
+
+<span class="comment">// ========== 2. 配置解析器 ==========</span>
+<span class="keyword">struct</span> <span class="title class_">Config</span> &#123;
+    items: HashMap&lt;<span class="type">String</span>, <span class="type">String</span>&gt;,
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">Config</span> &#123;
+    <span class="comment">/// 从文件加载配置</span>
+    <span class="keyword">fn</span> <span class="title function_">from_file</span>(path: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="keyword">Self</span>, ConfigError&gt; &#123;
+        <span class="comment">// 检查文件是否存在</span>
+        <span class="keyword">if</span> !Path::<span class="title function_ invoke__">new</span>(path).<span class="title function_ invoke__">exists</span>() &#123;
+            <span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(ConfigError::FileNotFound &#123;
+                path: path.<span class="title function_ invoke__">to_string</span>(),
+            &#125;);
+        &#125;
+
+        <span class="comment">// 读取文件</span>
+        <span class="keyword">let</span> <span class="variable">content</span> = fs::<span class="title function_ invoke__">read_to_string</span>(path).<span class="title function_ invoke__">map_err</span>(|e| ConfigError::ReadError &#123;
+            path: path.<span class="title function_ invoke__">to_string</span>(),
+            cause: e,
+        &#125;)?;
+
+        <span class="comment">// 解析内容</span>
+        <span class="keyword">Self</span>::<span class="title function_ invoke__">parse</span>(&amp;content)
+    &#125;
+
+    <span class="comment">/// 解析配置内容（key=value 格式）</span>
+    <span class="keyword">fn</span> <span class="title function_">parse</span>(content: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="keyword">Self</span>, ConfigError&gt; &#123;
+        <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">items</span> = HashMap::<span class="title function_ invoke__">new</span>();
+
+        <span class="keyword">for</span> (index, line) <span class="keyword">in</span> content.<span class="title function_ invoke__">lines</span>().<span class="title function_ invoke__">enumerate</span>() &#123;
+            <span class="keyword">let</span> <span class="variable">line</span> = line.<span class="title function_ invoke__">trim</span>();
+
+            <span class="comment">// 跳过空行和注释</span>
+            <span class="keyword">if</span> line.<span class="title function_ invoke__">is_empty</span>() || line.<span class="title function_ invoke__">starts_with</span>(<span class="string">&#x27;#&#x27;</span>) &#123;
+                <span class="keyword">continue</span>;
+            &#125;
+
+            <span class="keyword">let</span> <span class="variable">parts</span>: <span class="type">Vec</span>&lt;&amp;<span class="type">str</span>&gt; = line.<span class="title function_ invoke__">splitn</span>(<span class="number">2</span>, <span class="string">&#x27;=&#x27;</span>).<span class="title function_ invoke__">collect</span>();
+            <span class="keyword">if</span> parts.<span class="title function_ invoke__">len</span>() != <span class="number">2</span> &#123;
+                <span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(ConfigError::ParseError &#123;
+                    line: index + <span class="number">1</span>,
+                    message: <span class="built_in">format!</span>(<span class="string">&quot;期望 key=value 格式，实际: &#x27;&#123;&#125;&#x27;&quot;</span>, line),
+                &#125;);
+            &#125;
+
+            items.<span class="title function_ invoke__">insert</span>(
+                parts[<span class="number">0</span>].<span class="title function_ invoke__">trim</span>().<span class="title function_ invoke__">to_string</span>(),
+                parts[<span class="number">1</span>].<span class="title function_ invoke__">trim</span>().<span class="title function_ invoke__">to_string</span>(),
+            );
+        &#125;
+
+        <span class="title function_ invoke__">Ok</span>(Config &#123; items &#125;)
+    &#125;
+
+    <span class="comment">/// 获取必填配置项</span>
+    <span class="keyword">fn</span> <span class="title function_">require</span>(&amp;<span class="keyword">self</span>, key: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;&amp;<span class="type">str</span>, ConfigError&gt; &#123;
+        <span class="keyword">self</span>.items
+            .<span class="title function_ invoke__">get</span>(key)
+            .<span class="title function_ invoke__">map</span>(|v| v.<span class="title function_ invoke__">as_str</span>())
+            .<span class="title function_ invoke__">ok_or_else</span>(|| ConfigError::<span class="title function_ invoke__">MissingKey</span>(key.<span class="title function_ invoke__">to_string</span>()))
+    &#125;
+
+    <span class="comment">/// 获取端口配置</span>
+    <span class="keyword">fn</span> <span class="title function_">get_port</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="type">u16</span>, ConfigError&gt; &#123;
+        <span class="keyword">let</span> <span class="variable">value</span> = <span class="keyword">self</span>.<span class="title function_ invoke__">require</span>(<span class="string">&quot;port&quot;</span>)?;
+        <span class="keyword">let</span> <span class="variable">port</span>: <span class="type">u16</span> = value.<span class="title function_ invoke__">parse</span>().<span class="title function_ invoke__">map_err</span>(|_| ConfigError::InvalidValue &#123;
+            key: <span class="string">&quot;port&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+            value: value.<span class="title function_ invoke__">to_string</span>(),
+            reason: <span class="string">&quot;必须是 0-65535 的整数&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+        &#125;)?;
+        <span class="title function_ invoke__">Ok</span>(port)
+    &#125;
+&#125;
+
+<span class="comment">// ========== 3. 主函数 ==========</span>
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">match</span> <span class="title function_ invoke__">run</span>() &#123;
+        <span class="title function_ invoke__">Ok</span>(()) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;✅ 程序正常退出&quot;</span>),
+        <span class="title function_ invoke__">Err</span>(e) =&gt; &#123;
+            <span class="built_in">eprintln!</span>(<span class="string">&quot;❌ &#123;&#125;&quot;</span>, e);
+            <span class="comment">// 打印错误链</span>
+            <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">source</span> = std::error::Error::<span class="title function_ invoke__">source</span>(&amp;e);
+            <span class="keyword">while</span> <span class="keyword">let</span> <span class="variable">Some</span>(cause) = source &#123;
+                <span class="built_in">eprintln!</span>(<span class="string">&quot;   ↳ 原因: &#123;&#125;&quot;</span>, cause);
+                source = std::error::Error::<span class="title function_ invoke__">source</span>(cause);
+            &#125;
+            std::process::<span class="title function_ invoke__">exit</span>(<span class="number">1</span>);
+        &#125;
+    &#125;
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">run</span>() <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;(), ConfigError&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">config</span> = Config::<span class="title function_ invoke__">from_file</span>(<span class="string">&quot;app.conf&quot;</span>)?;
+
+    <span class="keyword">let</span> <span class="variable">host</span> = config.<span class="title function_ invoke__">require</span>(<span class="string">&quot;host&quot;</span>)?;
+    <span class="keyword">let</span> <span class="variable">port</span> = config.<span class="title function_ invoke__">get_port</span>()?;
+
+    <span class="built_in">println!</span>(<span class="string">&quot;🚀 服务器启动: &#123;&#125;:&#123;&#125;&quot;</span>, host, port);
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;</code></pre>
+
+<hr>
+<h2 id="十一、最佳实践总结"><a href="#十一、最佳实践总结" class="headerlink" title="十一、最佳实践总结"></a>十一、最佳实践总结</h2><h3 id="错误处理决策树"><a href="#错误处理决策树" class="headerlink" title="错误处理决策树"></a>错误处理决策树</h3><pre><code class="highlight plaintext">遇到潜在错误？
+├── 不可恢复（程序 bug）→ panic!
+└── 可恢复
+    ├── 值可能不存在 → Option&lt;T&gt;
+    └── 操作可能失败 → Result&lt;T, E&gt;
+        ├── 快速原型 → unwrap() / expect()
+        ├── 向上传播 → ? 运算符
+        ├── 就地处理 → match / if let
+        └── 提供默认值 → unwrap_or() / unwrap_or_else()</code></pre>
+
+<h3 id="黄金准则"><a href="#黄金准则" class="headerlink" title="黄金准则"></a>黄金准则</h3><table>
+<thead>
+<tr>
+<th>原则</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>让错误显式可见</strong></td>
+<td>永远不要悄悄忽略错误</td>
+</tr>
+<tr>
+<td><strong>尽早处理或传播</strong></td>
+<td>用 <code>?</code> 传播，在最合适的层级处理</td>
+</tr>
+<tr>
+<td><strong>提供上下文信息</strong></td>
+<td>使用 <code>.context()</code> 或 <code>map_err()</code> 添加描述</td>
+</tr>
+<tr>
+<td><strong>区分库和应用</strong></td>
+<td>库用 <code>thiserror</code>，应用用 <code>anyhow</code></td>
+</tr>
+<tr>
+<td><strong>少用 <code>unwrap()</code></strong></td>
+<td>仅在确定不会失败或原型代码中使用</td>
+</tr>
+<tr>
+<td><strong>善用类型系统</strong></td>
+<td>用 <code>Option</code> 代替 <code>null</code>，用 <code>Result</code> 代替异常</td>
+</tr>
+<tr>
+<td><strong>错误类型要语义化</strong></td>
+<td>自定义错误枚举，让调用者能精确匹配</td>
+</tr>
+</tbody></table>
+<hr>
+<h2 id="总结"><a href="#总结" class="headerlink" title="总结"></a>总结</h2><p>Rust 的错误处理从设计上就是<strong>类型安全、编译时检查、零成本</strong>的。学习路径建议：</p>
+<ol>
+<li><strong>入门</strong> → 理解 <code>Option</code> 和 <code>Result</code> 的含义</li>
+<li><strong>基础</strong> → 掌握 <code>match</code>、<code>if let</code>、<code>unwrap_or</code> 等处理手段</li>
+<li><strong>进阶</strong> → 熟练使用 <code>?</code> 运算符和错误传播</li>
+<li><strong>实战</strong> → 使用 <code>thiserror</code> &#x2F; <code>anyhow</code> 构建完善的错误体系</li>
+<li><strong>精通</strong> → 设计清晰的错误层次结构，编写健壮的生产代码</li>
+</ol>
+<p>掌握了错误处理，你就掌握了 Rust 编程中最重要的实践技能之一。🦀</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
