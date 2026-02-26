@@ -1,0 +1,428 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust Tokio 异步并发编程入门学习总结</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust Tokio 异步并发编程入门学习总结</h1><div class="time">2026-02-26</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><h2 id="一、什么是-Tokio？"><a href="#一、什么是-Tokio？" class="headerlink" title="一、什么是 Tokio？"></a>一、什么是 Tokio？</h2><p>Tokio 是 Rust 生态系统中最流行的异步运行时（async runtime），它为编写高性能的异步应用程序提供了完整的工具集。Tokio 让你能够使用 <code>async/await</code> 语法编写并发代码，在单线程或多线程环境中高效地处理成千上万的并发任务。</p>
+<h3 id="核心特性"><a href="#核心特性" class="headerlink" title="核心特性"></a>核心特性</h3><ul>
+<li><strong>异步运行时</strong>：提供任务调度器和事件循环</li>
+<li><strong>异步 I&#x2F;O</strong>：高性能的网络和文件系统操作</li>
+<li><strong>定时器和延迟</strong>：精确的异步时间控制</li>
+<li><strong>同步原语</strong>：异步版本的 Mutex、Semaphore 等</li>
+<li><strong>多线程支持</strong>：可配置的工作线程池</li>
+</ul>
+<h2 id="二、异步编程基础概念"><a href="#二、异步编程基础概念" class="headerlink" title="二、异步编程基础概念"></a>二、异步编程基础概念</h2><h3 id="2-1-同步-vs-异步"><a href="#2-1-同步-vs-异步" class="headerlink" title="2.1 同步 vs 异步"></a>2.1 同步 vs 异步</h3><p><strong>同步代码</strong>执行时会阻塞当前线程，直到操作完成：</p>
+<pre><code class="highlight rust"><span class="comment">// 同步代码 - 阻塞 2 秒</span>
+std::thread::<span class="title function_ invoke__">sleep</span>(std::time::Duration::<span class="title function_ invoke__">from_secs</span>(<span class="number">2</span>));
+<span class="built_in">println!</span>(<span class="string">&quot;完成!&quot;</span>);</code></pre>
+
+<p><strong>异步代码</strong>可以在等待时让出执行权，让其他任务运行：</p>
+<pre><code class="highlight rust"><span class="comment">// 异步代码 - 不阻塞线程</span>
+tokio::time::<span class="title function_ invoke__">sleep</span>(tokio::time::Duration::<span class="title function_ invoke__">from_secs</span>(<span class="number">2</span>)).<span class="keyword">await</span>;
+<span class="built_in">println!</span>(<span class="string">&quot;完成!&quot;</span>);</code></pre>
+
+<h3 id="2-2-Future-和-async-await"><a href="#2-2-Future-和-async-await" class="headerlink" title="2.2 Future 和 async&#x2F;await"></a>2.2 Future 和 async&#x2F;await</h3><ul>
+<li><code>Future</code> 是 Rust 中表示异步计算的 trait</li>
+<li><code>async</code> 关键字将函数转换为返回 Future 的函数</li>
+<li><code>await</code> 关键字等待 Future 完成并获取结果</li>
+</ul>
+<h2 id="三、Tokio-入门实践"><a href="#三、Tokio-入门实践" class="headerlink" title="三、Tokio 入门实践"></a>三、Tokio 入门实践</h2><h3 id="3-1-添加依赖"><a href="#3-1-添加依赖" class="headerlink" title="3.1 添加依赖"></a>3.1 添加依赖</h3><p>在 <code>Cargo.toml</code> 中添加：</p>
+<pre><code class="highlight toml"><span class="section">[dependencies]</span>
+<span class="attr">tokio</span> = &#123; version = <span class="string">&quot;1&quot;</span>, features = [<span class="string">&quot;full&quot;</span>] &#125;</code></pre>
+
+<h3 id="3-2-第一个-Tokio-程序"><a href="#3-2-第一个-Tokio-程序" class="headerlink" title="3.2 第一个 Tokio 程序"></a>3.2 第一个 Tokio 程序</h3><pre><code class="highlight rust"><span class="keyword">use</span> tokio::time::&#123;sleep, Duration&#125;;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="built_in">println!</span>(<span class="string">&quot;Hello, Tokio!&quot;</span>);
+    
+    <span class="comment">// 异步睡眠 1 秒</span>
+    <span class="title function_ invoke__">sleep</span>(Duration::<span class="title function_ invoke__">from_secs</span>(<span class="number">1</span>)).<span class="keyword">await</span>;
+    
+    <span class="built_in">println!</span>(<span class="string">&quot;一秒后...&quot;</span>);
+&#125;</code></pre>
+
+<p><strong>关键点</strong>：</p>
+<ul>
+<li><code>#[tokio::main]</code> 宏自动创建 Tokio 运行时并执行 async main 函数</li>
+<li><code>sleep().await</code> 异步等待，不阻塞线程</li>
+</ul>
+<h3 id="3-3-并发执行多个任务"><a href="#3-3-并发执行多个任务" class="headerlink" title="3.3 并发执行多个任务"></a>3.3 并发执行多个任务</h3><pre><code class="highlight rust"><span class="keyword">use</span> tokio::time::&#123;sleep, Duration&#125;;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">task1</span>() &#123;
+    <span class="keyword">for</span> <span class="variable">i</span> <span class="keyword">in</span> <span class="number">1</span>..=<span class="number">3</span> &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;任务1: 步骤 &#123;&#125;&quot;</span>, i);
+        <span class="title function_ invoke__">sleep</span>(Duration::<span class="title function_ invoke__">from_millis</span>(<span class="number">500</span>)).<span class="keyword">await</span>;
+    &#125;
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">task2</span>() &#123;
+    <span class="keyword">for</span> <span class="variable">i</span> <span class="keyword">in</span> <span class="number">1</span>..=<span class="number">3</span> &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;任务2: 步骤 &#123;&#125;&quot;</span>, i);
+        <span class="title function_ invoke__">sleep</span>(Duration::<span class="title function_ invoke__">from_millis</span>(<span class="number">300</span>)).<span class="keyword">await</span>;
+    &#125;
+&#125;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// 并发执行两个任务</span>
+    tokio::join!(<span class="title function_ invoke__">task1</span>(), <span class="title function_ invoke__">task2</span>());
+    <span class="built_in">println!</span>(<span class="string">&quot;所有任务完成!&quot;</span>);
+&#125;</code></pre>
+
+<p><strong>输出示例</strong>：</p>
+<pre><code class="highlight plaintext">任务1: 步骤 1
+任务2: 步骤 1
+任务2: 步骤 2
+任务1: 步骤 2
+任务2: 步骤 3
+任务1: 步骤 3
+所有任务完成!</code></pre>
+
+<h2 id="四、Tokio-核心概念"><a href="#四、Tokio-核心概念" class="headerlink" title="四、Tokio 核心概念"></a>四、Tokio 核心概念</h2><h3 id="4-1-Spawn：生成独立任务"><a href="#4-1-Spawn：生成独立任务" class="headerlink" title="4.1 Spawn：生成独立任务"></a>4.1 Spawn：生成独立任务</h3><p>使用 <code>tokio::spawn</code> 创建在后台运行的独立任务：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> tokio::time::&#123;sleep, Duration&#125;;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// 生成一个后台任务</span>
+    <span class="keyword">let</span> <span class="variable">handle</span> = tokio::<span class="title function_ invoke__">spawn</span>(<span class="keyword">async</span> &#123;
+        <span class="title function_ invoke__">sleep</span>(Duration::<span class="title function_ invoke__">from_secs</span>(<span class="number">1</span>)).<span class="keyword">await</span>;
+        <span class="built_in">println!</span>(<span class="string">&quot;后台任务完成!&quot;</span>);
+        <span class="string">&quot;返回值&quot;</span>
+    &#125;);
+    
+    <span class="built_in">println!</span>(<span class="string">&quot;主任务继续执行...&quot;</span>);
+    
+    <span class="comment">// 等待后台任务完成并获取返回值</span>
+    <span class="keyword">let</span> <span class="variable">result</span> = handle.<span class="keyword">await</span>.<span class="title function_ invoke__">unwrap</span>();
+    <span class="built_in">println!</span>(<span class="string">&quot;任务返回: &#123;&#125;&quot;</span>, result);
+&#125;</code></pre>
+
+<h3 id="4-2-多个任务的不同等待策略"><a href="#4-2-多个任务的不同等待策略" class="headerlink" title="4.2 多个任务的不同等待策略"></a>4.2 多个任务的不同等待策略</h3><h4 id="等待所有任务完成：join"><a href="#等待所有任务完成：join" class="headerlink" title="等待所有任务完成：join!"></a>等待所有任务完成：<code>join!</code></h4><pre><code class="highlight rust"><span class="keyword">use</span> tokio::time::&#123;sleep, Duration&#125;;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">fetch_user</span>(id: <span class="type">u32</span>) <span class="punctuation">-&gt;</span> <span class="type">String</span> &#123;
+    <span class="title function_ invoke__">sleep</span>(Duration::<span class="title function_ invoke__">from_millis</span>(<span class="number">100</span>)).<span class="keyword">await</span>;
+    <span class="built_in">format!</span>(<span class="string">&quot;用户&#123;&#125;&quot;</span>, id)
+&#125;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">start</span> = std::time::Instant::<span class="title function_ invoke__">now</span>();
+    
+    <span class="comment">// 并发执行，等待所有任务完成</span>
+    <span class="keyword">let</span> (user1, user2, user3) = tokio::join!(
+        <span class="title function_ invoke__">fetch_user</span>(<span class="number">1</span>),
+        <span class="title function_ invoke__">fetch_user</span>(<span class="number">2</span>),
+        <span class="title function_ invoke__">fetch_user</span>(<span class="number">3</span>)
+    );
+    
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;, &#123;&#125;, &#123;&#125;&quot;</span>, user1, user2, user3);
+    <span class="built_in">println!</span>(<span class="string">&quot;耗时: &#123;:?&#125;&quot;</span>, start.<span class="title function_ invoke__">elapsed</span>()); <span class="comment">// 约 100ms</span>
+&#125;</code></pre>
+
+<h4 id="等待第一个完成：select"><a href="#等待第一个完成：select" class="headerlink" title="等待第一个完成：select!"></a>等待第一个完成：<code>select!</code></h4><pre><code class="highlight rust"><span class="keyword">use</span> tokio::time::&#123;sleep, Duration&#125;;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">task1</span> = <span class="keyword">async</span> &#123;
+        <span class="title function_ invoke__">sleep</span>(Duration::<span class="title function_ invoke__">from_secs</span>(<span class="number">1</span>)).<span class="keyword">await</span>;
+        <span class="string">&quot;任务1完成&quot;</span>
+    &#125;;
+    
+    <span class="keyword">let</span> <span class="variable">task2</span> = <span class="keyword">async</span> &#123;
+        <span class="title function_ invoke__">sleep</span>(Duration::<span class="title function_ invoke__">from_millis</span>(<span class="number">500</span>)).<span class="keyword">await</span>;
+        <span class="string">&quot;任务2完成&quot;</span>
+    &#125;;
+    
+    <span class="comment">// 等待第一个完成的任务</span>
+    tokio::<span class="built_in">select!</span> &#123;
+        result = task1 =&gt; <span class="built_in">println!</span>(<span class="string">&quot;先完成: &#123;&#125;&quot;</span>, result),
+        result = task2 =&gt; <span class="built_in">println!</span>(<span class="string">&quot;先完成: &#123;&#125;&quot;</span>, result),
+    &#125;
+&#125;</code></pre>
+
+<h3 id="4-3-通道（Channel）：任务间通信"><a href="#4-3-通道（Channel）：任务间通信" class="headerlink" title="4.3 通道（Channel）：任务间通信"></a>4.3 通道（Channel）：任务间通信</h3><p>Tokio 提供多种通道类型，最常用的是 <code>mpsc</code>（多生产者单消费者）：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> tokio::sync::mpsc;
+<span class="keyword">use</span> tokio::time::&#123;sleep, Duration&#125;;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// 创建容量为 32 的通道</span>
+    <span class="keyword">let</span> (tx, <span class="keyword">mut</span> rx) = mpsc::<span class="title function_ invoke__">channel</span>(<span class="number">32</span>);
+    
+    <span class="comment">// 生产者任务</span>
+    tokio::<span class="title function_ invoke__">spawn</span>(<span class="keyword">async</span> <span class="keyword">move</span> &#123;
+        <span class="keyword">for</span> <span class="variable">i</span> <span class="keyword">in</span> <span class="number">1</span>..=<span class="number">5</span> &#123;
+            tx.<span class="title function_ invoke__">send</span>(<span class="built_in">format!</span>(<span class="string">&quot;消息 &#123;&#125;&quot;</span>, i)).<span class="keyword">await</span>.<span class="title function_ invoke__">unwrap</span>();
+            <span class="title function_ invoke__">sleep</span>(Duration::<span class="title function_ invoke__">from_millis</span>(<span class="number">200</span>)).<span class="keyword">await</span>;
+        &#125;
+    &#125;);
+    
+    <span class="comment">// 消费者：接收消息</span>
+    <span class="keyword">while</span> <span class="keyword">let</span> <span class="variable">Some</span>(msg) = rx.<span class="title function_ invoke__">recv</span>().<span class="keyword">await</span> &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;收到: &#123;&#125;&quot;</span>, msg);
+    &#125;
+    
+    <span class="built_in">println!</span>(<span class="string">&quot;通道已关闭&quot;</span>);
+&#125;</code></pre>
+
+<h3 id="4-4-共享状态：Arc-和-Mutex"><a href="#4-4-共享状态：Arc-和-Mutex" class="headerlink" title="4.4 共享状态：Arc 和 Mutex"></a>4.4 共享状态：Arc 和 Mutex</h3><p>在多个任务间共享可变状态：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> std::sync::Arc;
+<span class="keyword">use</span> tokio::sync::Mutex;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// 使用 Arc 共享所有权，Mutex 保护可变访问</span>
+    <span class="keyword">let</span> <span class="variable">counter</span> = Arc::<span class="title function_ invoke__">new</span>(Mutex::<span class="title function_ invoke__">new</span>(<span class="number">0</span>));
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">handles</span> = <span class="built_in">vec!</span>[];
+    
+    <span class="keyword">for</span> <span class="variable">i</span> <span class="keyword">in</span> <span class="number">0</span>..<span class="number">10</span> &#123;
+        <span class="keyword">let</span> <span class="variable">counter</span> = Arc::<span class="title function_ invoke__">clone</span>(&amp;counter);
+        <span class="keyword">let</span> <span class="variable">handle</span> = tokio::<span class="title function_ invoke__">spawn</span>(<span class="keyword">async</span> <span class="keyword">move</span> &#123;
+            <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">num</span> = counter.<span class="title function_ invoke__">lock</span>().<span class="keyword">await</span>;
+            *num += <span class="number">1</span>;
+            <span class="built_in">println!</span>(<span class="string">&quot;任务 &#123;&#125; 增加计数器&quot;</span>, i);
+        &#125;);
+        handles.<span class="title function_ invoke__">push</span>(handle);
+    &#125;
+    
+    <span class="comment">// 等待所有任务完成</span>
+    <span class="keyword">for</span> <span class="variable">handle</span> <span class="keyword">in</span> handles &#123;
+        handle.<span class="keyword">await</span>.<span class="title function_ invoke__">unwrap</span>();
+    &#125;
+    
+    <span class="built_in">println!</span>(<span class="string">&quot;最终计数: &#123;&#125;&quot;</span>, *counter.<span class="title function_ invoke__">lock</span>().<span class="keyword">await</span>);
+&#125;</code></pre>
+
+<p><strong>注意</strong>：必须使用 <code>tokio::sync::Mutex</code>，不能使用 <code>std::sync::Mutex</code>，因为后者会阻塞线程。</p>
+<h2 id="五、实战案例"><a href="#五、实战案例" class="headerlink" title="五、实战案例"></a>五、实战案例</h2><h3 id="5-1-并发-HTTP-请求模拟"><a href="#5-1-并发-HTTP-请求模拟" class="headerlink" title="5.1 并发 HTTP 请求模拟"></a>5.1 并发 HTTP 请求模拟</h3><pre><code class="highlight rust"><span class="keyword">use</span> tokio::time::&#123;sleep, Duration&#125;;
+<span class="keyword">use</span> std::time::Instant;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">fetch_url</span>(url: &amp;<span class="type">str</span>, delay_ms: <span class="type">u64</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="type">String</span>, <span class="type">String</span>&gt; &#123;
+    <span class="built_in">println!</span>(<span class="string">&quot;开始请求: &#123;&#125;&quot;</span>, url);
+    <span class="title function_ invoke__">sleep</span>(Duration::<span class="title function_ invoke__">from_millis</span>(delay_ms)).<span class="keyword">await</span>;
+    
+    <span class="comment">// 模拟偶尔失败</span>
+    <span class="keyword">if</span> delay_ms &gt; <span class="number">500</span> &#123;
+        <span class="title function_ invoke__">Ok</span>(<span class="built_in">format!</span>(<span class="string">&quot;成功获取: &#123;&#125;&quot;</span>, url))
+    &#125; <span class="keyword">else</span> &#123;
+        <span class="title function_ invoke__">Err</span>(<span class="built_in">format!</span>(<span class="string">&quot;请求失败: &#123;&#125;&quot;</span>, url))
+    &#125;
+&#125;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">start</span> = Instant::<span class="title function_ invoke__">now</span>();
+    
+    <span class="keyword">let</span> <span class="variable">urls</span> = <span class="built_in">vec!</span>[
+        (<span class="string">&quot;https://api1.example.com&quot;</span>, <span class="number">300</span>),
+        (<span class="string">&quot;https://api2.example.com&quot;</span>, <span class="number">600</span>),
+        (<span class="string">&quot;https://api3.example.com&quot;</span>, <span class="number">400</span>),
+    ];
+    
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">tasks</span> = <span class="built_in">vec!</span>[];
+    
+    <span class="keyword">for</span> (url, delay) <span class="keyword">in</span> urls &#123;
+        <span class="keyword">let</span> <span class="variable">task</span> = tokio::<span class="title function_ invoke__">spawn</span>(<span class="keyword">async</span> <span class="keyword">move</span> &#123;
+            <span class="title function_ invoke__">fetch_url</span>(url, delay).<span class="keyword">await</span>
+        &#125;);
+        tasks.<span class="title function_ invoke__">push</span>(task);
+    &#125;
+    
+    <span class="comment">// 收集所有结果</span>
+    <span class="keyword">for</span> <span class="variable">task</span> <span class="keyword">in</span> tasks &#123;
+        <span class="keyword">match</span> task.<span class="keyword">await</span>.<span class="title function_ invoke__">unwrap</span>() &#123;
+            <span class="title function_ invoke__">Ok</span>(result) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;✓ &#123;&#125;&quot;</span>, result),
+            <span class="title function_ invoke__">Err</span>(err) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;✗ &#123;&#125;&quot;</span>, err),
+        &#125;
+    &#125;
+    
+    <span class="built_in">println!</span>(<span class="string">&quot;总耗时: &#123;:?&#125;&quot;</span>, start.<span class="title function_ invoke__">elapsed</span>());
+&#125;</code></pre>
+
+<h3 id="5-2-简单的异步-Web-服务器框架"><a href="#5-2-简单的异步-Web-服务器框架" class="headerlink" title="5.2 简单的异步 Web 服务器框架"></a>5.2 简单的异步 Web 服务器框架</h3><pre><code class="highlight rust"><span class="keyword">use</span> tokio::net::TcpListener;
+<span class="keyword">use</span> tokio::io::&#123;AsyncReadExt, AsyncWriteExt&#125;;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;(), <span class="type">Box</span>&lt;<span class="keyword">dyn</span> std::error::Error&gt;&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">listener</span> = TcpListener::<span class="title function_ invoke__">bind</span>(<span class="string">&quot;127.0.0.1:8080&quot;</span>).<span class="keyword">await</span>?;
+    <span class="built_in">println!</span>(<span class="string">&quot;服务器监听 127.0.0.1:8080&quot;</span>);
+    
+    <span class="keyword">loop</span> &#123;
+        <span class="comment">// 接受新连接</span>
+        <span class="keyword">let</span> (<span class="keyword">mut</span> socket, addr) = listener.<span class="title function_ invoke__">accept</span>().<span class="keyword">await</span>?;
+        <span class="built_in">println!</span>(<span class="string">&quot;新连接: &#123;&#125;&quot;</span>, addr);
+        
+        <span class="comment">// 为每个连接生成独立任务</span>
+        tokio::<span class="title function_ invoke__">spawn</span>(<span class="keyword">async</span> <span class="keyword">move</span> &#123;
+            <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">buffer</span> = [<span class="number">0</span>; <span class="number">1024</span>];
+            
+            <span class="comment">// 读取数据</span>
+            <span class="keyword">match</span> socket.<span class="title function_ invoke__">read</span>(&amp;<span class="keyword">mut</span> buffer).<span class="keyword">await</span> &#123;
+                <span class="title function_ invoke__">Ok</span>(n) <span class="keyword">if</span> n &gt; <span class="number">0</span> =&gt; &#123;
+                    <span class="keyword">let</span> <span class="variable">request</span> = <span class="type">String</span>::<span class="title function_ invoke__">from_utf8_lossy</span>(&amp;buffer[..n]);
+                    <span class="built_in">println!</span>(<span class="string">&quot;收到请求:\n&#123;&#125;&quot;</span>, request);
+                    
+                    <span class="comment">// 发送响应</span>
+                    <span class="keyword">let</span> <span class="variable">response</span> = <span class="string">&quot;HTTP/1.1 200 OK\r\n\</span>
+<span class="string">                                   Content-Type: text/plain\r\n\</span>
+<span class="string">                                   \r\n\</span>
+<span class="string">                                   Hello from Tokio!&quot;</span>;
+                    socket.<span class="title function_ invoke__">write_all</span>(response.<span class="title function_ invoke__">as_bytes</span>()).<span class="keyword">await</span>.<span class="title function_ invoke__">ok</span>();
+                &#125;
+                _ =&gt; <span class="built_in">println!</span>(<span class="string">&quot;连接关闭: &#123;&#125;&quot;</span>, addr),
+            &#125;
+        &#125;);
+    &#125;
+&#125;</code></pre>
+
+<h3 id="5-3-超时控制"><a href="#5-3-超时控制" class="headerlink" title="5.3 超时控制"></a>5.3 超时控制</h3><pre><code class="highlight rust"><span class="keyword">use</span> tokio::time::&#123;sleep, Duration, timeout&#125;;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">long_running_task</span>() <span class="punctuation">-&gt;</span> <span class="type">String</span> &#123;
+    <span class="title function_ invoke__">sleep</span>(Duration::<span class="title function_ invoke__">from_secs</span>(<span class="number">3</span>)).<span class="keyword">await</span>;
+    <span class="string">&quot;任务完成&quot;</span>.<span class="title function_ invoke__">to_string</span>()
+&#125;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// 设置 1 秒超时</span>
+    <span class="keyword">match</span> <span class="title function_ invoke__">timeout</span>(Duration::<span class="title function_ invoke__">from_secs</span>(<span class="number">1</span>), <span class="title function_ invoke__">long_running_task</span>()).<span class="keyword">await</span> &#123;
+        <span class="title function_ invoke__">Ok</span>(result) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;成功: &#123;&#125;&quot;</span>, result),
+        <span class="title function_ invoke__">Err</span>(_) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;任务超时!&quot;</span>),
+    &#125;
+    
+    <span class="comment">// 设置 5 秒超时</span>
+    <span class="keyword">match</span> <span class="title function_ invoke__">timeout</span>(Duration::<span class="title function_ invoke__">from_secs</span>(<span class="number">5</span>), <span class="title function_ invoke__">long_running_task</span>()).<span class="keyword">await</span> &#123;
+        <span class="title function_ invoke__">Ok</span>(result) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;成功: &#123;&#125;&quot;</span>, result),
+        <span class="title function_ invoke__">Err</span>(_) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;任务超时!&quot;</span>),
+    &#125;
+&#125;</code></pre>
+
+<h2 id="六、常见陷阱与最佳实践"><a href="#六、常见陷阱与最佳实践" class="headerlink" title="六、常见陷阱与最佳实践"></a>六、常见陷阱与最佳实践</h2><h3 id="6-1-避免阻塞操作"><a href="#6-1-避免阻塞操作" class="headerlink" title="6.1 避免阻塞操作"></a>6.1 避免阻塞操作</h3><p>❌ <strong>错误示例</strong>：在异步代码中使用阻塞操作</p>
+<pre><code class="highlight rust"><span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    tokio::<span class="title function_ invoke__">spawn</span>(<span class="keyword">async</span> &#123;
+        <span class="comment">// 这会阻塞工作线程!</span>
+        std::thread::<span class="title function_ invoke__">sleep</span>(std::time::Duration::<span class="title function_ invoke__">from_secs</span>(<span class="number">10</span>));
+    &#125;);
+&#125;</code></pre>
+
+<p>✅ <strong>正确做法</strong>：使用 Tokio 的异步版本或 <code>spawn_blocking</code></p>
+<pre><code class="highlight rust"><span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// 方法1: 使用异步版本</span>
+    tokio::<span class="title function_ invoke__">spawn</span>(<span class="keyword">async</span> &#123;
+        tokio::time::<span class="title function_ invoke__">sleep</span>(tokio::time::Duration::<span class="title function_ invoke__">from_secs</span>(<span class="number">10</span>)).<span class="keyword">await</span>;
+    &#125;);
+    
+    <span class="comment">// 方法2: 必须阻塞时使用 spawn_blocking</span>
+    tokio::task::<span class="title function_ invoke__">spawn_blocking</span>(|| &#123;
+        <span class="comment">// 执行 CPU 密集或阻塞操作</span>
+        std::thread::<span class="title function_ invoke__">sleep</span>(std::time::Duration::<span class="title function_ invoke__">from_secs</span>(<span class="number">10</span>));
+    &#125;);
+&#125;</code></pre>
+
+<h3 id="6-2-选择合适的运行时配置"><a href="#6-2-选择合适的运行时配置" class="headerlink" title="6.2 选择合适的运行时配置"></a>6.2 选择合适的运行时配置</h3><pre><code class="highlight rust"><span class="comment">// 单线程运行时 - 适合简单场景</span>
+<span class="meta">#[tokio::main(flavor = <span class="string">&quot;current_thread&quot;</span>)]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// ...</span>
+&#125;
+
+<span class="comment">// 多线程运行时 - 默认配置，适合大多数场景</span>
+<span class="meta">#[tokio::main(flavor = <span class="string">&quot;multi_thread&quot;</span>, worker_threads = 4)]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// ...</span>
+&#125;
+
+<span class="comment">// 手动创建运行时 - 更多控制</span>
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">runtime</span> = tokio::runtime::Builder::<span class="title function_ invoke__">new_multi_thread</span>()
+        .<span class="title function_ invoke__">worker_threads</span>(<span class="number">4</span>)
+        .<span class="title function_ invoke__">thread_name</span>(<span class="string">&quot;my-pool&quot;</span>)
+        .<span class="title function_ invoke__">build</span>()
+        .<span class="title function_ invoke__">unwrap</span>();
+    
+    runtime.<span class="title function_ invoke__">block_on</span>(<span class="keyword">async</span> &#123;
+        <span class="comment">// 异步代码</span>
+    &#125;);
+&#125;</code></pre>
+
+<h3 id="6-3-正确使用-Mutex"><a href="#6-3-正确使用-Mutex" class="headerlink" title="6.3 正确使用 Mutex"></a>6.3 正确使用 Mutex</h3><pre><code class="highlight rust"><span class="keyword">use</span> tokio::sync::Mutex;
+<span class="keyword">use</span> std::sync::Arc;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">data</span> = Arc::<span class="title function_ invoke__">new</span>(Mutex::<span class="title function_ invoke__">new</span>(<span class="built_in">vec!</span>[<span class="number">1</span>, <span class="number">2</span>, <span class="number">3</span>]));
+    
+    <span class="comment">// ✅ 正确：快速释放锁</span>
+    &#123;
+        <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">d</span> = data.<span class="title function_ invoke__">lock</span>().<span class="keyword">await</span>;
+        d.<span class="title function_ invoke__">push</span>(<span class="number">4</span>);
+    &#125; <span class="comment">// 锁在这里释放</span>
+    
+    <span class="comment">// ❌ 避免：持有锁跨越 await 点</span>
+    <span class="comment">// let mut d = data.lock().await;</span>
+    <span class="comment">// tokio::time::sleep(Duration::from_secs(1)).await; // 危险!</span>
+    <span class="comment">// d.push(4);</span>
+&#125;</code></pre>
+
+<h2 id="七、学习总结"><a href="#七、学习总结" class="headerlink" title="七、学习总结"></a>七、学习总结</h2><h3 id="核心要点"><a href="#核心要点" class="headerlink" title="核心要点"></a>核心要点</h3><ol>
+<li><p><strong>异步模型</strong>：Tokio 使用协作式多任务，通过 <code>async/await</code> 实现高效的并发处理</p>
+</li>
+<li><p><strong>运行时</strong>：<code>#[tokio::main]</code> 宏负责创建运行时和调度器，是异步程序的基础</p>
+</li>
+<li><p><strong>任务生成</strong>：</p>
+<ul>
+<li><code>tokio::spawn</code> 创建独立任务</li>
+<li><code>tokio::join!</code> 并发等待多个任务</li>
+<li><code>tokio::select!</code> 等待第一个完成的任务</li>
+</ul>
+</li>
+<li><p><strong>通信机制</strong>：</p>
+<ul>
+<li>Channel（mpsc, oneshot, broadcast）用于任务间传递消息</li>
+<li>Arc + Mutex 用于共享可变状态</li>
+</ul>
+</li>
+<li><p><strong>避免阻塞</strong>：永远不要在异步代码中使用阻塞操作，使用 Tokio 提供的异步版本</p>
+</li>
+</ol>
+<h3 id="性能优势"><a href="#性能优势" class="headerlink" title="性能优势"></a>性能优势</h3><ul>
+<li><strong>轻量级任务</strong>：相比线程，Tokio 任务几乎零开销</li>
+<li><strong>高并发能力</strong>：可以轻松处理数万个并发连接</li>
+<li><strong>资源利用</strong>：充分利用 CPU 多核能力，避免线程阻塞浪费</li>
+</ul>
+<h3 id="适用场景"><a href="#适用场景" class="headerlink" title="适用场景"></a>适用场景</h3><p>✅ <strong>非常适合</strong>：</p>
+<ul>
+<li>Web 服务器和 API 服务</li>
+<li>网络代理和负载均衡器</li>
+<li>微服务架构</li>
+<li>实时数据处理</li>
+<li>高并发 I&#x2F;O 密集型应用</li>
+</ul>
+<p>⚠️ <strong>不太适合</strong>：</p>
+<ul>
+<li>CPU 密集型计算（考虑 Rayon 等并行计算库）</li>
+<li>简单的命令行工具（同步代码更简单）</li>
+</ul>
+<h3 id="继续学习"><a href="#继续学习" class="headerlink" title="继续学习"></a>继续学习</h3><ol>
+<li><strong>官方文档</strong>：<a href="https://tokio.rs/">tokio.rs</a></li>
+<li><strong>Tokio Tutorial</strong>：官方教程非常详细</li>
+<li><strong>实践项目</strong>：<ul>
+<li>构建一个聊天服务器</li>
+<li>实现一个 HTTP 代理</li>
+<li>编写异步爬虫</li>
+</ul>
+</li>
+<li><strong>生态系统</strong>：<ul>
+<li><code>reqwest</code>：异步 HTTP 客户端</li>
+<li><code>axum</code> &#x2F; <code>actix-web</code>：Web 框架</li>
+<li><code>tonic</code>：gRPC 框架</li>
+</ul>
+</li>
+</ol>
+<h2 id="八、总结"><a href="#八、总结" class="headerlink" title="八、总结"></a>八、总结</h2><p>Tokio 为 Rust 提供了强大而优雅的异步编程能力。通过掌握 <code>async/await</code>、任务生成、通道通信等核心概念，你可以编写出高性能、高并发的应用程序。关键是要理解异步运行时的工作原理，避免阻塞操作，合理使用并发原语。</p>
+<p>从简单的 Hello World 开始，逐步实践并发任务、网络编程等场景，你会发现 Tokio 在保持 Rust 安全性的同时，提供了接近原生性能的异步处理能力。继续探索和实践，你将能够构建出真正强大的异步应用！</p>
+<hr>
+<p><em>Happy Async Programming with Tokio! 🚀</em></p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
