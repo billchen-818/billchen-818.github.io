@@ -1,0 +1,1084 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Solana 账户模型详解</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Solana 账户模型详解</h1><div class="time">2026-02-27</div><ul class="tags"><li><span>#</span><a href="/tags/Solana/">Solana</a></li></ul><blockquote>
+<p>Solana 的账户模型是其区块链架构的核心基石。与以太坊的”智能合约&#x3D;代码+数据”模式不同，Solana 采用了<strong>程序与数据分离</strong>的独特设计。本文将深入剖析 Solana 的账户体系，涵盖各种账户类型、PDA 账户机制，并配合代码示例和图解，帮助你全面掌握 Solana 账户模型。</p>
+</blockquote>
+<h2 id="一、Solana-账户模型总览"><a href="#一、Solana-账户模型总览" class="headerlink" title="一、Solana 账户模型总览"></a>一、Solana 账户模型总览</h2><h3 id="1-1-核心概念"><a href="#1-1-核心概念" class="headerlink" title="1.1 核心概念"></a>1.1 核心概念</h3><p>在 Solana 中，<strong>一切皆账户（Everything is an Account）</strong>。无论是用户钱包、代币余额、还是智能合约（Program），都以账户的形式存储在链上。</p>
+<p>每个账户由以下字段组成：</p>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>lamports</code></td>
+<td><code>u64</code></td>
+<td>账户余额（单位：lamport，1 SOL &#x3D; 10⁹ lamports）</td>
+</tr>
+<tr>
+<td><code>data</code></td>
+<td><code>Vec&lt;u8&gt;</code></td>
+<td>存储的数据（字节数组）</td>
+</tr>
+<tr>
+<td><code>owner</code></td>
+<td><code>Pubkey</code></td>
+<td>拥有该账户的程序（Program）</td>
+</tr>
+<tr>
+<td><code>executable</code></td>
+<td><code>bool</code></td>
+<td>是否为可执行程序</td>
+</tr>
+<tr>
+<td><code>rent_epoch</code></td>
+<td><code>u64</code></td>
+<td>下次需要支付租金的 epoch</td>
+</tr>
+</tbody></table>
+<pre><code class="highlight plaintext">┌─────────────────────────────────────────────┐
+│              Solana Account                  │
+├─────────────────────────────────────────────┤
+│  Public Key (地址): 32 bytes                 │
+├─────────────────────────────────────────────┤
+│  lamports:    1_000_000_000  (1 SOL)        │
+│  data:        [0u8; 128]    (128 字节数据)   │
+│  owner:       11111...1111  (System Program) │
+│  executable:  false                          │
+│  rent_epoch:  365                            │
+└─────────────────────────────────────────────┘</code></pre>
+
+<h3 id="1-2-账户模型设计哲学"><a href="#1-2-账户模型设计哲学" class="headerlink" title="1.2 账户模型设计哲学"></a>1.2 账户模型设计哲学</h3><pre><code class="highlight plaintext">  以太坊模型                         Solana 模型
+┌──────────────┐              ┌──────────────┐    ┌──────────────┐
+│  Smart       │              │   Program    │    │    Account   │
+│  Contract    │              │  (可执行)     │    │   (数据存储)  │
+│              │              │              │    │              │
+│ ┌──────────┐ │              │  只含代码     │    │  只含数据     │
+│ │  代码     │ │              │  不可修改     │    │  可读可写     │
+│ ├──────────┤ │     vs       │  无状态      │    │  有状态       │
+│ │  状态     │ │  ========&gt;  │              │    │              │
+│ │  数据     │ │              │  owner:      │    │  owner:      │
+│ └──────────┘ │              │  BPFLoader   │    │  某个Program  │
+└──────────────┘              └──────────────┘    └──────────────┘
+                                     │                   ▲
+                                     │     拥有 &amp; 操作     │
+                                     └───────────────────┘</code></pre>
+
+<blockquote>
+<p><strong>关键原则</strong>：在 Solana 中，<strong>只有账户的 owner 程序才能修改该账户的数据</strong>。这是 Solana 安全模型的基石。</p>
+</blockquote>
+<hr>
+<h2 id="二、Solana-账户类型全景图"><a href="#二、Solana-账户类型全景图" class="headerlink" title="二、Solana 账户类型全景图"></a>二、Solana 账户类型全景图</h2><pre><code class="highlight plaintext">                     ┌─────────────────────┐
+                     │   Solana Accounts    │
+                     └─────────┬───────────┘
+                               │
+         ┌─────────────────────┼─────────────────────┐
+         │                     │                     │
+┌────────▼────────┐  ┌────────▼────────┐  ┌────────▼────────┐
+│  系统账户        │  │  程序账户        │  │  数据账户        │
+│  System Account  │  │  Program Account │  │  Data Account   │
+│                  │  │                  │  │                  │
+│  • 用户钱包      │  │  • Native Program│  │  • Token Account │
+│  • 普通SOL账户   │  │  • BPF Program   │  │  • PDA Account   │
+│                  │  │  • Upgradeable   │  │  • Mint Account  │
+└──────────────────┘  └──────────────────┘  │  • Associated    │
+                                            │    Token Account │
+                                            └──────────────────┘</code></pre>
+
+<h3 id="2-1-系统账户（System-Account）"><a href="#2-1-系统账户（System-Account）" class="headerlink" title="2.1 系统账户（System Account）"></a>2.1 系统账户（System Account）</h3><p>系统账户是最基础的账户类型，即普通的<strong>用户钱包</strong>。</p>
+<p><strong>特征</strong>：</p>
+<ul>
+<li><code>owner</code> &#x3D; System Program (<code>11111111111111111111111111111111</code>)</li>
+<li><code>executable</code> &#x3D; false</li>
+<li><code>data</code> &#x3D; 空（0 字节）</li>
+<li>由 Ed25519 密钥对生成</li>
+</ul>
+<pre><code class="highlight rust"><span class="keyword">use</span> solana_sdk::signature::Keypair;
+<span class="keyword">use</span> solana_sdk::signer::Signer;
+
+<span class="comment">// 生成新的密钥对（即创建新账户）</span>
+<span class="keyword">let</span> <span class="variable">keypair</span> = Keypair::<span class="title function_ invoke__">new</span>();
+<span class="keyword">let</span> <span class="variable">public_key</span> = keypair.<span class="title function_ invoke__">pubkey</span>();
+
+<span class="built_in">println!</span>(<span class="string">&quot;公钥（地址）: &#123;&#125;&quot;</span>, public_key);
+<span class="comment">// 输出类似: 7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU</span></code></pre>
+
+<pre><code class="highlight typescript"><span class="comment">// 使用 @solana/web3.js 创建钱包</span>
+<span class="keyword">import</span> &#123; <span class="title class_">Keypair</span>, <span class="title class_">Connection</span>, <span class="variable constant_">LAMPORTS_PER_SOL</span> &#125; <span class="keyword">from</span> <span class="string">&quot;@solana/web3.js&quot;</span>;
+
+<span class="comment">// 生成新密钥对</span>
+<span class="keyword">const</span> wallet = <span class="title class_">Keypair</span>.<span class="title function_">generate</span>();
+<span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;公钥:&quot;</span>, wallet.<span class="property">publicKey</span>.<span class="title function_">toBase58</span>());
+<span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;私钥:&quot;</span>, wallet.<span class="property">secretKey</span>);
+
+<span class="comment">// 连接到 devnet 并空投 SOL</span>
+<span class="keyword">const</span> connection = <span class="keyword">new</span> <span class="title class_">Connection</span>(<span class="string">&quot;https://api.devnet.solana.com&quot;</span>, <span class="string">&quot;confirmed&quot;</span>);
+<span class="keyword">const</span> airdropSig = <span class="keyword">await</span> connection.<span class="title function_">requestAirdrop</span>(
+  wallet.<span class="property">publicKey</span>,
+  <span class="number">2</span> * <span class="variable constant_">LAMPORTS_PER_SOL</span>
+);
+<span class="keyword">await</span> connection.<span class="title function_">confirmTransaction</span>(airdropSig);
+
+<span class="comment">// 查询账户信息</span>
+<span class="keyword">const</span> accountInfo = <span class="keyword">await</span> connection.<span class="title function_">getAccountInfo</span>(wallet.<span class="property">publicKey</span>);
+<span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;余额:&quot;</span>, accountInfo.<span class="property">lamports</span> / <span class="variable constant_">LAMPORTS_PER_SOL</span>, <span class="string">&quot;SOL&quot;</span>);
+<span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Owner:&quot;</span>, accountInfo.<span class="property">owner</span>.<span class="title function_">toBase58</span>());
+<span class="comment">// Owner: 11111111111111111111111111111111 (System Program)</span></code></pre>
+
+<h3 id="2-2-程序账户（Program-Account）"><a href="#2-2-程序账户（Program-Account）" class="headerlink" title="2.2 程序账户（Program Account）"></a>2.2 程序账户（Program Account）</h3><p>程序账户存储可执行的代码（类似以太坊的智能合约）。</p>
+<p><strong>特征</strong>：</p>
+<ul>
+<li><code>executable</code> &#x3D; true</li>
+<li><code>data</code> &#x3D; 编译后的 BPF 字节码</li>
+<li>程序账户<strong>不存储状态</strong>，状态存储在独立的数据账户中</li>
+</ul>
+<pre><code class="highlight plaintext">┌─────────────────────────────────────────────────────┐
+│                  程序账户体系                          │
+├─────────────────────────────────────────────────────┤
+│                                                     │
+│  ┌─────────────┐   ┌───────────────┐                │
+│  │ Native      │   │ BPF/SBF       │                │
+│  │ Programs    │   │ Programs      │                │
+│  │             │   │               │                │
+│  │ • System    │   │ ┌───────────┐ │                │
+│  │   Program   │   │ │ Program   │ │                │
+│  │ • Token     │   │ │ Account   │ │                │
+│  │   Program   │   │ │executable │ │                │
+│  │ • Stake     │   │ │ =true     │ │                │
+│  │   Program   │   │ └─────┬─────┘ │                │
+│  │ • Vote      │   │       │       │                │
+│  │   Program   │   │ ┌─────▼─────┐ │                │
+│  │ • BPF       │   │ │ Program   │ │                │
+│  │   Loader    │   │ │ Data Acct │ │                │
+│  └─────────────┘   │ │ (字节码)   │ │                │
+│                     │ └───────────┘ │                │
+│                     └───────────────┘                │
+└─────────────────────────────────────────────────────┘</code></pre>
+
+<h4 id="原生程序（Native-Programs）"><a href="#原生程序（Native-Programs）" class="headerlink" title="原生程序（Native Programs）"></a>原生程序（Native Programs）</h4><table>
+<thead>
+<tr>
+<th>程序名称</th>
+<th>地址</th>
+<th>功能</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>System Program</td>
+<td><code>11111111111111111111111111111111</code></td>
+<td>创建账户、转账 SOL</td>
+</tr>
+<tr>
+<td>Token Program</td>
+<td><code>TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA</code></td>
+<td>SPL Token 操作</td>
+</tr>
+<tr>
+<td>Token-2022</td>
+<td><code>TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb</code></td>
+<td>新一代 Token 标准</td>
+</tr>
+<tr>
+<td>Associated Token</td>
+<td><code>ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL</code></td>
+<td>管理关联代币账户</td>
+</tr>
+<tr>
+<td>Stake Program</td>
+<td><code>Stake11111111111111111111111111111111111111</code></td>
+<td>质押管理</td>
+</tr>
+<tr>
+<td>Vote Program</td>
+<td><code>Vote111111111111111111111111111111111111111</code></td>
+<td>验证者投票</td>
+</tr>
+</tbody></table>
+<h4 id="可升级程序结构"><a href="#可升级程序结构" class="headerlink" title="可升级程序结构"></a>可升级程序结构</h4><pre><code class="highlight plaintext">可升级程序（Upgradeable Program）架构：
+
+┌──────────────┐         ┌──────────────────┐
+│  Program     │         │  ProgramData     │
+│  Account     │────────▶│  Account         │
+│              │  指向    │                  │
+│  executable  │         │  实际的字节码      │
+│  = true      │         │  upgrade_auth     │
+│              │         │  slot (部署slot)   │
+└──────────────┘         └──────────────────┘
+      ▲                          ▲
+      │                          │
+用户通过此地址                 升级权限由
+调用程序                     upgrade_authority 控制</code></pre>
+
+<h3 id="2-3-数据账户（Data-Account）"><a href="#2-3-数据账户（Data-Account）" class="headerlink" title="2.3 数据账户（Data Account）"></a>2.3 数据账户（Data Account）</h3><p>数据账户用于存储程序运行时的状态。</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> anchor_lang::prelude::*;
+
+<span class="comment">// 使用 Anchor 框架定义数据账户</span>
+<span class="meta">#[account]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">UserProfile</span> &#123;
+    <span class="keyword">pub</span> authority: Pubkey,    <span class="comment">// 32 bytes</span>
+    <span class="keyword">pub</span> name: <span class="type">String</span>,         <span class="comment">// 4 + len bytes</span>
+    <span class="keyword">pub</span> level: <span class="type">u8</span>,            <span class="comment">// 1 byte</span>
+    <span class="keyword">pub</span> experience: <span class="type">u64</span>,      <span class="comment">// 8 bytes</span>
+    <span class="keyword">pub</span> created_at: <span class="type">i64</span>,      <span class="comment">// 8 bytes</span>
+&#125;
+
+<span class="comment">// 计算账户所需空间</span>
+<span class="keyword">impl</span> <span class="title class_">UserProfile</span> &#123;
+    <span class="keyword">pub</span> <span class="keyword">const</span> MAX_NAME_LEN: <span class="type">usize</span> = <span class="number">32</span>;
+    <span class="keyword">pub</span> <span class="keyword">const</span> SPACE: <span class="type">usize</span> = <span class="number">8</span>   <span class="comment">// Anchor discriminator</span>
+        + <span class="number">32</span>                      <span class="comment">// authority (Pubkey)</span>
+        + <span class="number">4</span> + <span class="keyword">Self</span>::MAX_NAME_LEN  <span class="comment">// name (String)</span>
+        + <span class="number">1</span>                       <span class="comment">// level (u8)</span>
+        + <span class="number">8</span>                       <span class="comment">// experience (u64)</span>
+        + <span class="number">8</span>;                      <span class="comment">// created_at (i64)</span>
+&#125;</code></pre>
+
+<hr>
+<h2 id="三、Token-相关账户"><a href="#三、Token-相关账户" class="headerlink" title="三、Token 相关账户"></a>三、Token 相关账户</h2><h3 id="3-1-Mint-Account（代币铸造账户）"><a href="#3-1-Mint-Account（代币铸造账户）" class="headerlink" title="3.1 Mint Account（代币铸造账户）"></a>3.1 Mint Account（代币铸造账户）</h3><p>每种 SPL Token 都有一个唯一的 Mint Account，定义代币的属性。</p>
+<pre><code class="highlight plaintext">┌─────────────────────────────────────┐
+│           Mint Account              │
+├─────────────────────────────────────┤
+│  mint_authority:   Pubkey | None    │  ← 谁能铸造新代币
+│  supply:           u64             │  ← 当前总供应量
+│  decimals:         u8              │  ← 精度（如 6 = USDC）
+│  is_initialized:   bool            │  ← 是否已初始化
+│  freeze_authority: Pubkey | None    │  ← 谁能冻结账户
+├─────────────────────────────────────┤
+│  owner: Token Program               │
+│  data size: 82 bytes                │
+└─────────────────────────────────────┘</code></pre>
+
+<pre><code class="highlight typescript"><span class="keyword">import</span> &#123;
+  createMint,
+  getMint,
+  <span class="variable constant_">TOKEN_PROGRAM_ID</span>,
+&#125; <span class="keyword">from</span> <span class="string">&quot;@solana/spl-token&quot;</span>;
+
+<span class="comment">// 创建新的代币 Mint</span>
+<span class="keyword">const</span> mint = <span class="keyword">await</span> <span class="title function_">createMint</span>(
+  connection,        <span class="comment">// 连接</span>
+  payer,             <span class="comment">// 付款人</span>
+  mintAuthority,     <span class="comment">// 铸造权限</span>
+  freezeAuthority,   <span class="comment">// 冻结权限 (可为 null)</span>
+  <span class="number">9</span>                  <span class="comment">// decimals 精度</span>
+);
+
+<span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Mint 地址:&quot;</span>, mint.<span class="title function_">toBase58</span>());
+
+<span class="comment">// 查询 Mint 信息</span>
+<span class="keyword">const</span> mintInfo = <span class="keyword">await</span> <span class="title function_">getMint</span>(connection, mint);
+<span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;总供应量:&quot;</span>, mintInfo.<span class="property">supply</span>);
+<span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;精度:&quot;</span>, mintInfo.<span class="property">decimals</span>);
+<span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;铸造权限:&quot;</span>, mintInfo.<span class="property">mintAuthority</span>?.<span class="title function_">toBase58</span>());</code></pre>
+
+<h3 id="3-2-Token-Account（代币账户）"><a href="#3-2-Token-Account（代币账户）" class="headerlink" title="3.2 Token Account（代币账户）"></a>3.2 Token Account（代币账户）</h3><p>每个用户持有某种代币时，需要一个对应的 Token Account。</p>
+<pre><code class="highlight plaintext">一个用户持有多种代币的结构：
+
+┌──────────┐
+│  User    │
+│  Wallet  │     Token Account (USDC)        Token Account (SOL-wrapped)
+│  (系统   │    ┌──────────────────┐        ┌──────────────────┐
+│   账户)  │───▶│ mint: USDC Mint  │        │ mint: wSOL Mint  │
+│          │    │ owner: User      │        │ owner: User      │
+└──────────┘    │ amount: 1000.00  │        │ amount: 5.5      │
+                │ delegate: None   │        │ delegate: None   │
+                │ state: Init      │        │ state: Init      │
+                └──────────────────┘        └──────────────────┘
+                         │                           │
+                         ▼                           ▼
+                ┌──────────────────┐        ┌──────────────────┐
+                │  USDC Mint Acct  │        │  wSOL Mint Acct  │
+                │  decimals: 6     │        │  decimals: 9     │
+                │  supply: 10B     │        │  supply: 1M      │
+                └──────────────────┘        └──────────────────┘</code></pre>
+
+<pre><code class="highlight plaintext">┌─────────────────────────────────────┐
+│          Token Account               │
+├─────────────────────────────────────┤
+│  mint:             Pubkey           │  ← 属于哪种代币
+│  owner:            Pubkey           │  ← 代币持有者
+│  amount:           u64             │  ← 代币数量
+│  delegate:         Pubkey | None    │  ← 委托人
+│  state:            AccountState     │  ← 状态(初始化/冻结)
+│  is_native:        u64 | None       │  ← 是否为原生 SOL 包装
+│  delegated_amount: u64             │  ← 委托数量
+│  close_authority:  Pubkey | None    │  ← 关闭权限
+├─────────────────────────────────────┤
+│  owner: Token Program                │
+│  data size: 165 bytes                │
+└─────────────────────────────────────┘</code></pre>
+
+<h3 id="3-3-Associated-Token-Account（ATA，关联代币账户）"><a href="#3-3-Associated-Token-Account（ATA，关联代币账户）" class="headerlink" title="3.3 Associated Token Account（ATA，关联代币账户）"></a>3.3 Associated Token Account（ATA，关联代币账户）</h3><p>ATA 是一种<strong>确定性派生</strong>的 Token Account，通过用户钱包地址和 Mint 地址可以唯一确定。</p>
+<pre><code class="highlight plaintext">ATA 地址推导过程：
+
+┌──────────────┐     ┌──────────────┐     ┌──────────────────┐
+│  User Wallet │     │  Token Mint  │     │  Token Program   │
+│  Address     │     │  Address     │     │  ID              │
+└──────┬───────┘     └──────┬───────┘     └────────┬─────────┘
+       │                    │                      │
+       └────────────┬───────┘──────────────────────┘
+                    │
+                    ▼
+         ┌─────────────────────┐
+         │  PDA 推导 (seeds)    │
+         │                     │
+         │  seeds = [          │
+         │    wallet_address,  │
+         │    token_program_id,│
+         │    mint_address     │
+         │  ]                  │
+         │  program =          │
+         │  AToken Program     │
+         └──────────┬──────────┘
+                    │
+                    ▼
+         ┌─────────────────────┐
+         │  Associated Token   │
+         │  Account (ATA)      │
+         │                     │
+         │  确定性、唯一的       │
+         │  代币账户地址         │
+         └─────────────────────┘</code></pre>
+
+<pre><code class="highlight typescript"><span class="keyword">import</span> &#123;
+  getAssociatedTokenAddress,
+  createAssociatedTokenAccountInstruction,
+  getOrCreateAssociatedTokenAccount,
+&#125; <span class="keyword">from</span> <span class="string">&quot;@solana/spl-token&quot;</span>;
+
+<span class="comment">// 方法1：计算 ATA 地址</span>
+<span class="keyword">const</span> ata = <span class="keyword">await</span> <span class="title function_">getAssociatedTokenAddress</span>(
+  mintAddress,           <span class="comment">// 代币 Mint 地址</span>
+  walletAddress,         <span class="comment">// 用户钱包地址</span>
+);
+<span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;ATA 地址:&quot;</span>, ata.<span class="title function_">toBase58</span>());
+
+<span class="comment">// 方法2：获取或创建 ATA（推荐）</span>
+<span class="keyword">const</span> tokenAccount = <span class="keyword">await</span> <span class="title function_">getOrCreateAssociatedTokenAccount</span>(
+  connection,
+  payer,                 <span class="comment">// 付费者</span>
+  mintAddress,           <span class="comment">// 代币 Mint</span>
+  walletAddress,         <span class="comment">// 所有者</span>
+);
+<span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;ATA:&quot;</span>, tokenAccount.<span class="property">address</span>.<span class="title function_">toBase58</span>());
+<span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;余额:&quot;</span>, tokenAccount.<span class="property">amount</span>);</code></pre>
+
+<hr>
+<h2 id="四、PDA-账户（Program-Derived-Address）"><a href="#四、PDA-账户（Program-Derived-Address）" class="headerlink" title="四、PDA 账户（Program Derived Address）"></a>四、PDA 账户（Program Derived Address）</h2><h3 id="4-1-什么是-PDA？"><a href="#4-1-什么是-PDA？" class="headerlink" title="4.1 什么是 PDA？"></a>4.1 什么是 PDA？</h3><p><strong>PDA（Program Derived Address）</strong> 是 Solana 中最重要的概念之一。它是一种<strong>由程序确定性派生</strong>的特殊地址，<strong>没有对应的私钥</strong>，因此只能由其关联的程序来签名操作。</p>
+<pre><code class="highlight plaintext">普通账户 vs PDA 账户：
+
+普通账户 (Keypair)                 PDA 账户
+┌──────────────────┐             ┌──────────────────┐
+│  有私钥 ✅        │             │  无私钥 ❌        │
+│  用户可签名 ✅     │             │  用户不能签名 ❌   │
+│  在 Ed25519       │             │  不在 Ed25519     │
+│  曲线上 ✅        │             │  曲线上 ❌        │
+│                   │             │                   │
+│  地址 = 公钥      │             │  地址 = 哈希推导   │
+│                   │             │  程序可代签 ✅     │
+└──────────────────┘             └──────────────────┘</code></pre>
+
+<h3 id="4-2-PDA-推导原理"><a href="#4-2-PDA-推导原理" class="headerlink" title="4.2 PDA 推导原理"></a>4.2 PDA 推导原理</h3><pre><code class="highlight plaintext">PDA 推导流程：
+
+┌─────────────────────────────────────────────────┐
+│                                                 │
+│   seeds (种子)          program_id (程序地址)     │
+│   ┌──────────┐         ┌──────────────┐         │
+│   │ &quot;user&quot;   │         │ Program ID   │         │
+│   │ user_pk  │         │              │         │
+│   └─────┬────┘         └──────┬───────┘         │
+│         │                     │                 │
+│         └──────────┬──────────┘                 │
+│                    │                            │
+│                    ▼                            │
+│         ┌──────────────────┐                    │
+│         │   SHA256 Hash    │                    │
+│         │                  │                    │
+│         │ sha256(seeds +   │                    │
+│         │  program_id +    │                    │
+│         │  &quot;ProgramDerived │                    │
+│         │   Address&quot;)      │                    │
+│         └────────┬─────────┘                    │
+│                  │                              │
+│                  ▼                              │
+│         ┌──────────────────┐                    │
+│         │ 在 Ed25519 曲线上?│                    │
+│         └────────┬─────────┘                    │
+│                  │                              │
+│           ┌──────┴──────┐                       │
+│           │             │                       │
+│         Yes ❌         No ✅                     │
+│           │             │                       │
+│     bump -= 1      找到有效 PDA!                 │
+│     重新计算        返回 (address, bump)          │
+│                                                 │
+│   bump 从 255 递减到 0，直到找到不在曲线上的点       │
+│   第一个有效的 bump 称为 &quot;canonical bump&quot;          │
+│                                                 │
+└─────────────────────────────────────────────────┘</code></pre>
+
+<h3 id="4-3-PDA-代码实现"><a href="#4-3-PDA-代码实现" class="headerlink" title="4.3 PDA 代码实现"></a>4.3 PDA 代码实现</h3><h4 id="Rust-Anchor-实现"><a href="#Rust-Anchor-实现" class="headerlink" title="Rust (Anchor) 实现"></a>Rust (Anchor) 实现</h4><pre><code class="highlight rust"><span class="keyword">use</span> anchor_lang::prelude::*;
+
+declare_id!(<span class="string">&quot;Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS&quot;</span>);
+
+<span class="meta">#[program]</span>
+<span class="keyword">pub</span> <span class="keyword">mod</span> pda_example &#123;
+    <span class="keyword">use</span> super::*;
+
+    <span class="comment">// 创建 PDA 账户</span>
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">initialize_user</span>(
+        ctx: Context&lt;InitializeUser&gt;,
+        name: <span class="type">String</span>,
+    ) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;()&gt; &#123;
+        <span class="keyword">let</span> <span class="variable">user_profile</span> = &amp;<span class="keyword">mut</span> ctx.accounts.user_profile;
+        user_profile.authority = ctx.accounts.authority.<span class="title function_ invoke__">key</span>();
+        user_profile.name = name;
+        user_profile.bump = ctx.bumps.user_profile;
+        <span class="title function_ invoke__">Ok</span>(())
+    &#125;
+
+    <span class="comment">// 使用 PDA 签名进行 CPI 调用</span>
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">transfer_from_vault</span>(
+        ctx: Context&lt;TransferFromVault&gt;,
+        amount: <span class="type">u64</span>,
+    ) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;()&gt; &#123;
+        <span class="keyword">let</span> <span class="variable">authority_key</span> = ctx.accounts.authority.<span class="title function_ invoke__">key</span>();
+
+        <span class="comment">// 构建 PDA signer seeds</span>
+        <span class="keyword">let</span> <span class="variable">seeds</span> = &amp;[
+            <span class="string">b&quot;vault&quot;</span>,
+            authority_key.<span class="title function_ invoke__">as_ref</span>(),
+            &amp;[ctx.accounts.vault.bump],
+        ];
+        <span class="keyword">let</span> <span class="variable">signer_seeds</span> = &amp;[&amp;seeds[..]];
+
+        <span class="comment">// CPI: 从 PDA vault 转账</span>
+        <span class="keyword">let</span> <span class="variable">transfer_ctx</span> = CpiContext::<span class="title function_ invoke__">new_with_signer</span>(
+            ctx.accounts.system_program.<span class="title function_ invoke__">to_account_info</span>(),
+            anchor_lang::system_program::Transfer &#123;
+                from: ctx.accounts.vault.<span class="title function_ invoke__">to_account_info</span>(),
+                to: ctx.accounts.authority.<span class="title function_ invoke__">to_account_info</span>(),
+            &#125;,
+            signer_seeds,
+        );
+
+        anchor_lang::system_program::<span class="title function_ invoke__">transfer</span>(transfer_ctx, amount)?;
+        <span class="title function_ invoke__">Ok</span>(())
+    &#125;
+&#125;
+
+<span class="comment">// 初始化用户 PDA 账户的上下文</span>
+<span class="meta">#[derive(Accounts)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">InitializeUser</span>&lt;<span class="symbol">&#x27;info</span>&gt; &#123;
+    <span class="meta">#[account(mut)]</span>
+    <span class="keyword">pub</span> authority: Signer&lt;<span class="symbol">&#x27;info</span>&gt;,
+
+    <span class="meta">#[account(</span>
+<span class="meta">        init,                                    // 创建新账户</span>
+<span class="meta">        payer = authority,                       // 付费者</span>
+<span class="meta">        space = UserProfile::SPACE,              // 账户大小</span>
+<span class="meta">        seeds = [b<span class="string">&quot;user&quot;</span>, authority.key().as_ref()]</span>,  <span class="comment">// PDA seeds</span>
+        bump,                                    <span class="comment">// 自动计算 bump</span>
+    )]
+    <span class="keyword">pub</span> user_profile: Account&lt;<span class="symbol">&#x27;info</span>, UserProfile&gt;,
+
+    <span class="keyword">pub</span> system_program: Program&lt;<span class="symbol">&#x27;info</span>, System&gt;,
+&#125;
+
+<span class="comment">// 金库转账上下文</span>
+<span class="meta">#[derive(Accounts)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">TransferFromVault</span>&lt;<span class="symbol">&#x27;info</span>&gt; &#123;
+    <span class="meta">#[account(mut)]</span>
+    <span class="keyword">pub</span> authority: Signer&lt;<span class="symbol">&#x27;info</span>&gt;,
+
+    <span class="meta">#[account(</span>
+<span class="meta">        mut,</span>
+<span class="meta">        seeds = [b<span class="string">&quot;vault&quot;</span>, authority.key().as_ref()]</span>,
+        bump = vault.bump,
+    )]
+    <span class="keyword">pub</span> vault: Account&lt;<span class="symbol">&#x27;info</span>, Vault&gt;,
+
+    <span class="keyword">pub</span> system_program: Program&lt;<span class="symbol">&#x27;info</span>, System&gt;,
+&#125;
+
+<span class="meta">#[account]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">UserProfile</span> &#123;
+    <span class="keyword">pub</span> authority: Pubkey,
+    <span class="keyword">pub</span> name: <span class="type">String</span>,
+    <span class="keyword">pub</span> bump: <span class="type">u8</span>,
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">UserProfile</span> &#123;
+    <span class="keyword">pub</span> <span class="keyword">const</span> SPACE: <span class="type">usize</span> = <span class="number">8</span> + <span class="number">32</span> + (<span class="number">4</span> + <span class="number">32</span>) + <span class="number">1</span>;
+&#125;
+
+<span class="meta">#[account]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">Vault</span> &#123;
+    <span class="keyword">pub</span> authority: Pubkey,
+    <span class="keyword">pub</span> bump: <span class="type">u8</span>,
+&#125;</code></pre>
+
+<h4 id="TypeScript-客户端实现"><a href="#TypeScript-客户端实现" class="headerlink" title="TypeScript 客户端实现"></a>TypeScript 客户端实现</h4><pre><code class="highlight typescript"><span class="keyword">import</span> &#123;
+  <span class="title class_">PublicKey</span>,
+  <span class="title class_">SystemProgram</span>,
+  <span class="title class_">Transaction</span>,
+  sendAndConfirmTransaction,
+&#125; <span class="keyword">from</span> <span class="string">&quot;@solana/web3.js&quot;</span>;
+<span class="keyword">import</span> * <span class="keyword">as</span> anchor <span class="keyword">from</span> <span class="string">&quot;@coral-xyz/anchor&quot;</span>;
+
+<span class="keyword">const</span> <span class="variable constant_">PROGRAM_ID</span> = <span class="keyword">new</span> <span class="title class_">PublicKey</span>(<span class="string">&quot;Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS&quot;</span>);
+
+<span class="comment">// ============================================</span>
+<span class="comment">// 方法1：使用 findProgramAddressSync 推导 PDA</span>
+<span class="comment">// ============================================</span>
+<span class="keyword">const</span> [userProfilePDA, bump] = <span class="title class_">PublicKey</span>.<span class="title function_">findProgramAddressSync</span>(
+  [
+    <span class="title class_">Buffer</span>.<span class="title function_">from</span>(<span class="string">&quot;user&quot;</span>),                    <span class="comment">// seed: &quot;user&quot;</span>
+    walletKeypair.<span class="property">publicKey</span>.<span class="title function_">toBuffer</span>(),     <span class="comment">// seed: 用户公钥</span>
+  ],
+  <span class="variable constant_">PROGRAM_ID</span>
+);
+
+<span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;PDA 地址:&quot;</span>, userProfilePDA.<span class="title function_">toBase58</span>());
+<span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Bump:&quot;</span>, bump);
+
+<span class="comment">// ============================================</span>
+<span class="comment">// 方法2：使用 createProgramAddressSync（已知 bump）</span>
+<span class="comment">// ============================================</span>
+<span class="keyword">const</span> pdaAddress = <span class="title class_">PublicKey</span>.<span class="title function_">createProgramAddressSync</span>(
+  [
+    <span class="title class_">Buffer</span>.<span class="title function_">from</span>(<span class="string">&quot;user&quot;</span>),
+    walletKeypair.<span class="property">publicKey</span>.<span class="title function_">toBuffer</span>(),
+    <span class="title class_">Buffer</span>.<span class="title function_">from</span>([bump]),  <span class="comment">// 传入已知的 bump</span>
+  ],
+  <span class="variable constant_">PROGRAM_ID</span>
+);
+
+<span class="comment">// ============================================</span>
+<span class="comment">// 使用 Anchor 调用初始化 PDA 账户</span>
+<span class="comment">// ============================================</span>
+<span class="keyword">const</span> program = anchor.<span class="property">workspace</span>.<span class="property">PdaExample</span>;
+
+<span class="keyword">const</span> tx = <span class="keyword">await</span> program.<span class="property">methods</span>
+  .<span class="title function_">initializeUser</span>(<span class="string">&quot;Alice&quot;</span>)
+  .<span class="title function_">accounts</span>(&#123;
+    <span class="attr">authority</span>: walletKeypair.<span class="property">publicKey</span>,
+    <span class="attr">userProfile</span>: userProfilePDA,
+    <span class="attr">systemProgram</span>: <span class="title class_">SystemProgram</span>.<span class="property">programId</span>,
+  &#125;)
+  .<span class="title function_">signers</span>([walletKeypair])
+  .<span class="title function_">rpc</span>();
+
+<span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;交易签名:&quot;</span>, tx);
+
+<span class="comment">// 读取 PDA 账户数据</span>
+<span class="keyword">const</span> account = <span class="keyword">await</span> program.<span class="property">account</span>.<span class="property">userProfile</span>.<span class="title function_">fetch</span>(userProfilePDA);
+<span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;用户名:&quot;</span>, account.<span class="property">name</span>);
+<span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;权限:&quot;</span>, account.<span class="property">authority</span>.<span class="title function_">toBase58</span>());
+<span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Bump:&quot;</span>, account.<span class="property">bump</span>);</code></pre>
+
+<h3 id="4-4-PDA-的典型应用场景"><a href="#4-4-PDA-的典型应用场景" class="headerlink" title="4.4 PDA 的典型应用场景"></a>4.4 PDA 的典型应用场景</h3><pre><code class="highlight plaintext">┌───────────────────────────────────────────────────────────────┐
+│                    PDA 常见使用场景                             │
+├───────────────────────────────────────────────────────────────┤
+│                                                               │
+│  1️⃣  确定性数据存储                                            │
+│  ┌─────────┐  seeds=[&quot;profile&quot;, user]  ┌──────────────┐      │
+│  │  User   │ ──────────────────────▶  │ UserProfile  │      │
+│  │  Wallet │                          │ PDA Account  │      │
+│  └─────────┘                          └──────────────┘      │
+│                                                               │
+│  2️⃣  程序金库 / 资金托管                                       │
+│  ┌─────────┐  seeds=[&quot;vault&quot;]  ┌──────────────────┐          │
+│  │ Program │ ────────────────▶ │ Vault PDA        │          │
+│  │         │                   │ (持有 SOL/Token)  │          │
+│  └─────────┘                   └──────────────────┘          │
+│                                                               │
+│  3️⃣  权限管理 / 签名代理                                       │
+│  ┌─────────┐  seeds=[&quot;auth&quot;]  ┌──────────────────┐           │
+│  │ Program │ ───────────────▶ │ Authority PDA    │           │
+│  │         │                  │ (CPI 签名)       │           │
+│  └─────────┘                  └──────────────────┘           │
+│                                                               │
+│  4️⃣  映射关系 (类似 HashMap)                                   │
+│  seeds=[&quot;order&quot;, user, order_id]  ──▶  OrderAccount           │
+│  seeds=[&quot;bid&quot;, auction, bidder]   ──▶  BidAccount             │
+│  seeds=[&quot;ticket&quot;, event, seat]    ──▶  TicketAccount          │
+│                                                               │
+│  5️⃣  跨程序调用签名 (CPI Signer)                               │
+│  Program A ──CPI──▶ Program B                                 │
+│  PDA of A 可作为 B 中的 signer                                 │
+│                                                               │
+└───────────────────────────────────────────────────────────────┘</code></pre>
+
+<h3 id="4-5-PDA-签名机制-invoke-signed"><a href="#4-5-PDA-签名机制-invoke-signed" class="headerlink" title="4.5 PDA 签名机制 (invoke_signed)"></a>4.5 PDA 签名机制 (invoke_signed)</h3><p>PDA 没有私钥，但程序可以通过 <code>invoke_signed</code> 为其”签名”：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> solana_program::&#123;
+    account_info::AccountInfo,
+    entrypoint::ProgramResult,
+    program::invoke_signed,
+    pubkey::Pubkey,
+    system_instruction,
+&#125;;
+
+<span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">transfer_sol_from_pda</span>(
+    program_id: &amp;Pubkey,
+    pda_account: &amp;AccountInfo,
+    recipient: &amp;AccountInfo,
+    system_program: &amp;AccountInfo,
+    amount: <span class="type">u64</span>,
+    user_pubkey: &amp;Pubkey,
+    bump_seed: <span class="type">u8</span>,
+) <span class="punctuation">-&gt;</span> ProgramResult &#123;
+    <span class="comment">// 定义 PDA 的 seeds（必须与推导时一致）</span>
+    <span class="keyword">let</span> <span class="variable">seeds</span>: &amp;[&amp;[<span class="type">u8</span>]] = &amp;[
+        <span class="string">b&quot;vault&quot;</span>,
+        user_pubkey.<span class="title function_ invoke__">as_ref</span>(),
+        &amp;[bump_seed],
+    ];
+
+    <span class="comment">// 使用 invoke_signed 代替 invoke</span>
+    <span class="comment">// Runtime 会验证 seeds + program_id 确实能推导出该 PDA 地址</span>
+    <span class="title function_ invoke__">invoke_signed</span>(
+        &amp;system_instruction::<span class="title function_ invoke__">transfer</span>(
+            pda_account.key,
+            recipient.key,
+            amount,
+        ),
+        &amp;[
+            pda_account.<span class="title function_ invoke__">clone</span>(),
+            recipient.<span class="title function_ invoke__">clone</span>(),
+            system_program.<span class="title function_ invoke__">clone</span>(),
+        ],
+        &amp;[seeds],  <span class="comment">// signer_seeds</span>
+    )?;
+
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;</code></pre>
+
+<pre><code class="highlight plaintext">invoke_signed 签名验证流程：
+
+┌──────────────┐
+│  Program A   │
+│              │
+│ invoke_signed│
+│ (instruction,│
+│  accounts,   │
+│  signer_seeds│──────┐
+│  )           │      │
+└──────────────┘      │
+                      ▼
+            ┌──────────────────┐
+            │  Solana Runtime  │
+            │                  │
+            │  验证:            │
+            │  hash(seeds +    │
+            │  program_id)     │
+            │  == pda_address? │
+            └────────┬─────────┘
+                     │
+               ┌─────┴─────┐
+               │           │
+             Yes ✅      No ❌
+               │           │
+         标记 PDA      交易失败
+         为 signer     返回错误
+               │
+               ▼
+       ┌──────────────┐
+       │  Program B   │
+       │  (被调用方)   │
+       │              │
+       │  看到 PDA 是  │
+       │  合法 signer  │
+       └──────────────┘</code></pre>
+
+<hr>
+<h2 id="五、账户的租金机制（Rent）"><a href="#五、账户的租金机制（Rent）" class="headerlink" title="五、账户的租金机制（Rent）"></a>五、账户的租金机制（Rent）</h2><h3 id="5-1-Rent-机制说明"><a href="#5-1-Rent-机制说明" class="headerlink" title="5.1 Rent 机制说明"></a>5.1 Rent 机制说明</h3><p>Solana 要求账户存储数据需要支付<strong>租金</strong>。如果账户余额达到 <strong>Rent-Exempt（免租）</strong> 阈值，则永远不需要支付租金。</p>
+<pre><code class="highlight plaintext">租金机制示意图：
+
+┌──────────────────────────────────────────────┐
+│              账户余额 vs 租金                   │
+├──────────────────────────────────────────────┤
+│                                              │
+│  余额                                        │
+│   ▲                                          │
+│   │                                          │
+│   │  ═══════════════════  Rent-Exempt 阈值    │
+│   │  ─ ─ ─ ─ ─ ─ ─ ─ ─   (约 2年租金)        │
+│   │                                          │
+│   │  ✅ 余额 &gt;= 阈值: 永不扣租                  │
+│   │  ❌ 余额 &lt; 阈值:  每个 epoch 扣租           │
+│   │  💀 余额 = 0:     账户被回收               │
+│   │                                          │
+│   └──────────────────────────▶ 时间            │
+└──────────────────────────────────────────────┘</code></pre>
+
+<pre><code class="highlight typescript"><span class="comment">// 计算 Rent-Exempt 所需的最低余额</span>
+<span class="keyword">const</span> dataSize = <span class="number">165</span>; <span class="comment">// Token Account 的数据大小</span>
+<span class="keyword">const</span> rentExemptBalance = <span class="keyword">await</span> connection.<span class="title function_">getMinimumBalanceForRentExemption</span>(dataSize);
+<span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">`<span class="subst">$&#123;dataSize&#125;</span> 字节账户需要: <span class="subst">$&#123;rentExemptBalance / LAMPORTS_PER_SOL&#125;</span> SOL`</span>);
+<span class="comment">// 约 0.00203928 SOL</span></code></pre>
+
+<pre><code class="highlight rust"><span class="comment">// Anchor 中创建账户时自动计算租金</span>
+<span class="meta">#[derive(Accounts)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">CreateAccount</span>&lt;<span class="symbol">&#x27;info</span>&gt; &#123;
+    <span class="meta">#[account(mut)]</span>
+    <span class="keyword">pub</span> payer: Signer&lt;<span class="symbol">&#x27;info</span>&gt;,
+
+    <span class="meta">#[account(</span>
+<span class="meta">        init,</span>
+<span class="meta">        payer = payer,</span>
+<span class="meta">        space = 8 + 32 + 8,  // discriminator + pubkey + u64</span>
+<span class="meta">        // Anchor 自动计算并收取 rent-exempt 金额</span>
+<span class="meta">    )]</span>
+    <span class="keyword">pub</span> my_account: Account&lt;<span class="symbol">&#x27;info</span>, MyData&gt;,
+
+    <span class="keyword">pub</span> system_program: Program&lt;<span class="symbol">&#x27;info</span>, System&gt;,
+&#125;</code></pre>
+
+<hr>
+<h2 id="六、账户所有权与安全模型"><a href="#六、账户所有权与安全模型" class="headerlink" title="六、账户所有权与安全模型"></a>六、账户所有权与安全模型</h2><h3 id="6-1-所有权规则"><a href="#6-1-所有权规则" class="headerlink" title="6.1 所有权规则"></a>6.1 所有权规则</h3><pre><code class="highlight plaintext">┌────────────────────────────────────────────────────────┐
+│              Solana 账户所有权规则                        │
+├────────────────────────────────────────────────────────┤
+│                                                        │
+│  规则 1: 只有 owner 可以修改 data                        │
+│  ┌──────────┐    修改 data ✅    ┌──────────┐          │
+│  │ Program A│ ──────────────▶  │ Account  │          │
+│  │ (owner)  │                  │ owner: A │          │
+│  └──────────┘                  └──────────┘          │
+│                                                        │
+│  ┌──────────┐    修改 data ❌    ┌──────────┐          │
+│  │ Program B│ ───────✗────▶   │ Account  │          │
+│  │ (非owner)│                  │ owner: A │          │
+│  └──────────┘                  └──────────┘          │
+│                                                        │
+│  规则 2: 只有 owner 可以扣减 lamports                    │
+│  (任何程序都可以增加 lamports)                            │
+│                                                        │
+│  规则 3: 只有 System Program 可以分配账户空间              │
+│                                                        │
+│  规则 4: 只有 owner 可以变更 owner                       │
+│  (新 owner 必须是一个程序)                               │
+│                                                        │
+│  规则 5: 新创建的账户 owner 默认是 System Program         │
+│                                                        │
+└────────────────────────────────────────────────────────┘</code></pre>
+
+<h3 id="6-2-常见安全检查"><a href="#6-2-常见安全检查" class="headerlink" title="6.2 常见安全检查"></a>6.2 常见安全检查</h3><pre><code class="highlight rust"><span class="keyword">use</span> anchor_lang::prelude::*;
+
+<span class="meta">#[derive(Accounts)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">SecureOperation</span>&lt;<span class="symbol">&#x27;info</span>&gt; &#123;
+    <span class="comment">// ✅ 检查签名者</span>
+    <span class="keyword">pub</span> authority: Signer&lt;<span class="symbol">&#x27;info</span>&gt;,
+
+    <span class="comment">// ✅ 检查 PDA seeds 和 bump</span>
+    <span class="meta">#[account(</span>
+<span class="meta">        mut,</span>
+<span class="meta">        seeds = [b<span class="string">&quot;user&quot;</span>, authority.key().as_ref()]</span>,
+        bump = user_profile.bump,
+        <span class="comment">// ✅ 检查 authority 匹配</span>
+        has_one = authority,
+    )]
+    <span class="keyword">pub</span> user_profile: Account&lt;<span class="symbol">&#x27;info</span>, UserProfile&gt;,
+
+    <span class="comment">// ✅ 检查 Token Account 的 mint 和 owner</span>
+    <span class="meta">#[account(</span>
+<span class="meta">        mut,</span>
+<span class="meta">        token::mint = mint,</span>
+<span class="meta">        token::authority = authority,</span>
+<span class="meta">    )]</span>
+    <span class="keyword">pub</span> token_account: Account&lt;<span class="symbol">&#x27;info</span>, TokenAccount&gt;,
+
+    <span class="keyword">pub</span> mint: Account&lt;<span class="symbol">&#x27;info</span>, Mint&gt;,
+    <span class="keyword">pub</span> system_program: Program&lt;<span class="symbol">&#x27;info</span>, System&gt;,
+&#125;</code></pre>
+
+<hr>
+<h2 id="七、实战示例：完整的-PDA-应用"><a href="#七、实战示例：完整的-PDA-应用" class="headerlink" title="七、实战示例：完整的 PDA 应用"></a>七、实战示例：完整的 PDA 应用</h2><h3 id="7-1-计数器程序（Counter-Program）"><a href="#7-1-计数器程序（Counter-Program）" class="headerlink" title="7.1 计数器程序（Counter Program）"></a>7.1 计数器程序（Counter Program）</h3><p>一个经典的 PDA 应用示例——每个用户拥有自己的计数器：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> anchor_lang::prelude::*;
+
+declare_id!(<span class="string">&quot;Counter111111111111111111111111111111111111&quot;</span>);
+
+<span class="meta">#[program]</span>
+<span class="keyword">pub</span> <span class="keyword">mod</span> counter &#123;
+    <span class="keyword">use</span> super::*;
+
+    <span class="comment">/// 初始化用户的计数器 PDA</span>
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">initialize</span>(ctx: Context&lt;Initialize&gt;) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;()&gt; &#123;
+        <span class="keyword">let</span> <span class="variable">counter</span> = &amp;<span class="keyword">mut</span> ctx.accounts.counter;
+        counter.authority = ctx.accounts.user.<span class="title function_ invoke__">key</span>();
+        counter.count = <span class="number">0</span>;
+        counter.bump = ctx.bumps.counter;
+
+        msg!(<span class="string">&quot;Counter initialized for user: &#123;&#125;&quot;</span>, counter.authority);
+        <span class="title function_ invoke__">Ok</span>(())
+    &#125;
+
+    <span class="comment">/// 递增计数器</span>
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">increment</span>(ctx: Context&lt;Increment&gt;) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;()&gt; &#123;
+        <span class="keyword">let</span> <span class="variable">counter</span> = &amp;<span class="keyword">mut</span> ctx.accounts.counter;
+        counter.count = counter.count.<span class="title function_ invoke__">checked_add</span>(<span class="number">1</span>)
+            .<span class="title function_ invoke__">ok_or</span>(ErrorCode::Overflow)?;
+
+        msg!(<span class="string">&quot;Count is now: &#123;&#125;&quot;</span>, counter.count);
+        <span class="title function_ invoke__">Ok</span>(())
+    &#125;
+
+    <span class="comment">/// 重置计数器</span>
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">reset</span>(ctx: Context&lt;Reset&gt;) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;()&gt; &#123;
+        <span class="keyword">let</span> <span class="variable">counter</span> = &amp;<span class="keyword">mut</span> ctx.accounts.counter;
+        counter.count = <span class="number">0</span>;
+        <span class="title function_ invoke__">Ok</span>(())
+    &#125;
+&#125;
+
+<span class="meta">#[derive(Accounts)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">Initialize</span>&lt;<span class="symbol">&#x27;info</span>&gt; &#123;
+    <span class="meta">#[account(mut)]</span>
+    <span class="keyword">pub</span> user: Signer&lt;<span class="symbol">&#x27;info</span>&gt;,
+
+    <span class="meta">#[account(</span>
+<span class="meta">        init,</span>
+<span class="meta">        payer = user,</span>
+<span class="meta">        space = Counter::SPACE,</span>
+<span class="meta">        seeds = [b<span class="string">&quot;counter&quot;</span>, user.key().as_ref()]</span>,
+        bump,
+    )]
+    <span class="keyword">pub</span> counter: Account&lt;<span class="symbol">&#x27;info</span>, Counter&gt;,
+
+    <span class="keyword">pub</span> system_program: Program&lt;<span class="symbol">&#x27;info</span>, System&gt;,
+&#125;
+
+<span class="meta">#[derive(Accounts)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">Increment</span>&lt;<span class="symbol">&#x27;info</span>&gt; &#123;
+    <span class="keyword">pub</span> user: Signer&lt;<span class="symbol">&#x27;info</span>&gt;,
+
+    <span class="meta">#[account(</span>
+<span class="meta">        mut,</span>
+<span class="meta">        seeds = [b<span class="string">&quot;counter&quot;</span>, user.key().as_ref()]</span>,
+        bump = counter.bump,
+        has_one = authority @ ErrorCode::Unauthorized,
+    )]
+    <span class="keyword">pub</span> counter: Account&lt;<span class="symbol">&#x27;info</span>, Counter&gt;,
+&#125;
+
+<span class="meta">#[derive(Accounts)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">Reset</span>&lt;<span class="symbol">&#x27;info</span>&gt; &#123;
+    <span class="keyword">pub</span> user: Signer&lt;<span class="symbol">&#x27;info</span>&gt;,
+
+    <span class="meta">#[account(</span>
+<span class="meta">        mut,</span>
+<span class="meta">        seeds = [b<span class="string">&quot;counter&quot;</span>, user.key().as_ref()]</span>,
+        bump = counter.bump,
+        has_one = authority @ ErrorCode::Unauthorized,
+    )]
+    <span class="keyword">pub</span> counter: Account&lt;<span class="symbol">&#x27;info</span>, Counter&gt;,
+&#125;
+
+<span class="meta">#[account]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">Counter</span> &#123;
+    <span class="keyword">pub</span> authority: Pubkey,  <span class="comment">// 32 bytes</span>
+    <span class="keyword">pub</span> count: <span class="type">u64</span>,         <span class="comment">// 8 bytes</span>
+    <span class="keyword">pub</span> bump: <span class="type">u8</span>,           <span class="comment">// 1 byte</span>
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">Counter</span> &#123;
+    <span class="keyword">pub</span> <span class="keyword">const</span> SPACE: <span class="type">usize</span> = <span class="number">8</span> + <span class="number">32</span> + <span class="number">8</span> + <span class="number">1</span>; <span class="comment">// 49 bytes</span>
+&#125;
+
+<span class="meta">#[error_code]</span>
+<span class="keyword">pub</span> <span class="keyword">enum</span> <span class="title class_">ErrorCode</span> &#123;
+    <span class="meta">#[msg(<span class="string">&quot;Counter overflow&quot;</span>)]</span>
+    Overflow,
+    <span class="meta">#[msg(<span class="string">&quot;Unauthorized access&quot;</span>)]</span>
+    Unauthorized,
+&#125;</code></pre>
+
+<h3 id="7-2-客户端交互"><a href="#7-2-客户端交互" class="headerlink" title="7.2 客户端交互"></a>7.2 客户端交互</h3><pre><code class="highlight typescript"><span class="keyword">import</span> * <span class="keyword">as</span> anchor <span class="keyword">from</span> <span class="string">&quot;@coral-xyz/anchor&quot;</span>;
+<span class="keyword">import</span> &#123; <span class="title class_">Program</span> &#125; <span class="keyword">from</span> <span class="string">&quot;@coral-xyz/anchor&quot;</span>;
+<span class="keyword">import</span> &#123; <span class="title class_">PublicKey</span>, <span class="title class_">SystemProgram</span> &#125; <span class="keyword">from</span> <span class="string">&quot;@solana/web3.js&quot;</span>;
+<span class="keyword">import</span> &#123; <span class="title class_">Counter</span> &#125; <span class="keyword">from</span> <span class="string">&quot;../target/types/counter&quot;</span>;
+
+<span class="comment">// 设置 Provider</span>
+<span class="keyword">const</span> provider = anchor.<span class="property">AnchorProvider</span>.<span class="title function_">env</span>();
+anchor.<span class="title function_">setProvider</span>(provider);
+
+<span class="keyword">const</span> program = anchor.<span class="property">workspace</span>.<span class="property">Counter</span> <span class="keyword">as</span> <span class="title class_">Program</span>&lt;<span class="title class_">Counter</span>&gt;;
+<span class="keyword">const</span> user = provider.<span class="property">wallet</span>.<span class="property">publicKey</span>;
+
+<span class="comment">// 推导 PDA 地址</span>
+<span class="keyword">const</span> [counterPDA] = <span class="title class_">PublicKey</span>.<span class="title function_">findProgramAddressSync</span>(
+  [<span class="title class_">Buffer</span>.<span class="title function_">from</span>(<span class="string">&quot;counter&quot;</span>), user.<span class="title function_">toBuffer</span>()],
+  program.<span class="property">programId</span>
+);
+
+<span class="comment">// 初始化计数器</span>
+<span class="keyword">async</span> <span class="keyword">function</span> <span class="title function_">initialize</span>(<span class="params"></span>) &#123;
+  <span class="keyword">const</span> tx = <span class="keyword">await</span> program.<span class="property">methods</span>
+    .<span class="title function_">initialize</span>()
+    .<span class="title function_">accounts</span>(&#123;
+      <span class="attr">user</span>: user,
+      <span class="attr">counter</span>: counterPDA,
+      <span class="attr">systemProgram</span>: <span class="title class_">SystemProgram</span>.<span class="property">programId</span>,
+    &#125;)
+    .<span class="title function_">rpc</span>();
+
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;初始化交易:&quot;</span>, tx);
+&#125;
+
+<span class="comment">// 递增计数器</span>
+<span class="keyword">async</span> <span class="keyword">function</span> <span class="title function_">increment</span>(<span class="params"></span>) &#123;
+  <span class="keyword">const</span> tx = <span class="keyword">await</span> program.<span class="property">methods</span>
+    .<span class="title function_">increment</span>()
+    .<span class="title function_">accounts</span>(&#123;
+      <span class="attr">user</span>: user,
+      <span class="attr">counter</span>: counterPDA,
+    &#125;)
+    .<span class="title function_">rpc</span>();
+
+  <span class="comment">// 读取计数器值</span>
+  <span class="keyword">const</span> account = <span class="keyword">await</span> program.<span class="property">account</span>.<span class="property">counter</span>.<span class="title function_">fetch</span>(counterPDA);
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;当前计数:&quot;</span>, account.<span class="property">count</span>.<span class="title function_">toNumber</span>());
+&#125;
+
+<span class="comment">// 批量递增</span>
+<span class="keyword">async</span> <span class="keyword">function</span> <span class="title function_">batchIncrement</span>(<span class="params"><span class="attr">times</span>: <span class="built_in">number</span></span>) &#123;
+  <span class="keyword">for</span> (<span class="keyword">let</span> i = <span class="number">0</span>; i &lt; times; i++) &#123;
+    <span class="keyword">await</span> <span class="title function_">increment</span>();
+  &#125;
+&#125;
+
+<span class="comment">// 执行</span>
+<span class="keyword">await</span> <span class="title function_">initialize</span>();
+<span class="keyword">await</span> <span class="title function_">batchIncrement</span>(<span class="number">5</span>);
+
+<span class="comment">// 最终读取</span>
+<span class="keyword">const</span> finalAccount = <span class="keyword">await</span> program.<span class="property">account</span>.<span class="property">counter</span>.<span class="title function_">fetch</span>(counterPDA);
+<span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;最终计数:&quot;</span>, finalAccount.<span class="property">count</span>.<span class="title function_">toNumber</span>()); <span class="comment">// 5</span>
+<span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Authority:&quot;</span>, finalAccount.<span class="property">authority</span>.<span class="title function_">toBase58</span>());
+<span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Bump:&quot;</span>, finalAccount.<span class="property">bump</span>);</code></pre>
+
+<hr>
+<h2 id="八、总结与速查表"><a href="#八、总结与速查表" class="headerlink" title="八、总结与速查表"></a>八、总结与速查表</h2><h3 id="8-1-账户类型速查"><a href="#8-1-账户类型速查" class="headerlink" title="8.1 账户类型速查"></a>8.1 账户类型速查</h3><table>
+<thead>
+<tr>
+<th>账户类型</th>
+<th>Owner</th>
+<th>Executable</th>
+<th>Data</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>系统账户</td>
+<td>System Program</td>
+<td>false</td>
+<td>空</td>
+<td>用户钱包</td>
+</tr>
+<tr>
+<td>程序账户</td>
+<td>BPF Loader</td>
+<td>true</td>
+<td>字节码</td>
+<td>智能合约</td>
+</tr>
+<tr>
+<td>数据账户</td>
+<td>自定义 Program</td>
+<td>false</td>
+<td>自定义结构</td>
+<td>状态存储</td>
+</tr>
+<tr>
+<td>Mint 账户</td>
+<td>Token Program</td>
+<td>false</td>
+<td>82 bytes</td>
+<td>代币定义</td>
+</tr>
+<tr>
+<td>Token 账户</td>
+<td>Token Program</td>
+<td>false</td>
+<td>165 bytes</td>
+<td>代币余额</td>
+</tr>
+<tr>
+<td>ATA</td>
+<td>Token Program</td>
+<td>false</td>
+<td>165 bytes</td>
+<td>关联代币账户</td>
+</tr>
+<tr>
+<td>PDA 账户</td>
+<td>自定义 Program</td>
+<td>false</td>
+<td>自定义</td>
+<td>确定性派生</td>
+</tr>
+</tbody></table>
+<h3 id="8-2-PDA-使用要诀"><a href="#8-2-PDA-使用要诀" class="headerlink" title="8.2 PDA 使用要诀"></a>8.2 PDA 使用要诀</h3><pre><code class="highlight plaintext">┌─────────────────────────────────────────────────────┐
+│               PDA 最佳实践                            │
+├─────────────────────────────────────────────────────┤
+│                                                     │
+│  ✅ 始终使用 canonical bump（findProgramAddress       │
+│     返回的第一个有效 bump）                             │
+│                                                     │
+│  ✅ 将 bump 存储在 PDA 账户数据中，避免重复计算          │
+│                                                     │
+│  ✅ seeds 设计要唯一，防止地址碰撞                      │
+│                                                     │
+│  ✅ 使用 Anchor 的 seeds 约束自动验证                   │
+│                                                     │
+│  ❌ 不要使用用户提供的 bump，始终自行推导验证             │
+│                                                     │
+│  ❌ 不要假设 PDA 初始余额为 0                          │
+│                                                     │
+│  ❌ 不要在 seeds 中使用可变长度数据而不加定界符           │
+│                                                     │
+└─────────────────────────────────────────────────────┘</code></pre>
+
+<h3 id="8-3-完整账户关系图"><a href="#8-3-完整账户关系图" class="headerlink" title="8.3 完整账户关系图"></a>8.3 完整账户关系图</h3><pre><code class="highlight plaintext">┌─────────────────────────────────────────────────────────────┐
+│                                                             │
+│   User Wallet ──────┬────────── System Program (owner)      │
+│   (Keypair)         │                                       │
+│                     │                                       │
+│                     ├──▶ ATA (USDC) ─── Token Program       │
+│                     │      └──▶ USDC Mint Account           │
+│                     │                                       │
+│                     ├──▶ ATA (wSOL) ─── Token Program       │
+│                     │      └──▶ wSOL Mint Account           │
+│                     │                                       │
+│                     ├──▶ PDA: UserProfile                   │
+│                     │      seeds=[&quot;user&quot;, wallet]           │
+│                     │      owner: My Program                │
+│                     │                                       │
+│                     └──▶ PDA: Counter                       │
+│                            seeds=[&quot;counter&quot;, wallet]        │
+│                            owner: Counter Program           │
+│                                                             │
+│   My Program ──────────── BPF Loader (owner)                │
+│   (executable)     │                                        │
+│                    └──▶ ProgramData Account                 │
+│                          (存储字节码 + 升级权限)              │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘</code></pre>
+
+<hr>
+<blockquote>
+<p><strong>参考资源</strong>：</p>
+<ul>
+<li><a href="https://solana.com/docs/core/accounts">Solana 官方文档 - Accounts</a></li>
+<li><a href="https://solanacookbook.com/core-concepts/pdas.html">Solana Cookbook - PDA</a></li>
+<li><a href="https://www.anchor-lang.com/">Anchor 框架文档</a></li>
+<li><a href="https://spl.solana.com/token">SPL Token 文档</a></li>
+</ul>
+</blockquote>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
