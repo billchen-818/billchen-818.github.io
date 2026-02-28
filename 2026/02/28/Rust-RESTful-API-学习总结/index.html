@@ -1,0 +1,324 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust RESTful API 学习总结</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust RESTful API 学习总结</h1><div class="time">2026-02-28</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><h2 id="1-为什么选择-Rust-进行-Web-开发？"><a href="#1-为什么选择-Rust-进行-Web-开发？" class="headerlink" title="1. 为什么选择 Rust 进行 Web 开发？"></a>1. 为什么选择 Rust 进行 Web 开发？</h2><p>在构建高性能、高并发的网络服务时，Rust 正变得越来越受欢迎。主要原因包括：</p>
+<ul>
+<li><strong>内存安全</strong>：Rust 的所有权模型在编译阶段就消除了数据竞争和空指针引用，不需要垃圾回收（GC），避免了 GC 带来的性能抖动。</li>
+<li><strong>高性能</strong>：Rust 编译为原生机器码，运行速度媲美 C&#x2F;C++，非常适合处理高吞吐量的 API 请求。</li>
+<li><strong>强大的类型系统</strong>：利用枚举（Enum）和模式匹配（Pattern Matching）可以优雅地处理业务逻辑和错误。</li>
+<li><strong>成熟的生态</strong>：Tokio 异步运行时和 Serde 序列化库已经成为工业级标准。</li>
+</ul>
+<h2 id="2-技术选型"><a href="#2-技术选型" class="headerlink" title="2. 技术选型"></a>2. 技术选型</h2><p>在 Rust 生态中，构建 RESTful API 有多种优秀的框架选择：</p>
+<ul>
+<li><strong>Axum</strong>：基于 Tokio 和 Tower，人体工程学设计极佳，与 Rust 异步生态融合最好，是目前最受推崇的框架之一。</li>
+<li><strong>Actix-web</strong>：历史悠久，性能极其强悍，常年在 TechEmpower 榜单霸榜。</li>
+<li><strong>Rocket</strong>：注重易用性和类型安全，语法类似 Python 的 Flask 或 Java 的 Spring Boot。</li>
+<li><strong>Warp</strong>：基于 Filter（过滤器）链式组合的设计理念，非常函数式。</li>
+</ul>
+<p><strong>本次实战选用 Axum</strong>，因为它简单易用且背靠 Tokio 团队。</p>
+<h2 id="3-初探：内存版-User-CRUD-API"><a href="#3-初探：内存版-User-CRUD-API" class="headerlink" title="3. 初探：内存版 User CRUD API"></a>3. 初探：内存版 User CRUD API</h2><p>我们将构建一个简单的内存版用户管理系统，包含创建用户及获取用户信息的接口。</p>
+<h3 id="3-1-添加依赖"><a href="#3-1-添加依赖" class="headerlink" title="3.1 添加依赖"></a>3.1 添加依赖</h3><p>在 <code>Cargo.toml</code> 中添加必要的库：</p>
+<pre><code class="highlight toml"><span class="section">[dependencies]</span>
+<span class="attr">tokio</span> = &#123; version = <span class="string">&quot;1&quot;</span>, features = [<span class="string">&quot;full&quot;</span>] &#125;
+<span class="attr">axum</span> = <span class="string">&quot;0.7&quot;</span>
+<span class="attr">serde</span> = &#123; version = <span class="string">&quot;1&quot;</span>, features = [<span class="string">&quot;derive&quot;</span>] &#125;
+<span class="attr">serde_json</span> = <span class="string">&quot;1&quot;</span>
+<span class="attr">tracing</span> = <span class="string">&quot;0.1&quot;</span>
+<span class="attr">tracing-subscriber</span> = <span class="string">&quot;0.3&quot;</span></code></pre>
+
+<h3 id="3-2-核心代码实现-main-rs"><a href="#3-2-核心代码实现-main-rs" class="headerlink" title="3.2 核心代码实现 (main.rs)"></a>3.2 核心代码实现 (<code>main.rs</code>)</h3><p>我们将实现以下功能：</p>
+<ol>
+<li>启动 HTTP 服务器。</li>
+<li>应用状态共享（模拟数据库）。</li>
+<li>路由处理：<ul>
+<li><code>POST /users</code>: 创建用户</li>
+<li><code>GET /users/:id</code>: 获取用户</li>
+</ul>
+</li>
+</ol>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+    extract::&#123;Path, State&#125;,
+    http::StatusCode,
+    routing::&#123;get, post&#125;,
+    Json, Router,
+&#125;;
+<span class="keyword">use</span> serde::&#123;Deserialize, Serialize&#125;;
+<span class="keyword">use</span> std::&#123;
+    collections::HashMap,
+    sync::&#123;Arc, RwLock&#125;,
+&#125;;
+<span class="keyword">use</span> tokio::net::TcpListener;
+
+<span class="comment">// 1. 定义数据模型</span>
+<span class="meta">#[derive(Debug, Serialize, Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">User</span> &#123;
+    id: <span class="type">u64</span>,
+    username: <span class="type">String</span>,
+    email: <span class="type">String</span>,
+&#125;
+
+<span class="meta">#[derive(Debug, Deserialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">CreateUserPayload</span> &#123;
+    username: <span class="type">String</span>,
+    email: <span class="type">String</span>,
+&#125;
+
+<span class="comment">// 2. 定义应用状态（AppState）</span>
+<span class="comment">// 使用 RwLock 实现线程安全的读写，Arc 用于跨线程共享所有权</span>
+<span class="keyword">type</span> <span class="title class_">UserDb</span> = Arc&lt;RwLock&lt;HashMap&lt;<span class="type">u64</span>, User&gt;&gt;&gt;;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// 初始化日志</span>
+    tracing_subscriber::fmt::<span class="title function_ invoke__">init</span>();
+
+    <span class="comment">// 初始化模拟数据库</span>
+    <span class="keyword">let</span> <span class="variable">db</span> = UserDb::<span class="title function_ invoke__">default</span>();
+
+    <span class="comment">// 3. 构建路由</span>
+    <span class="keyword">let</span> <span class="variable">app</span> = Router::<span class="title function_ invoke__">new</span>()
+        .<span class="title function_ invoke__">route</span>(<span class="string">&quot;/users&quot;</span>, <span class="title function_ invoke__">post</span>(create_user))
+        .<span class="title function_ invoke__">route</span>(<span class="string">&quot;/users/:id&quot;</span>, <span class="title function_ invoke__">get</span>(get_user))
+        .<span class="title function_ invoke__">with_state</span>(db);
+
+    <span class="comment">// 4. 启动服务器</span>
+    <span class="keyword">let</span> <span class="variable">listener</span> = TcpListener::<span class="title function_ invoke__">bind</span>(<span class="string">&quot;0.0.0.0:3000&quot;</span>).<span class="keyword">await</span>.<span class="title function_ invoke__">unwrap</span>();
+    <span class="built_in">println!</span>(<span class="string">&quot;listening on &#123;&#125;&quot;</span>, listener.<span class="title function_ invoke__">local_addr</span>().<span class="title function_ invoke__">unwrap</span>());
+    axum::<span class="title function_ invoke__">serve</span>(listener, app).<span class="keyword">await</span>.<span class="title function_ invoke__">unwrap</span>();
+&#125;
+
+<span class="comment">// Handler: 创建用户</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">create_user</span>(
+    <span class="title function_ invoke__">State</span>(db): State&lt;UserDb&gt;,
+    <span class="title function_ invoke__">Json</span>(payload): Json&lt;CreateUserPayload&gt;,
+) <span class="punctuation">-&gt;</span> (StatusCode, Json&lt;User&gt;) &#123;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">users</span> = db.<span class="title function_ invoke__">write</span>().<span class="title function_ invoke__">unwrap</span>();
+    
+    <span class="keyword">let</span> <span class="variable">id</span> = (users.<span class="title function_ invoke__">len</span>() <span class="keyword">as</span> <span class="type">u64</span>) + <span class="number">1</span>;
+    <span class="keyword">let</span> <span class="variable">user</span> = User &#123;
+        id,
+        username: payload.username,
+        email: payload.email,
+    &#125;;
+
+    users.<span class="title function_ invoke__">insert</span>(id, user.<span class="title function_ invoke__">clone</span>());
+
+    <span class="comment">// 返回 201 Created 和创建的用户数据</span>
+    (StatusCode::CREATED, <span class="title function_ invoke__">Json</span>(user))
+&#125;
+
+<span class="comment">// Handler: 获取用户</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">get_user</span>(
+    <span class="title function_ invoke__">Path</span>(id): Path&lt;<span class="type">u64</span>&gt;,
+    <span class="title function_ invoke__">State</span>(db): State&lt;UserDb&gt;,
+) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;Json&lt;User&gt;, StatusCode&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">users</span> = db.<span class="title function_ invoke__">read</span>().<span class="title function_ invoke__">unwrap</span>();
+
+    <span class="keyword">if</span> <span class="keyword">let</span> <span class="variable">Some</span>(user) = users.<span class="title function_ invoke__">get</span>(&amp;id) &#123;
+        <span class="title function_ invoke__">Ok</span>(<span class="title function_ invoke__">Json</span>(user.<span class="title function_ invoke__">clone</span>()))
+    &#125; <span class="keyword">else</span> &#123;
+        <span class="comment">// 如果找不到用户，返回 404 Not Found</span>
+        <span class="title function_ invoke__">Err</span>(StatusCode::NOT_FOUND)
+    &#125;
+&#125;</code></pre>
+
+<h2 id="4-进阶：构建生产级-API"><a href="#4-进阶：构建生产级-API" class="headerlink" title="4. 进阶：构建生产级 API"></a>4. 进阶：构建生产级 API</h2><p>在实际项目中，我们不能只用内存 HashMap，还需要解决数据库持久化、配置管理、日志追踪和自动化测试等问题。</p>
+<h3 id="4-1-升级依赖配置"><a href="#4-1-升级依赖配置" class="headerlink" title="4.1 升级依赖配置"></a>4.1 升级依赖配置</h3><p>修改 <code>Cargo.toml</code>，引入生产环境必备库：</p>
+<pre><code class="highlight toml"><span class="section">[dependencies]</span>
+<span class="comment"># Web 框架</span>
+<span class="attr">axum</span> = <span class="string">&quot;0.7&quot;</span>
+<span class="attr">tokio</span> = &#123; version = <span class="string">&quot;1&quot;</span>, features = [<span class="string">&quot;full&quot;</span>] &#125;
+
+<span class="comment"># 序列化</span>
+<span class="attr">serde</span> = &#123; version = <span class="string">&quot;1&quot;</span>, features = [<span class="string">&quot;derive&quot;</span>] &#125;
+<span class="attr">serde_json</span> = <span class="string">&quot;1&quot;</span>
+
+<span class="comment"># 数据库 (PostgreSQL)</span>
+<span class="attr">sqlx</span> = &#123; version = <span class="string">&quot;0.7&quot;</span>, features = [<span class="string">&quot;runtime-tokio-rustls&quot;</span>, <span class="string">&quot;postgres&quot;</span>] &#125;
+
+<span class="comment"># 配置管理</span>
+<span class="attr">config</span> = <span class="string">&quot;0.13&quot;</span>
+
+<span class="comment"># 日志与追踪</span>
+<span class="attr">tracing</span> = <span class="string">&quot;0.1&quot;</span>
+<span class="attr">tracing-subscriber</span> = &#123; version = <span class="string">&quot;0.3&quot;</span>, features = [<span class="string">&quot;env-filter&quot;</span>] &#125;
+
+<span class="comment"># 中间件（CORS, Trace 等）</span>
+<span class="attr">tower</span> = &#123; version = <span class="string">&quot;0.4&quot;</span>, features = [<span class="string">&quot;util&quot;</span>] &#125;
+<span class="attr">tower-http</span> = &#123; version = <span class="string">&quot;0.5&quot;</span>, features = [<span class="string">&quot;cors&quot;</span>, <span class="string">&quot;trace&quot;</span>] &#125;</code></pre>
+
+<h3 id="4-2-配置管理"><a href="#4-2-配置管理" class="headerlink" title="4.2 配置管理"></a>4.2 配置管理</h3><p>生产环境通常通过环境变量或配置文件来管理设置。这里使用 <code>config</code> crate 实现分层配置加载。</p>
+<pre><code class="highlight rust"><span class="comment">// config.rs</span>
+<span class="keyword">use</span> serde::Deserialize;
+
+<span class="meta">#[derive(Debug, Deserialize)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">Settings</span> &#123;
+    <span class="keyword">pub</span> database_url: <span class="type">String</span>,
+    <span class="keyword">pub</span> server_port: <span class="type">u16</span>,
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">Settings</span> &#123;
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">new</span>() <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="keyword">Self</span>, config::ConfigError&gt; &#123;
+        <span class="keyword">let</span> <span class="variable">builder</span> = config::Config::<span class="title function_ invoke__">builder</span>()
+            <span class="comment">// 读取 config/Default.toml</span>
+            .<span class="title function_ invoke__">add_source</span>(config::File::<span class="title function_ invoke__">with_name</span>(<span class="string">&quot;config/Default&quot;</span>))
+            <span class="comment">// 允许环境变量覆盖，例如 APP_DATABASE_URL</span>
+            .<span class="title function_ invoke__">add_source</span>(config::Environment::<span class="title function_ invoke__">with_prefix</span>(<span class="string">&quot;APP&quot;</span>));
+            
+        builder.<span class="title function_ invoke__">build</span>()?.<span class="title function_ invoke__">try_deserialize</span>()
+    &#125;
+&#125;</code></pre>
+
+<h3 id="4-3-完整的应用状态初始化与中间件"><a href="#4-3-完整的应用状态初始化与中间件" class="headerlink" title="4.3 完整的应用状态初始化与中间件"></a>4.3 完整的应用状态初始化与中间件</h3><p>我们将内存 <code>HashMap</code> 替换为 <code>sqlx::PgPool</code>，并添加日志和 CORS 中间件。</p>
+<pre><code class="highlight rust"><span class="comment">// main.rs (进阶版片段)</span>
+<span class="keyword">use</span> axum::&#123;
+    routing::&#123;get, post&#125;,
+    Router,
+&#125;;
+<span class="keyword">use</span> sqlx::postgres::PgPoolOptions;
+<span class="keyword">use</span> std::net::SocketAddr;
+<span class="keyword">use</span> tower_http::&#123;cors::&#123;Any, CorsLayer&#125;, trace::TraceLayer&#125;;
+
+<span class="comment">// 引入 config 模块</span>
+<span class="keyword">mod</span> config;
+
+<span class="comment">// 应用状态：直接持有数据库连接池</span>
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+    db: sqlx::PgPool,
+&#125;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// 1. 初始化日志追踪</span>
+    tracing_subscriber::<span class="title function_ invoke__">fmt</span>()
+        .<span class="title function_ invoke__">with_env_filter</span>(<span class="string">&quot;debug,axum::rejection=trace&quot;</span>)
+        .<span class="title function_ invoke__">init</span>();
+
+    <span class="comment">// 2. 加载配置</span>
+    <span class="keyword">let</span> <span class="variable">settings</span> = config::Settings::<span class="title function_ invoke__">new</span>().<span class="title function_ invoke__">expect</span>(<span class="string">&quot;Config load failed&quot;</span>);
+
+    <span class="comment">// 3. 连接数据库 (PostgreSQL)</span>
+    <span class="keyword">let</span> <span class="variable">pool</span> = PgPoolOptions::<span class="title function_ invoke__">new</span>()
+        .<span class="title function_ invoke__">max_connections</span>(<span class="number">5</span>)
+        .<span class="title function_ invoke__">connect</span>(&amp;settings.database_url)
+        .<span class="keyword">await</span>
+        .<span class="title function_ invoke__">expect</span>(<span class="string">&quot;Database connection failed&quot;</span>);
+    
+    <span class="keyword">let</span> <span class="variable">state</span> = AppState &#123; db: pool &#125;;
+
+    <span class="comment">// 4. 构建路由与中间件</span>
+    <span class="keyword">let</span> <span class="variable">app</span> = Router::<span class="title function_ invoke__">new</span>()
+        <span class="comment">// 添加请求日志追踪</span>
+        .<span class="title function_ invoke__">layer</span>(TraceLayer::<span class="title function_ invoke__">new_for_http</span>()) 
+        <span class="comment">// 添加 CORS (跨域资源共享)</span>
+        .<span class="title function_ invoke__">layer</span>(
+            CorsLayer::<span class="title function_ invoke__">new</span>()
+                .<span class="title function_ invoke__">allow_origin</span>(Any) <span class="comment">// 生产环境请指定具体域名</span>
+                .<span class="title function_ invoke__">allow_methods</span>([axum::http::Method::GET, axum::http::Method::POST]),
+        )
+        .<span class="title function_ invoke__">route</span>(<span class="string">&quot;/users&quot;</span>, <span class="title function_ invoke__">post</span>(create_user_db))
+        .<span class="title function_ invoke__">with_state</span>(state); <span class="comment">// 状态注入</span>
+
+    <span class="comment">// 5. 启动服务</span>
+    <span class="keyword">let</span> <span class="variable">addr</span> = SocketAddr::<span class="title function_ invoke__">from</span>(([<span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">0</span>], settings.server_port));
+    tracing::info!(<span class="string">&quot;listening on &#123;&#125;&quot;</span>, addr);
+    <span class="keyword">let</span> <span class="variable">listener</span> = tokio::net::TcpListener::<span class="title function_ invoke__">bind</span>(addr).<span class="keyword">await</span>.<span class="title function_ invoke__">unwrap</span>();
+    axum::<span class="title function_ invoke__">serve</span>(listener, app).<span class="keyword">await</span>.<span class="title function_ invoke__">unwrap</span>();
+&#125;</code></pre>
+
+<h3 id="4-4-数据库操作-Handler"><a href="#4-4-数据库操作-Handler" class="headerlink" title="4.4 数据库操作 Handler"></a>4.4 数据库操作 Handler</h3><p>使用 <code>sqlx</code> 宏进行编译时检查 SQL 语句。</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;extract::State, Json&#125;;
+<span class="keyword">use</span> serde::&#123;Deserialize, Serialize&#125;;
+
+<span class="meta">#[derive(Deserialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">CreateUserPayload</span> &#123;
+    username: <span class="type">String</span>,
+    email: <span class="type">String</span>,
+&#125;
+
+<span class="meta">#[derive(Serialize, sqlx::FromRow)]</span>
+<span class="keyword">struct</span> <span class="title class_">User</span> &#123;
+    id: <span class="type">i32</span>,
+    username: <span class="type">String</span>,
+    email: <span class="type">String</span>,
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">create_user_db</span>(
+    <span class="title function_ invoke__">State</span>(state): State&lt;AppState&gt;,
+    <span class="title function_ invoke__">Json</span>(payload): Json&lt;CreateUserPayload&gt;,
+) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;Json&lt;User&gt;, <span class="type">String</span>&gt; &#123;
+    <span class="comment">// 使用 sqlx::query_as! 进行编译时 SQL 检查</span>
+    <span class="comment">// 或者使用 query_as::&lt;_, User&gt; 动态检查</span>
+    <span class="keyword">let</span> <span class="variable">user</span> = sqlx::query_as::&lt;_, User&gt;(
+        <span class="string">&quot;INSERT INTO users (username, email) VALUES ($1, $2) RETURNING id, username, email&quot;</span>
+    )
+    .<span class="title function_ invoke__">bind</span>(payload.username)
+    .<span class="title function_ invoke__">bind</span>(payload.email)
+    .<span class="title function_ invoke__">fetch_one</span>(&amp;state.db)
+    .<span class="keyword">await</span>
+    .<span class="title function_ invoke__">map_err</span>(|e| e.<span class="title function_ invoke__">to_string</span>())?;
+
+    <span class="title function_ invoke__">Ok</span>(<span class="title function_ invoke__">Json</span>(user))
+&#125;</code></pre>
+
+<h3 id="4-5-单元测试与集成测试"><a href="#4-5-单元测试与集成测试" class="headerlink" title="4.5 单元测试与集成测试"></a>4.5 单元测试与集成测试</h3><p>Axum 的 Router 实现了 <code>tower::Service</code>，这使得测试非常容易，无需启动 HTTP 服务器。</p>
+<pre><code class="highlight rust"><span class="meta">#[cfg(test)]</span>
+<span class="keyword">mod</span> tests &#123;
+    <span class="keyword">use</span> super::*;
+    <span class="keyword">use</span> axum::&#123;
+        body::Body,
+        http::&#123;Request, StatusCode&#125;,
+        routing::get,
+    &#125;;
+    <span class="keyword">use</span> tower::ServiceExt; <span class="comment">// for `oneshot`</span>
+
+    <span class="meta">#[tokio::test]</span>
+    <span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">test_hello_user</span>() &#123;
+        <span class="comment">// 构建用于测试的 App</span>
+        <span class="keyword">let</span> <span class="variable">app</span> = Router::<span class="title function_ invoke__">new</span>().<span class="title function_ invoke__">route</span>(<span class="string">&quot;/&quot;</span>, <span class="title function_ invoke__">get</span>(|| <span class="keyword">async</span> &#123; <span class="string">&quot;Hello, World!&quot;</span> &#125;));
+
+        <span class="comment">// 发送模拟请求</span>
+        <span class="keyword">let</span> <span class="variable">response</span> = app
+            .<span class="title function_ invoke__">oneshot</span>(Request::<span class="title function_ invoke__">builder</span>().<span class="title function_ invoke__">uri</span>(<span class="string">&quot;/&quot;</span>).<span class="title function_ invoke__">body</span>(Body::<span class="title function_ invoke__">empty</span>()).<span class="title function_ invoke__">unwrap</span>())
+            .<span class="keyword">await</span>
+            .<span class="title function_ invoke__">unwrap</span>();
+
+        <span class="built_in">assert_eq!</span>(response.<span class="title function_ invoke__">status</span>(), StatusCode::OK);
+    &#125;
+&#125;</code></pre>
+
+<h2 id="5-关键知识点总结"><a href="#5-关键知识点总结" class="headerlink" title="5. 关键知识点总结"></a>5. 关键知识点总结</h2><h3 id="5-1-提取器-Extractors"><a href="#5-1-提取器-Extractors" class="headerlink" title="5.1 提取器 (Extractors)"></a>5.1 提取器 (Extractors)</h3><p>Axum 的强大之处在于<strong>提取器</strong>。在 Handler 函数签名中声明的参数，Axum 会自动从请求中解析数据。</p>
+<ul>
+<li><code>Json(payload)</code>: 自动将 Request Body 解析为 Struct（反序列化）。</li>
+<li><code>Path(id)</code>: 解析 URL 路径参数，如 <code>/users/1</code> 中的 <code>1</code>。</li>
+<li><code>State(db)</code>: 获取全局共享的应用状态（数据库连接池等）。</li>
+</ul>
+<h3 id="5-2-状态共享-State-Management"><a href="#5-2-状态共享-State-Management" class="headerlink" title="5.2 状态共享 (State Management)"></a>5.2 状态共享 (State Management)</h3><p>Restful API 通常是无状态的，但我们需要持久化数据。</p>
+<ul>
+<li>Rust 中使用 <code>Arc</code> (Atomic Reference Counting) 来让多个线程共享同一份数据。</li>
+<li>如果数据可变，需要包裹在 <code>Mutex</code> 或 <code>RwLock</code> 内部（内部可变性模式）。</li>
+<li>在真实项目中，这里通常会存放 <code>sqlx::PgPool</code> (PostgreSQL 连接池)。</li>
+</ul>
+<h3 id="5-3-错误处理"><a href="#5-3-错误处理" class="headerlink" title="5.3 错误处理"></a>5.3 错误处理</h3><p>Rust 的结果返回非常灵活。Handler 可以返回任何实现了 <code>IntoResponse</code> trait 的类型。</p>
+<ul>
+<li>简单场景：直接返回 <code>StatusCode</code>。</li>
+<li>复杂场景：返回 <code>Result&lt;Json&lt;T&gt;, AppError&gt;</code>。这允许我们定义统一的错误处理枚举，将业务错误自动转换为对应的 HTTP 响应。</li>
+</ul>
+<pre><code class="highlight rust"><span class="comment">// 简单的自定义错误扩展示例</span>
+<span class="keyword">enum</span> <span class="title class_">AppError</span> &#123;
+    UserNotFound,
+    <span class="title function_ invoke__">DatabaseError</span>(<span class="type">String</span>),
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">IntoResponse</span> <span class="keyword">for</span> <span class="title class_">AppError</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">into_response</span>(<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> Response &#123;
+        <span class="keyword">let</span> (status, error_message) = <span class="keyword">match</span> <span class="keyword">self</span> &#123;
+            AppError::UserNotFound =&gt; (StatusCode::NOT_FOUND, <span class="string">&quot;User not found&quot;</span>),
+            AppError::<span class="title function_ invoke__">DatabaseError</span>(msg) =&gt; (StatusCode::INTERNAL_SERVER_ERROR, msg.<span class="title function_ invoke__">as_str</span>()),
+        &#125;;
+        (status, <span class="title function_ invoke__">Json</span>(json!(&#123; <span class="string">&quot;error&quot;</span>: error_message &#125;))).<span class="title function_ invoke__">into_response</span>()
+    &#125;
+&#125;</code></pre></div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
