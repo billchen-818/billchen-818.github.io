@@ -1,0 +1,192 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust Trait (特征) 详解：从入门到深入</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust Trait (特征) 详解：从入门到深入</h1><div class="time">2026-03-02</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>Trait（特征）是 Rust 中非常核心的概念，它类似于其他语言中的接口（Interface），用于定义共享的行为。</p>
+<h2 id="1-什么是-Trait？"><a href="#1-什么是-Trait？" class="headerlink" title="1. 什么是 Trait？"></a>1. 什么是 Trait？</h2><p>Trait 告诉 Rust 编译器某个特定类型拥有可能与其他类型共享的功能。通过 trait 我们可以以抽象的方式定义共享的行为。我们可以使用 trait bounds（trait 约束）来指定泛型是任何拥有特定行为的类型。</p>
+<h2 id="2-定义与实现-Trait"><a href="#2-定义与实现-Trait" class="headerlink" title="2. 定义与实现 Trait"></a>2. 定义与实现 Trait</h2><h3 id="2-1-定义一个-Trait"><a href="#2-1-定义一个-Trait" class="headerlink" title="2.1 定义一个 Trait"></a>2.1 定义一个 Trait</h3><p>使用 <code>trait</code> 关键字来声明一个 trait。这里我们定义一个 <code>Summary</code> trait，它包含一个 <code>summarize</code> 方法。</p>
+<pre><code class="highlight rust"><span class="keyword">pub</span> <span class="keyword">trait</span> <span class="title class_">Summary</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">summarize</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> <span class="type">String</span>;
+&#125;</code></pre>
+
+<h3 id="2-2-为类型实现-Trait"><a href="#2-2-为类型实现-Trait" class="headerlink" title="2.2 为类型实现 Trait"></a>2.2 为类型实现 Trait</h3><p>假设我们有两个结构体：<code>NewsArticle</code>（新闻文章）和 <code>Tweet</code>（推文）。我们可以为它们分别实现 <code>Summary</code> trait。</p>
+<pre><code class="highlight rust"><span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">NewsArticle</span> &#123;
+    <span class="keyword">pub</span> headline: <span class="type">String</span>,
+    <span class="keyword">pub</span> location: <span class="type">String</span>,
+    <span class="keyword">pub</span> author: <span class="type">String</span>,
+    <span class="keyword">pub</span> content: <span class="type">String</span>,
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">Summary</span> <span class="keyword">for</span> <span class="title class_">NewsArticle</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">summarize</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> <span class="type">String</span> &#123;
+        <span class="built_in">format!</span>(<span class="string">&quot;&#123;&#125;, by &#123;&#125; (&#123;&#125;)&quot;</span>, <span class="keyword">self</span>.headline, <span class="keyword">self</span>.author, <span class="keyword">self</span>.location)
+    &#125;
+&#125;
+
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">Tweet</span> &#123;
+    <span class="keyword">pub</span> username: <span class="type">String</span>,
+    <span class="keyword">pub</span> content: <span class="type">String</span>,
+    <span class="keyword">pub</span> reply: <span class="type">bool</span>,
+    <span class="keyword">pub</span> retweet: <span class="type">bool</span>,
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">Summary</span> <span class="keyword">for</span> <span class="title class_">Tweet</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">summarize</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> <span class="type">String</span> &#123;
+        <span class="built_in">format!</span>(<span class="string">&quot;&#123;&#125;: &#123;&#125;&quot;</span>, <span class="keyword">self</span>.username, <span class="keyword">self</span>.content)
+    &#125;
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">tweet</span> = Tweet &#123;
+        username: <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;horse_ebooks&quot;</span>),
+        content: <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;Rust 语言真棒！&quot;</span>),
+        reply: <span class="literal">false</span>,
+        retweet: <span class="literal">false</span>,
+    &#125;;
+
+    <span class="built_in">println!</span>(<span class="string">&quot;新推文: &#123;&#125;&quot;</span>, tweet.<span class="title function_ invoke__">summarize</span>());
+&#125;</code></pre>
+
+<h3 id="2-3-默认实现-Default-Implementations"><a href="#2-3-默认实现-Default-Implementations" class="headerlink" title="2.3 默认实现 (Default Implementations)"></a>2.3 默认实现 (Default Implementations)</h3><p>有时为 trait 中的某些或全部方法提供默认的行为是很有用的。</p>
+<pre><code class="highlight rust"><span class="keyword">pub</span> <span class="keyword">trait</span> <span class="title class_">Summary</span> &#123;
+    <span class="comment">// 默认实现</span>
+    <span class="keyword">fn</span> <span class="title function_">summarize</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> <span class="type">String</span> &#123;
+        <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;(Read more...)&quot;</span>)
+    &#125;
+&#125;
+
+<span class="comment">// 即使 NewsArticle 没有具体实现 summarize，它也可以使用默认实现</span>
+<span class="comment">// impl Summary for NewsArticle &#123;&#125; </span></code></pre>
+
+<h2 id="3-Trait-作为参数-Trait-Bound"><a href="#3-Trait-作为参数-Trait-Bound" class="headerlink" title="3. Trait 作为参数 (Trait Bound)"></a>3. Trait 作为参数 (Trait Bound)</h2><p>我们不仅可以为类型实现 trait，还可以定义函数来接收实现了特定 trait 的类型。</p>
+<h3 id="3-1-impl-Trait-语法"><a href="#3-1-impl-Trait-语法" class="headerlink" title="3.1 impl Trait 语法"></a>3.1 <code>impl Trait</code> 语法</h3><p>这是最简单的写法，也是语法糖。</p>
+<pre><code class="highlight rust"><span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">notify</span>(item: &amp;<span class="keyword">impl</span> <span class="title class_">Summary</span>) &#123;
+    <span class="built_in">println!</span>(<span class="string">&quot;Breaking news! &#123;&#125;&quot;</span>, item.<span class="title function_ invoke__">summarize</span>());
+&#125;</code></pre>
+
+<h3 id="3-2-Trait-Bound-语法"><a href="#3-2-Trait-Bound-语法" class="headerlink" title="3.2 Trait Bound 语法"></a>3.2 Trait Bound 语法</h3><p>这与上面的写法等价，但在处理更复杂的泛型约束时更强大。</p>
+<pre><code class="highlight rust"><span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">notify</span>&lt;T: Summary&gt;(item: &amp;T) &#123;
+    <span class="built_in">println!</span>(<span class="string">&quot;Breaking news! &#123;&#125;&quot;</span>, item.<span class="title function_ invoke__">summarize</span>());
+&#125;</code></pre>
+
+<h3 id="3-3-多重约束"><a href="#3-3-多重约束" class="headerlink" title="3.3 多重约束"></a>3.3 多重约束</h3><p>如果我们需要参数同时实现多个 trait，可以使用 <code>+</code> 语法。</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> std::fmt::Display;
+
+<span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">notify</span>(item: &amp;(<span class="keyword">impl</span> <span class="title class_">Summary</span> + Display)) &#123;
+    <span class="comment">// ...</span>
+&#125;
+
+<span class="comment">// 或者</span>
+<span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">notify</span>&lt;T: Summary + Display&gt;(item: &amp;T) &#123;
+    <span class="comment">// ...</span>
+&#125;</code></pre>
+
+<h3 id="3-4-where-子句"><a href="#3-4-where-子句" class="headerlink" title="3.4 where 子句"></a>3.4 <code>where</code> 子句</h3><p>当约束过多时，函数签名会变得难以阅读。<code>where</code> 子句可以将约束后置。</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">some_function</span>&lt;T, U&gt;(t: &amp;T, u: &amp;U) <span class="punctuation">-&gt;</span> <span class="type">i32</span>
+<span class="keyword">where</span>
+    T: Display + <span class="built_in">Clone</span>,
+    U: <span class="built_in">Clone</span> + <span class="built_in">Debug</span>,
+&#123;
+    <span class="comment">// ...</span>
+    <span class="number">0</span>
+&#125;</code></pre>
+
+<h2 id="4-返回实现了-Trait-的类型"><a href="#4-返回实现了-Trait-的类型" class="headerlink" title="4. 返回实现了 Trait 的类型"></a>4. 返回实现了 Trait 的类型</h2><p>我们可以使用 <code>impl Trait</code> 来隐藏具体的返回类型，只承诺返回类型实现了某个 trait。这在闭包和迭代器中非常常用。</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">returns_summarizable</span>() <span class="punctuation">-&gt;</span> <span class="keyword">impl</span> <span class="title class_">Summary</span> &#123;
+    Tweet &#123;
+        username: <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;horse_ebooks&quot;</span>),
+        content: <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;of course, as you probably already know, people&quot;</span>),
+        reply: <span class="literal">false</span>,
+        retweet: <span class="literal">false</span>,
+    &#125;
+&#125;</code></pre>
+
+<p><strong>注意</strong>：这种语法只能返回一种具体的类型。不能在一个分支返回 <code>Tweet</code>，另一个分支返回 <code>NewsArticle</code>。如果需要这样做，必须使用 Trait 对象（如 <code>Box&lt;dyn Summary&gt;</code>）。</p>
+<h2 id="5-常见的标准库-Trait"><a href="#5-常见的标准库-Trait" class="headerlink" title="5. 常见的标准库 Trait"></a>5. 常见的标准库 Trait</h2><p>Rust 标准库中有许多非常重要且常用的 Trait。</p>
+<h3 id="5-1-Debug-与-Display"><a href="#5-1-Debug-与-Display" class="headerlink" title="5.1 Debug 与 Display"></a>5.1 <code>Debug</code> 与 <code>Display</code></h3><ul>
+<li><code>Debug</code> (<code>&#123;:?&#125;</code>):用于程序员调试，几乎所有类型都可以通过 <code>#[derive(Debug)]</code> 自动实现。</li>
+<li><code>Display</code> (<code>&#123;&#125;</code>): 用于向用户展示，必须手动实现。</li>
+</ul>
+<pre><code class="highlight rust"><span class="keyword">use</span> std::fmt;
+
+<span class="keyword">struct</span> <span class="title class_">Point</span> &#123;
+    x: <span class="type">i32</span>,
+    y: <span class="type">i32</span>,
+&#125;
+
+<span class="comment">// 手动实现 Display</span>
+<span class="keyword">impl</span> <span class="title class_">fmt</span>::Display <span class="keyword">for</span> <span class="title class_">Point</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">fmt</span>(&amp;<span class="keyword">self</span>, f: &amp;<span class="keyword">mut</span> fmt::Formatter&lt;<span class="symbol">&#x27;_</span>&gt;) <span class="punctuation">-&gt;</span> fmt::<span class="type">Result</span> &#123;
+        <span class="built_in">write!</span>(f, <span class="string">&quot;(&#123;&#125;, &#123;&#125;)&quot;</span>, <span class="keyword">self</span>.x, <span class="keyword">self</span>.y)
+    &#125;
+&#125;</code></pre>
+
+<h3 id="5-2-Copy-与-Clone"><a href="#5-2-Copy-与-Clone" class="headerlink" title="5.2 Copy 与 Clone"></a>5.2 <code>Copy</code> 与 <code>Clone</code></h3><ul>
+<li><code>Clone</code>: 用于显式地创建值的深拷贝 (<code>obj.clone()</code>)。</li>
+<li><code>Copy</code>: 一种特殊的标记 trait (Marker Trait)。如果一个类型实现了 <code>Copy</code>，它的值在赋值给另一个变量时会自动复制（按位拷贝），而不是移动（Move）。<ul>
+<li>只有所有成员都实现了 <code>Copy</code> 的类型才能实现 <code>Copy</code>。</li>
+<li>实现了 <code>Drop</code> 的类型不能实现 <code>Copy</code>。</li>
+</ul>
+</li>
+</ul>
+<pre><code class="highlight rust"><span class="meta">#[derive(Debug, Copy, Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">Vector2</span> &#123;
+    x: <span class="type">f64</span>,
+    y: <span class="type">f64</span>,
+&#125;</code></pre>
+
+<h3 id="5-3-Drop"><a href="#5-3-Drop" class="headerlink" title="5.3 Drop"></a>5.3 <code>Drop</code></h3><p><code>Drop</code> trait 允许我们在值离开作用域时执行自定义代码（通常用于资源清理，如关闭文件、释放内存）。</p>
+<pre><code class="highlight rust"><span class="keyword">struct</span> <span class="title class_">CustomSmartPointer</span> &#123;
+    data: <span class="type">String</span>,
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">Drop</span> <span class="keyword">for</span> <span class="title class_">CustomSmartPointer</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">drop</span>(&amp;<span class="keyword">mut</span> <span class="keyword">self</span>) &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;Dropping CustomSmartPointer with data `&#123;&#125;`!&quot;</span>, <span class="keyword">self</span>.data);
+    &#125;
+&#125;</code></pre>
+
+<h3 id="5-4-From-与-Into"><a href="#5-4-From-与-Into" class="headerlink" title="5.4 From 与 Into"></a>5.4 <code>From</code> 与 <code>Into</code></h3><p>这两个 trait 用于类型转换。通常如果你实现了 <code>From</code>，系统会自动为你提供 <code>Into</code> 的实现。</p>
+<pre><code class="highlight rust"><span class="keyword">struct</span> <span class="title class_">Number</span> &#123;
+    value: <span class="type">i32</span>,
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">From</span>&lt;<span class="type">i32</span>&gt; <span class="keyword">for</span> <span class="title class_">Number</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">from</span>(item: <span class="type">i32</span>) <span class="punctuation">-&gt;</span> <span class="keyword">self</span> &#123;
+        Number &#123; value: item &#125;
+    &#125;
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">num</span> = Number::<span class="title function_ invoke__">from</span>(<span class="number">30</span>);
+    <span class="comment">// 或者使用 Into (由编译器自动生成)</span>
+    <span class="keyword">let</span> <span class="variable">num2</span>: Number = <span class="number">30</span>.<span class="title function_ invoke__">into</span>();
+&#125;</code></pre>
+
+<h3 id="5-5-Iterator"><a href="#5-5-Iterator" class="headerlink" title="5.5 Iterator"></a>5.5 <code>Iterator</code></h3><p>Rust 中所有迭代器的核心。</p>
+<pre><code class="highlight rust"><span class="keyword">pub</span> <span class="keyword">trait</span> <span class="title class_">Iterator</span> &#123;
+    <span class="keyword">type</span> <span class="title class_">Item</span>; <span class="comment">// 关联类型</span>
+    <span class="keyword">fn</span> <span class="title function_">next</span>(&amp;<span class="keyword">mut</span> <span class="keyword">self</span>) <span class="punctuation">-&gt;</span> <span class="type">Option</span>&lt;<span class="keyword">Self</span>::Item&gt;;
+&#125;</code></pre>
+
+<h2 id="6-Trait-对象-Trait-Objects"><a href="#6-Trait-对象-Trait-Objects" class="headerlink" title="6. Trait 对象 (Trait Objects)"></a>6. Trait 对象 (Trait Objects)</h2><p>泛型 (<code>fn foo&lt;T: Trait&gt;(t: T)</code>) 是静态分发 (Static Dispatch)，编译器会为每个具体类型生成代码（单态化），性能最好。</p>
+<p>Trait 对象 (<code>Box&lt;dyn Trait&gt;</code> 或 <code>&amp;dyn Trait</code>) 是动态分发 (Dynamic Dispatch)，允许在运行时处理不同类型，但有微小的运行时开销（vtable 查找）。</p>
+<pre><code class="highlight rust"><span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">Screen</span> &#123;
+    <span class="keyword">pub</span> components: <span class="type">Vec</span>&lt;<span class="type">Box</span>&lt;<span class="keyword">dyn</span> Draw&gt;&gt;,
+&#125;
+
+<span class="keyword">pub</span> <span class="keyword">trait</span> <span class="title class_">Draw</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">draw</span>(&amp;<span class="keyword">self</span>);
+&#125;
+
+<span class="comment">// 可以在同一个 Vec 中存放不同类型，只要它们都实现了 Draw</span>
+<span class="keyword">impl</span> <span class="title class_">Screen</span> &#123;
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">run</span>(&amp;<span class="keyword">self</span>) &#123;
+        <span class="keyword">for</span> <span class="variable">component</span> <span class="keyword">in</span> <span class="keyword">self</span>.components.<span class="title function_ invoke__">iter</span>() &#123;
+            component.<span class="title function_ invoke__">draw</span>();
+        &#125;
+    &#125;
+&#125;</code></pre>
+
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
