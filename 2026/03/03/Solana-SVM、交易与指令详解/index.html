@@ -1,0 +1,1676 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Solana SVM、交易与指令详解</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Solana SVM、交易与指令详解</h1><div class="time">2026-03-03</div><ul class="tags"><li><span>#</span><a href="/tags/Solana/">Solana</a></li></ul><blockquote>
+<p>Solana 之所以能实现极高的吞吐量和亚秒级确认，背后的核心引擎就是 <strong>SVM（Solana Virtual Machine）</strong>。本文将从 SVM 架构出发，深入讲解 Solana 的交易（Transaction）结构、指令（Instruction）机制、交易生命周期，并配合大量代码示例和图解，帮助初学者从零到精通 Solana 的交易系统。</p>
+</blockquote>
+<hr>
+<h2 id="一、SVM（Solana-Virtual-Machine）概述"><a href="#一、SVM（Solana-Virtual-Machine）概述" class="headerlink" title="一、SVM（Solana Virtual Machine）概述"></a>一、SVM（Solana Virtual Machine）概述</h2><h3 id="1-1-什么是-SVM？"><a href="#1-1-什么是-SVM？" class="headerlink" title="1.1 什么是 SVM？"></a>1.1 什么是 SVM？</h3><p><strong>SVM（Solana Virtual Machine）</strong> 是 Solana 区块链的执行引擎，负责处理和执行链上的所有交易与智能合约（Program）。它类似于以太坊的 EVM（Ethereum Virtual Machine），但在架构设计上有着本质区别。</p>
+<pre><code class="highlight plaintext">┌──────────────────────────────────────────────────────────────┐
+│                    Solana 区块链架构                           │
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│   用户/DApp ──► 交易（Transaction）──► 验证节点（Validator）    │
+│                                           │                  │
+│                                    ┌──────▼──────┐           │
+│                                    │    SVM      │           │
+│                                    │  执行引擎    │           │
+│                                    │             │           │
+│                                    │ ┌─────────┐ │           │
+│                                    │ │ BPF/SBF │ │           │
+│                                    │ │ Runtime  │ │           │
+│                                    │ └─────────┘ │           │
+│                                    │ ┌─────────┐ │           │
+│                                    │ │ Sealevel│ │           │
+│                                    │ │ 并行引擎 │ │           │
+│                                    │ └─────────┘ │           │
+│                                    │ ┌─────────┐ │           │
+│                                    │ │ Bank    │ │           │
+│                                    │ │ 状态管理 │ │           │
+│                                    │ └─────────┘ │           │
+│                                    └─────────────┘           │
+│                                           │                  │
+│                                    ┌──────▼──────┐           │
+│                                    │  账户存储    │           │
+│                                    │ AccountsDB  │           │
+│                                    └─────────────┘           │
+└──────────────────────────────────────────────────────────────┘</code></pre>
+
+<h3 id="1-2-SVM-核心组件"><a href="#1-2-SVM-核心组件" class="headerlink" title="1.2 SVM 核心组件"></a>1.2 SVM 核心组件</h3><table>
+<thead>
+<tr>
+<th>组件</th>
+<th>功能</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>BPF&#x2F;SBF Runtime</strong></td>
+<td>字节码执行</td>
+<td>执行编译后的智能合约（eBPF → SBF）</td>
+</tr>
+<tr>
+<td><strong>Sealevel</strong></td>
+<td>并行执行引擎</td>
+<td>支持数千笔交易并行处理</td>
+</tr>
+<tr>
+<td><strong>Bank</strong></td>
+<td>状态管理</td>
+<td>管理账户状态、余额、Slot 信息</td>
+</tr>
+<tr>
+<td><strong>AccountsDB</strong></td>
+<td>持久化存储</td>
+<td>高性能账户数据持久化</td>
+</tr>
+<tr>
+<td><strong>Transaction Processor</strong></td>
+<td>交易处理器</td>
+<td>验证签名、扣费、调度执行</td>
+</tr>
+</tbody></table>
+<h3 id="1-3-SVM-vs-EVM-对比"><a href="#1-3-SVM-vs-EVM-对比" class="headerlink" title="1.3 SVM vs EVM 对比"></a>1.3 SVM vs EVM 对比</h3><pre><code class="highlight plaintext">┌─────────────────────────┬───────────────────────┐
+│       SVM (Solana)      │      EVM (Ethereum)   │
+├─────────────────────────┼───────────────────────┤
+│  基于 BPF/SBF 字节码     │  基于 EVM 字节码       │
+│  支持并行执行（Sealevel） │  串行执行              │
+│  程序与数据分离           │  合约 = 代码 + 数据    │
+│  账户模型驱动            │  合约驱动              │
+│  编译型（Rust/C）        │  Solidity/Vyper       │
+│  计算单元（CU）计量       │  Gas 计量             │
+│  65,000 TPS+            │  ~15-30 TPS           │
+│  ~400ms 出块             │  ~12s 出块             │
+│  状态需预声明             │  状态动态访问          │
+└─────────────────────────┴───────────────────────┘</code></pre>
+
+<h3 id="1-4-SVM-并行执行原理-——-Sealevel"><a href="#1-4-SVM-并行执行原理-——-Sealevel" class="headerlink" title="1.4 SVM 并行执行原理 —— Sealevel"></a>1.4 SVM 并行执行原理 —— Sealevel</h3><p>Sealevel 是 Solana 实现高吞吐量的秘密武器。它通过分析每笔交易<strong>声明的账户读写集</strong>，判断哪些交易可以并行执行。</p>
+<pre><code class="highlight plaintext">              交易池 (Transaction Pool)
+          ┌────┬────┬────┬────┬────┬────┐
+          │ T1 │ T2 │ T3 │ T4 │ T5 │ T6 │
+          └─┬──┴─┬──┴─┬──┴─┬──┴─┬──┴──┬─┘
+            │    │    │    │    │     │
+    ┌───────▼────▼────┼────┼────▼─────┤
+    │  账户依赖分析    │    │          │
+    │  (Sealevel)     │    │          │
+    └───────┬─────────┘    │          │
+            │              │          │
+┌───────────▼───┐  ┌──────▼──┐  ┌───▼────────┐
+│   并行批次 1   │  │ 批次 2   │  │  批次 3    │
+│               │  │         │  │            │
+│  T1: 读A,写B  │  │ T3:写A  │  │ T5: 读C    │
+│  T2: 读C,写D  │  │ T4:读A  │  │ T6: 写E    │
+│  (无冲突,并行)  │  │(依赖A)  │  │(无冲突)    │
+└───────────────┘  └─────────┘  └────────────┘
+        │                │              │
+        ▼                ▼              ▼
+┌──────────────────────────────────────────┐
+│        CPU 核心并行执行                     │
+│   Core1: T1    Core2: T2                  │
+│   然后 Core1: T3  Core2: T4               │
+│   然后 Core1: T5  Core2: T6               │
+└──────────────────────────────────────────┘</code></pre>
+
+<p><strong>并行规则</strong>：</p>
+<ul>
+<li>如果两笔交易<strong>不涉及相同的可写账户</strong>，它们可以并行执行</li>
+<li>只读账户可以被多笔交易同时访问</li>
+<li>这就是为什么 Solana 交易必须<strong>预先声明</strong>所有要访问的账户</li>
+</ul>
+<blockquote>
+<p><strong>关键理解</strong>：Solana 要求交易提前声明账户列表，不是为了限制开发者，而是为了让 Sealevel 能分析依赖关系、实现大规模并行。</p>
+</blockquote>
+<hr>
+<h2 id="二、交易（Transaction）结构详解"><a href="#二、交易（Transaction）结构详解" class="headerlink" title="二、交易（Transaction）结构详解"></a>二、交易（Transaction）结构详解</h2><h3 id="2-1-交易全景图"><a href="#2-1-交易全景图" class="headerlink" title="2.1 交易全景图"></a>2.1 交易全景图</h3><p>一笔 Solana 交易由 <strong>签名（Signatures）</strong> 和 <strong>消息（Message）</strong> 两大部分组成：</p>
+<pre><code class="highlight plaintext">┌──────────────────────────────────────────────────────────┐
+│                  Solana Transaction                       │
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │              Signatures (签名数组)                   │  │
+│  │  ┌──────────┐ ┌──────────┐                         │  │
+│  │  │ Sig #1   │ │ Sig #2   │  ...                    │  │
+│  │  │ (64字节)  │ │ (64字节)  │                         │  │
+│  │  └──────────┘ └──────────┘                         │  │
+│  └────────────────────────────────────────────────────┘  │
+│                                                          │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │              Message (消息体)                       │  │
+│  │                                                    │  │
+│  │  ┌──────────────────────────────────────────────┐  │  │
+│  │  │          Message Header (消息头)              │  │  │
+│  │  │  • num_required_signatures: u8               │  │  │
+│  │  │  • num_readonly_signed_accounts: u8          │  │  │
+│  │  │  • num_readonly_unsigned_accounts: u8        │  │  │
+│  │  └──────────────────────────────────────────────┘  │  │
+│  │                                                    │  │
+│  │  ┌──────────────────────────────────────────────┐  │  │
+│  │  │      Account Keys (账户公钥数组)              │  │  │
+│  │  │  [Pubkey1, Pubkey2, Pubkey3, ...]            │  │  │
+│  │  └──────────────────────────────────────────────┘  │  │
+│  │                                                    │  │
+│  │  ┌──────────────────────────────────────────────┐  │  │
+│  │  │      Recent Blockhash (最近区块哈希)           │  │  │
+│  │  │  用于防重放 &amp; 交易过期（~60秒有效期）           │  │  │
+│  │  └──────────────────────────────────────────────┘  │  │
+│  │                                                    │  │
+│  │  ┌──────────────────────────────────────────────┐  │  │
+│  │  │      Instructions (指令数组)                  │  │  │
+│  │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐     │  │  │
+│  │  │  │ Instr #1 │ │ Instr #2 │ │ Instr #3 │     │  │  │
+│  │  │  └──────────┘ └──────────┘ └──────────┘     │  │  │
+│  │  └──────────────────────────────────────────────┘  │  │
+│  └────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────┘</code></pre>
+
+<h3 id="2-2-交易的-Rust-数据结构"><a href="#2-2-交易的-Rust-数据结构" class="headerlink" title="2.2 交易的 Rust 数据结构"></a>2.2 交易的 Rust 数据结构</h3><pre><code class="highlight rust"><span class="comment">// Solana SDK 中的 Transaction 定义</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">Transaction</span> &#123;
+    <span class="comment">/// 签名列表，与 message.account_keys 中需要签名的账户一一对应</span>
+    <span class="keyword">pub</span> signatures: <span class="type">Vec</span>&lt;Signature&gt;,
+    
+    <span class="comment">/// 交易消息体</span>
+    <span class="keyword">pub</span> message: Message,
+&#125;
+
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">Message</span> &#123;
+    <span class="comment">/// 消息头，描述账户权限分布</span>
+    <span class="keyword">pub</span> header: MessageHeader,
+    
+    <span class="comment">/// 所有涉及的账户公钥（有严格排序规则）</span>
+    <span class="keyword">pub</span> account_keys: <span class="type">Vec</span>&lt;Pubkey&gt;,
+    
+    <span class="comment">/// 最近的区块哈希（防止重放攻击）</span>
+    <span class="keyword">pub</span> recent_blockhash: Hash,
+    
+    <span class="comment">/// 指令列表（按顺序执行）</span>
+    <span class="keyword">pub</span> instructions: <span class="type">Vec</span>&lt;CompiledInstruction&gt;,
+&#125;
+
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">MessageHeader</span> &#123;
+    <span class="comment">/// 需要签名的账户数量</span>
+    <span class="keyword">pub</span> num_required_signatures: <span class="type">u8</span>,
+    
+    <span class="comment">/// 需要签名但只读的账户数量</span>
+    <span class="keyword">pub</span> num_readonly_signed_accounts: <span class="type">u8</span>,
+    
+    <span class="comment">/// 不需要签名且只读的账户数量</span>
+    <span class="keyword">pub</span> num_readonly_unsigned_accounts: <span class="type">u8</span>,
+&#125;</code></pre>
+
+<h3 id="2-3-Account-Keys-排序规则"><a href="#2-3-Account-Keys-排序规则" class="headerlink" title="2.3 Account Keys 排序规则"></a>2.3 Account Keys 排序规则</h3><p>交易中的账户列表有严格的排序规则，这对理解交易结构非常重要：</p>
+<pre><code class="highlight plaintext">Account Keys 数组排列顺序：
+
+索引:  0        1        2        3        4        5
+     ┌────────┬────────┬────────┬────────┬────────┬────────┐
+     │ 签名者  │ 签名者  │ 签名者  │ 非签名  │ 非签名  │ 非签名  │
+     │ 可写   │ 可写    │ 只读   │ 可写    │ 只读   │ 只读    │
+     └────────┴────────┴────────┴────────┴────────┴────────┘
+     ◄── 需签名 &amp; 可写 ──►◄ 签名只读►◄─ 无需签名可写 ─►◄ 只读 ──►
+
+     header.num_required_signatures = 3   (前3个需要签名)
+     header.num_readonly_signed = 1       (签名者中1个只读，即索引2)
+     header.num_readonly_unsigned = 2     (非签名者中2个只读，即索引4,5)
+
+     Fee Payer = account_keys[0]  （第一个账户始终是手续费支付者）</code></pre>
+
+<h3 id="2-4-Recent-Blockhash-与交易有效期"><a href="#2-4-Recent-Blockhash-与交易有效期" class="headerlink" title="2.4 Recent Blockhash 与交易有效期"></a>2.4 Recent Blockhash 与交易有效期</h3><pre><code class="highlight plaintext">┌─────────────────────────────────────────────────────────┐
+│              Recent Blockhash 机制                        │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│  Slot 100    Slot 101    Slot 102   ...   Slot 250     │
+│  ┌──────┐   ┌──────┐   ┌──────┐         ┌──────┐      │
+│  │Block │──►│Block │──►│Block │──► ···──►│Block │      │
+│  │Hash_A│   │Hash_B│   │Hash_C│         │Hash_X│      │
+│  └──────┘   └──────┘   └──────┘         └──────┘      │
+│                                                         │
+│  交易使用 Hash_A 作为 recent_blockhash                    │
+│                                                         │
+│  ✅ Slot 100-250: 交易有效（约 60-90 秒）                 │
+│  ❌ Slot 251+:    交易过期，自动丢弃                      │
+│                                                         │
+│  作用：                                                  │
+│  1. 防止重放攻击（同一交易不能被提交两次）                   │
+│  2. 交易自动过期（无需手动取消）                           │
+│  3. 节点只需保留最近 ~150 个 blockhash                    │
+└─────────────────────────────────────────────────────────┘</code></pre>
+
+<h3 id="2-5-交易大小限制"><a href="#2-5-交易大小限制" class="headerlink" title="2.5 交易大小限制"></a>2.5 交易大小限制</h3><pre><code class="highlight plaintext">┌─────────────────────────────────────────────────────┐
+│         Solana 交易大小限制: 1232 字节                │
+├─────────────────────────────────────────────────────┤
+│                                                     │
+│  Signatures:  64 bytes × N 个签名者                  │
+│  Header:      3 bytes                               │
+│  Account Keys: 32 bytes × M 个账户                   │
+│  Blockhash:   32 bytes                              │
+│  Instructions: 可变大小                              │
+│                                                     │
+│  ───────────────────────────────────────────────     │
+│  总计 ≤ 1232 bytes (IPv6 MTU)                       │
+│                                                     │
+│  实际约束：                                          │
+│  • 最多约 30-35 个账户                               │
+│  • 单笔交易最多包含的指令数量有限                      │
+│  • 超出限制需要使用 Versioned Transaction             │
+│    或 Address Lookup Table (ALT)                    │
+└─────────────────────────────────────────────────────┘</code></pre>
+
+<hr>
+<h2 id="三、指令（Instruction）结构详解"><a href="#三、指令（Instruction）结构详解" class="headerlink" title="三、指令（Instruction）结构详解"></a>三、指令（Instruction）结构详解</h2><h3 id="3-1-指令是什么？"><a href="#3-1-指令是什么？" class="headerlink" title="3.1 指令是什么？"></a>3.1 指令是什么？</h3><p><strong>指令（Instruction）</strong> 是 Solana 交易中的最小执行单元。一笔交易可以包含一条或多条指令，每条指令告诉一个特定的程序（Program）去做一件事。</p>
+<pre><code class="highlight plaintext">┌──────────────────────────────────────────────────────┐
+│                   Instruction（指令）                  │
+├──────────────────────────────────────────────────────┤
+│                                                      │
+│  ┌─────────────────────┐                             │
+│  │  program_id          │  要调用哪个程序？             │
+│  │  (Pubkey)           │  例: Token Program          │
+│  └─────────────────────┘                             │
+│                                                      │
+│  ┌─────────────────────┐                             │
+│  │  accounts            │  需要操作哪些账户？           │
+│  │  (Vec&lt;AccountMeta&gt;) │  包含读/写、签名权限          │
+│  └─────────────────────┘                             │
+│                                                      │
+│  ┌─────────────────────┐                             │
+│  │  data                │  传什么参数给程序？           │
+│  │  (Vec&lt;u8&gt;)          │  序列化后的指令数据           │
+│  └─────────────────────┘                             │
+│                                                      │
+└──────────────────────────────────────────────────────┘</code></pre>
+
+<h3 id="3-2-指令的-Rust-数据结构"><a href="#3-2-指令的-Rust-数据结构" class="headerlink" title="3.2 指令的 Rust 数据结构"></a>3.2 指令的 Rust 数据结构</h3><pre><code class="highlight rust"><span class="comment">/// 用户构建交易时使用的 Instruction</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">Instruction</span> &#123;
+    <span class="comment">/// 要调用的程序的公钥</span>
+    <span class="keyword">pub</span> program_id: Pubkey,
+    
+    <span class="comment">/// 该指令涉及的账户列表（含权限信息）</span>
+    <span class="keyword">pub</span> accounts: <span class="type">Vec</span>&lt;AccountMeta&gt;,
+    
+    <span class="comment">/// 指令数据（序列化后的参数）</span>
+    <span class="keyword">pub</span> data: <span class="type">Vec</span>&lt;<span class="type">u8</span>&gt;,
+&#125;
+
+<span class="comment">/// 账户元信息 —— 描述每个账户的权限</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">AccountMeta</span> &#123;
+    <span class="comment">/// 账户公钥</span>
+    <span class="keyword">pub</span> pubkey: Pubkey,
+    
+    <span class="comment">/// 是否需要签名</span>
+    <span class="keyword">pub</span> is_signer: <span class="type">bool</span>,
+    
+    <span class="comment">/// 是否可写</span>
+    <span class="keyword">pub</span> is_writable: <span class="type">bool</span>,
+&#125;
+
+<span class="comment">// AccountMeta 的便捷构造方法</span>
+<span class="keyword">impl</span> <span class="title class_">AccountMeta</span> &#123;
+    <span class="comment">/// 可写 + 需签名</span>
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">new</span>(pubkey: Pubkey, is_signer: <span class="type">bool</span>) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123;
+        <span class="keyword">Self</span> &#123; pubkey, is_signer, is_writable: <span class="literal">true</span> &#125;
+    &#125;
+    
+    <span class="comment">/// 只读 + 需签名/不需签名</span>
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">new_readonly</span>(pubkey: Pubkey, is_signer: <span class="type">bool</span>) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123;
+        <span class="keyword">Self</span> &#123; pubkey, is_signer, is_writable: <span class="literal">false</span> &#125;
+    &#125;
+&#125;</code></pre>
+
+<h3 id="3-3-CompiledInstruction（编译后的指令）"><a href="#3-3-CompiledInstruction（编译后的指令）" class="headerlink" title="3.3 CompiledInstruction（编译后的指令）"></a>3.3 CompiledInstruction（编译后的指令）</h3><p>在交易内部，指令以压缩形式存储（使用索引而非完整公钥）：</p>
+<pre><code class="highlight rust"><span class="comment">/// 交易 Message 中实际存储的编译后指令</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">CompiledInstruction</span> &#123;
+    <span class="comment">/// program_id 在 account_keys 数组中的索引</span>
+    <span class="keyword">pub</span> program_id_index: <span class="type">u8</span>,
+    
+    <span class="comment">/// 各账户在 account_keys 数组中的索引列表</span>
+    <span class="keyword">pub</span> accounts: <span class="type">Vec</span>&lt;<span class="type">u8</span>&gt;,
+    
+    <span class="comment">/// 指令数据</span>
+    <span class="keyword">pub</span> data: <span class="type">Vec</span>&lt;<span class="type">u8</span>&gt;,
+&#125;</code></pre>
+
+<pre><code class="highlight plaintext">Instruction → CompiledInstruction 的转换过程：
+
+原始 Instruction:
+  program_id: TokenProgram (TProg111...)
+  accounts: [
+    &#123; pubkey: Alice (AAA...), is_signer: true, is_writable: true &#125;,
+    &#123; pubkey: Bob   (BBB...), is_signer: false, is_writable: true &#125;,
+  ]
+  data: [3, 0, 0, 0, 232, 3, 0, 0, 0, 0, 0, 0]  // Transfer 1000
+
+                    ║
+                    ▼   编译过程（公钥 → 索引）
+
+Transaction.message.account_keys:
+  索引 0: Alice   (AAA...)   ← 签名者, 可写, Fee Payer
+  索引 1: Bob     (BBB...)   ← 非签名者, 可写
+  索引 2: TProg   (TProg...) ← 非签名者, 只读
+
+CompiledInstruction:
+  program_id_index: 2        // TokenProgram 在索引 2
+  accounts: [0, 1]           // Alice=0, Bob=1
+  data: [3, 0, 0, 0, 232, 3, 0, 0, 0, 0, 0, 0]</code></pre>
+
+<h3 id="3-4-AccountMeta-权限组合"><a href="#3-4-AccountMeta-权限组合" class="headerlink" title="3.4 AccountMeta 权限组合"></a>3.4 AccountMeta 权限组合</h3><pre><code class="highlight plaintext">┌──────────────────────────────────────────────────────┐
+│           AccountMeta 四种权限组合                     │
+├──────────────────────────────────────────────────────┤
+│                                                      │
+│  ┌──────────────┬───────────┬──────────┬───────────┐ │
+│  │   权限组合    │ is_signer │is_writable│  用途     │ │
+│  ├──────────────┼───────────┼──────────┼───────────┤ │
+│  │ 签名 + 可写   │   true    │   true   │ 付费者    │ │
+│  │              │           │          │ 转出方    │ │
+│  ├──────────────┼───────────┼──────────┼───────────┤ │
+│  │ 签名 + 只读   │   true    │  false   │ 多签中    │ │
+│  │              │           │          │ 的授权者  │ │
+│  ├──────────────┼───────────┼──────────┼───────────┤ │
+│  │ 无签名 + 可写 │  false    │   true   │ 接收方    │ │
+│  │              │           │          │ 数据账户  │ │
+│  ├──────────────┼───────────┼──────────┼───────────┤ │
+│  │ 无签名 + 只读 │  false    │  false   │ 程序ID   │ │
+│  │              │           │          │ Sysvar   │ │
+│  └──────────────┴───────────┴──────────┴───────────┘ │
+└──────────────────────────────────────────────────────┘</code></pre>
+
+<hr>
+<h2 id="四、交易生命周期"><a href="#四、交易生命周期" class="headerlink" title="四、交易生命周期"></a>四、交易生命周期</h2><h3 id="4-1-交易从构建到确认的完整流程"><a href="#4-1-交易从构建到确认的完整流程" class="headerlink" title="4.1 交易从构建到确认的完整流程"></a>4.1 交易从构建到确认的完整流程</h3><pre><code class="highlight plaintext">┌──────────────────────────────────────────────────────────────────┐
+│                    Solana 交易生命周期                              │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ① 构建交易 ──► ② 签名 ──► ③ 发送到 RPC ──► ④ 转发到 Leader      │
+│                                                                  │
+│       ┌──────────────────────────────────────────────────┐       │
+│       │                Leader 验证节点                     │       │
+│       │                                                  │       │
+│       │  ⑤ 签名验证 ──► ⑥ 预检查 ──► ⑦ 加载账户           │       │
+│       │                                                  │       │
+│       │  ⑧ SVM 执行 ──► ⑨ 记录结果 ──► ⑩ 广播区块         │       │
+│       │                                                  │       │
+│       └──────────────────────────────────────────────────┘       │
+│                                                                  │
+│  ⑪ 其他验证节点验证 ──► ⑫ 达到确认级别 ──► ⑬ 最终确定（Finalized）│
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘</code></pre>
+
+<h3 id="4-2-各阶段详解"><a href="#4-2-各阶段详解" class="headerlink" title="4.2 各阶段详解"></a>4.2 各阶段详解</h3><pre><code class="highlight plaintext">阶段              说明                                   失败原因
+─────────────────────────────────────────────────────────────────────
+① 构建交易        创建指令、组装交易                       格式错误
+② 签名           用私钥对 Message 签名                    签名不匹配
+③ 发送 RPC       通过 sendTransaction 发送               RPC 节点故障
+④ 转发 Leader    RPC 转发给当前 Slot 的 Leader            网络延迟
+⑤ 签名验证       验证所有签名是否有效                      签名无效
+⑥ 预检查         检查 blockhash 是否过期、费用是否足够      blockhash过期
+                                                        余额不足
+⑦ 加载账户       从 AccountsDB 加载所有声明的账户          账户不存在
+⑧ SVM 执行       执行所有指令                             程序错误
+                                                        计算超限(CU)
+⑨ 记录结果       将交易结果写入区块                        -
+⑩ 广播区块       Leader 将区块广播给网络                   -
+⑪ 验证确认       其他节点验证区块                          -
+⑫ 确认级别       processed → confirmed → finalized       -
+⑬ 最终确定       达到 2/3 超级多数确认                     -</code></pre>
+
+<h3 id="4-3-确认级别（Commitment-Levels）"><a href="#4-3-确认级别（Commitment-Levels）" class="headerlink" title="4.3 确认级别（Commitment Levels）"></a>4.3 确认级别（Commitment Levels）</h3><pre><code class="highlight plaintext">┌─────────────────────────────────────────────────────────────┐
+│                    确认级别 (Commitment)                      │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  processed        confirmed          finalized              │
+│  ─────────►       ─────────────►     ────────────────►      │
+│                                                             │
+│  ┌──────────┐     ┌──────────────┐   ┌─────────────────┐   │
+│  │ Leader   │     │ 超级多数投票  │   │ 超级多数已root   │   │
+│  │ 已处理    │     │ (66%+ stake) │   │  不可回滚        │   │
+│  │          │     │              │   │                 │   │
+│  │ 速度:最快 │     │ 速度:中等     │   │ 速度:最慢        │   │
+│  │ 安全:最低 │     │ 安全:中等     │   │ 安全:最高        │   │
+│  │ ~0.5s    │     │ ~5-6s        │   │ ~12-15s         │   │
+│  └──────────┘     └──────────────┘   └─────────────────┘   │
+│                                                             │
+│  推荐使用场景：                                               │
+│  • processed  → UI 即时反馈                                  │
+│  • confirmed  → 大多数 DApp（默认推荐）                       │
+│  • finalized  → 涉及大额资金、交易所充提                      │
+└─────────────────────────────────────────────────────────────┘</code></pre>
+
+<hr>
+<h2 id="五、计算预算（Compute-Budget）"><a href="#五、计算预算（Compute-Budget）" class="headerlink" title="五、计算预算（Compute Budget）"></a>五、计算预算（Compute Budget）</h2><h3 id="5-1-计算单元（Compute-Units-CU）"><a href="#5-1-计算单元（Compute-Units-CU）" class="headerlink" title="5.1 计算单元（Compute Units, CU）"></a>5.1 计算单元（Compute Units, CU）</h3><p>Solana 使用 <strong>计算单元（CU）</strong> 来度量交易消耗的计算资源，类似以太坊的 Gas。</p>
+<pre><code class="highlight plaintext">┌─────────────────────────────────────────────────────────┐
+│                  计算预算 (Compute Budget)                │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│  每笔交易默认：                                           │
+│  • 200,000 CU / 指令（默认上限）                          │
+│  • 1,400,000 CU / 交易（最大上限）                        │
+│                                                         │
+│  每个区块：                                               │
+│  • 48,000,000 CU / 区块（总上限）                         │
+│                                                         │
+│  常见操作的 CU 消耗：                                     │
+│  ┌────────────────────────┬───────────┐                  │
+│  │ 操作                    │ CU 消耗   │                  │
+│  ├────────────────────────┼───────────┤                  │
+│  │ 创建账户                │ ~3,000    │                  │
+│  │ SOL 转账                │ ~450      │                  │
+│  │ SPL Token 转账          │ ~4,000    │                  │
+│  │ 日志输出 (msg!)         │ ~100/条   │                  │
+│  │ SHA256 哈希             │ ~100/64B  │                  │
+│  │ 系统调用 (CPI)          │ ~1,000+   │                  │
+│  └────────────────────────┴───────────┘                  │
+│                                                         │
+│  优先费 (Priority Fee)：                                  │
+│  price = micro_lamports / CU                            │
+│  费用 = price × requested_CU                             │
+└─────────────────────────────────────────────────────────┘</code></pre>
+
+<h3 id="5-2-设置-Compute-Budget-指令"><a href="#5-2-设置-Compute-Budget-指令" class="headerlink" title="5.2 设置 Compute Budget 指令"></a>5.2 设置 Compute Budget 指令</h3><pre><code class="highlight rust"><span class="keyword">use</span> solana_sdk::compute_budget::ComputeBudgetInstruction;
+
+<span class="comment">// 1. 设置计算单元上限（默认 200,000）</span>
+<span class="keyword">let</span> <span class="variable">set_cu_limit</span> = ComputeBudgetInstruction::<span class="title function_ invoke__">set_compute_unit_limit</span>(<span class="number">300_000</span>);
+
+<span class="comment">// 2. 设置优先费（提高交易被打包的优先级）</span>
+<span class="comment">// 单位: micro-lamports per CU</span>
+<span class="keyword">let</span> <span class="variable">set_priority_fee</span> = ComputeBudgetInstruction::<span class="title function_ invoke__">set_compute_unit_price</span>(<span class="number">50_000</span>);
+
+<span class="comment">// 将 Compute Budget 指令加入交易</span>
+<span class="keyword">let</span> <span class="variable">transaction</span> = Transaction::<span class="title function_ invoke__">new_signed_with_payer</span>(
+    &amp;[
+        set_cu_limit,          <span class="comment">// 指令 1: 调整 CU 上限</span>
+        set_priority_fee,      <span class="comment">// 指令 2: 设置优先费</span>
+        transfer_instruction,  <span class="comment">// 指令 3: 实际业务指令</span>
+    ],
+    <span class="title function_ invoke__">Some</span>(&amp;payer.<span class="title function_ invoke__">pubkey</span>()),
+    &amp;[&amp;payer],
+    recent_blockhash,
+);</code></pre>
+
+<pre><code class="highlight typescript"><span class="keyword">import</span> &#123; <span class="title class_">ComputeBudgetProgram</span>, <span class="title class_">Transaction</span> &#125; <span class="keyword">from</span> <span class="string">&quot;@solana/web3.js&quot;</span>;
+
+<span class="comment">// 设置计算单元上限</span>
+<span class="keyword">const</span> modifyComputeUnits = <span class="title class_">ComputeBudgetProgram</span>.<span class="title function_">setComputeUnitLimit</span>(&#123;
+  <span class="attr">units</span>: <span class="number">300_000</span>,
+&#125;);
+
+<span class="comment">// 设置优先费（micro-lamports per CU）</span>
+<span class="keyword">const</span> addPriorityFee = <span class="title class_">ComputeBudgetProgram</span>.<span class="title function_">setComputeUnitPrice</span>(&#123;
+  <span class="attr">microLamports</span>: <span class="number">50_000</span>,
+&#125;);
+
+<span class="keyword">const</span> transaction = <span class="keyword">new</span> <span class="title class_">Transaction</span>()
+  .<span class="title function_">add</span>(modifyComputeUnits)
+  .<span class="title function_">add</span>(addPriorityFee)
+  .<span class="title function_">add</span>(transferInstruction);</code></pre>
+
+<hr>
+<h2 id="六、实战代码示例"><a href="#六、实战代码示例" class="headerlink" title="六、实战代码示例"></a>六、实战代码示例</h2><h3 id="6-1-SOL-转账-——-完整示例"><a href="#6-1-SOL-转账-——-完整示例" class="headerlink" title="6.1 SOL 转账 —— 完整示例"></a>6.1 SOL 转账 —— 完整示例</h3><h4 id="TypeScript-版本（-solana-web3-js）"><a href="#TypeScript-版本（-solana-web3-js）" class="headerlink" title="TypeScript 版本（@solana&#x2F;web3.js）"></a>TypeScript 版本（@solana&#x2F;web3.js）</h4><pre><code class="highlight typescript"><span class="keyword">import</span> &#123;
+  <span class="title class_">Connection</span>,
+  <span class="title class_">Keypair</span>,
+  <span class="variable constant_">LAMPORTS_PER_SOL</span>,
+  <span class="title class_">PublicKey</span>,
+  <span class="title class_">SystemProgram</span>,
+  <span class="title class_">Transaction</span>,
+  sendAndConfirmTransaction,
+&#125; <span class="keyword">from</span> <span class="string">&quot;@solana/web3.js&quot;</span>;
+
+<span class="keyword">async</span> <span class="keyword">function</span> <span class="title function_">transferSOL</span>(<span class="params"></span>) &#123;
+  <span class="comment">// 1. 建立连接</span>
+  <span class="keyword">const</span> connection = <span class="keyword">new</span> <span class="title class_">Connection</span>(
+    <span class="string">&quot;https://api.devnet.solana.com&quot;</span>,
+    <span class="string">&quot;confirmed&quot;</span>
+  );
+
+  <span class="comment">// 2. 创建发送者钱包（实际项目中从密钥文件加载）</span>
+  <span class="keyword">const</span> sender = <span class="title class_">Keypair</span>.<span class="title function_">generate</span>();
+
+  <span class="comment">// 3. 空投 2 SOL 到发送者（仅 devnet）</span>
+  <span class="keyword">const</span> airdropSig = <span class="keyword">await</span> connection.<span class="title function_">requestAirdrop</span>(
+    sender.<span class="property">publicKey</span>,
+    <span class="number">2</span> * <span class="variable constant_">LAMPORTS_PER_SOL</span>
+  );
+  <span class="keyword">await</span> connection.<span class="title function_">confirmTransaction</span>(airdropSig, <span class="string">&quot;confirmed&quot;</span>);
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;✅ 空投完成，余额: 2 SOL&quot;</span>);
+
+  <span class="comment">// 4. 接收者地址</span>
+  <span class="keyword">const</span> receiver = <span class="keyword">new</span> <span class="title class_">PublicKey</span>(
+    <span class="string">&quot;DemoReceiverAddress1111111111111111111111111&quot;</span>
+  );
+
+  <span class="comment">// 5. 构建转账指令</span>
+  <span class="keyword">const</span> transferInstruction = <span class="title class_">SystemProgram</span>.<span class="title function_">transfer</span>(&#123;
+    <span class="attr">fromPubkey</span>: sender.<span class="property">publicKey</span>,  <span class="comment">// 发送者（签名者 + 可写）</span>
+    <span class="attr">toPubkey</span>: receiver,            <span class="comment">// 接收者（可写）</span>
+    <span class="attr">lamports</span>: <span class="number">0.5</span> * <span class="variable constant_">LAMPORTS_PER_SOL</span>, <span class="comment">// 转账 0.5 SOL</span>
+  &#125;);
+
+  <span class="comment">// 6. 构建交易</span>
+  <span class="keyword">const</span> transaction = <span class="keyword">new</span> <span class="title class_">Transaction</span>().<span class="title function_">add</span>(transferInstruction);
+
+  <span class="comment">// 7. 签名并发送交易</span>
+  <span class="keyword">const</span> signature = <span class="keyword">await</span> <span class="title function_">sendAndConfirmTransaction</span>(
+    connection,
+    transaction,
+    [sender],  <span class="comment">// 签名者列表</span>
+    &#123; <span class="attr">commitment</span>: <span class="string">&quot;confirmed&quot;</span> &#125;
+  );
+
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;✅ 交易成功！&quot;</span>);
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;签名:&quot;</span>, signature);
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(
+    <span class="string">`浏览器查看: https://explorer.solana.com/tx/<span class="subst">$&#123;signature&#125;</span>?cluster=devnet`</span>
+  );
+&#125;
+
+<span class="title function_">transferSOL</span>().<span class="title function_">catch</span>(<span class="variable language_">console</span>.<span class="property">error</span>);</code></pre>
+
+<h4 id="Rust-版本（solana-sdk）"><a href="#Rust-版本（solana-sdk）" class="headerlink" title="Rust 版本（solana-sdk）"></a>Rust 版本（solana-sdk）</h4><pre><code class="highlight rust"><span class="keyword">use</span> solana_client::rpc_client::RpcClient;
+<span class="keyword">use</span> solana_sdk::&#123;
+    commitment_config::CommitmentConfig,
+    native_token::LAMPORTS_PER_SOL,
+    pubkey::Pubkey,
+    signature::&#123;Keypair, Signer&#125;,
+    system_instruction,
+    transaction::Transaction,
+&#125;;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;(), <span class="type">Box</span>&lt;<span class="keyword">dyn</span> std::error::Error&gt;&gt; &#123;
+    <span class="comment">// 1. 连接到 devnet</span>
+    <span class="keyword">let</span> <span class="variable">rpc_url</span> = <span class="string">&quot;https://api.devnet.solana.com&quot;</span>.<span class="title function_ invoke__">to_string</span>();
+    <span class="keyword">let</span> <span class="variable">client</span> = RpcClient::<span class="title function_ invoke__">new_with_commitment</span>(
+        rpc_url, 
+        CommitmentConfig::<span class="title function_ invoke__">confirmed</span>()
+    );
+
+    <span class="comment">// 2. 创建发送者密钥对</span>
+    <span class="keyword">let</span> <span class="variable">sender</span> = Keypair::<span class="title function_ invoke__">new</span>();
+    <span class="built_in">println!</span>(<span class="string">&quot;发送者地址: &#123;&#125;&quot;</span>, sender.<span class="title function_ invoke__">pubkey</span>());
+
+    <span class="comment">// 3. 请求空投（仅 devnet）</span>
+    <span class="keyword">let</span> <span class="variable">airdrop_sig</span> = client.<span class="title function_ invoke__">request_airdrop</span>(
+        &amp;sender.<span class="title function_ invoke__">pubkey</span>(), 
+        <span class="number">2</span> * LAMPORTS_PER_SOL
+    )?;
+    client.<span class="title function_ invoke__">confirm_transaction</span>(&amp;airdrop_sig)?;
+    <span class="built_in">println!</span>(<span class="string">&quot;✅ 空投 2 SOL 完成&quot;</span>);
+
+    <span class="comment">// 4. 接收者地址</span>
+    <span class="keyword">let</span> <span class="variable">receiver</span> = Keypair::<span class="title function_ invoke__">new</span>();
+    
+    <span class="comment">// 5. 构建转账指令</span>
+    <span class="keyword">let</span> <span class="variable">transfer_ix</span> = system_instruction::<span class="title function_ invoke__">transfer</span>(
+        &amp;sender.<span class="title function_ invoke__">pubkey</span>(),     <span class="comment">// from（签名者 + 可写）</span>
+        &amp;receiver.<span class="title function_ invoke__">pubkey</span>(),   <span class="comment">// to（可写）</span>
+        LAMPORTS_PER_SOL / <span class="number">2</span>, <span class="comment">// 0.5 SOL</span>
+    );
+
+    <span class="comment">// 6. 获取最新 blockhash</span>
+    <span class="keyword">let</span> <span class="variable">recent_blockhash</span> = client.<span class="title function_ invoke__">get_latest_blockhash</span>()?;
+
+    <span class="comment">// 7. 构建并签名交易</span>
+    <span class="keyword">let</span> <span class="variable">transaction</span> = Transaction::<span class="title function_ invoke__">new_signed_with_payer</span>(
+        &amp;[transfer_ix],           <span class="comment">// 指令列表</span>
+        <span class="title function_ invoke__">Some</span>(&amp;sender.<span class="title function_ invoke__">pubkey</span>()),   <span class="comment">// Fee Payer</span>
+        &amp;[&amp;sender],               <span class="comment">// 签名者列表</span>
+        recent_blockhash,         <span class="comment">// 最新 blockhash</span>
+    );
+
+    <span class="comment">// 8. 发送交易</span>
+    <span class="keyword">let</span> <span class="variable">signature</span> = client.<span class="title function_ invoke__">send_and_confirm_transaction</span>(&amp;transaction)?;
+    <span class="built_in">println!</span>(<span class="string">&quot;✅ 交易成功！签名: &#123;&#125;&quot;</span>, signature);
+
+    <span class="comment">// 9. 查询结果</span>
+    <span class="keyword">let</span> <span class="variable">balance</span> = client.<span class="title function_ invoke__">get_balance</span>(&amp;receiver.<span class="title function_ invoke__">pubkey</span>())?;
+    <span class="built_in">println!</span>(<span class="string">&quot;接收者余额: &#123;&#125; SOL&quot;</span>, balance <span class="keyword">as</span> <span class="type">f64</span> / LAMPORTS_PER_SOL <span class="keyword">as</span> <span class="type">f64</span>);
+
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;</code></pre>
+
+<h3 id="6-2-多指令交易-——-批量操作"><a href="#6-2-多指令交易-——-批量操作" class="headerlink" title="6.2 多指令交易 —— 批量操作"></a>6.2 多指令交易 —— 批量操作</h3><p>一笔交易可以包含多条指令，它们<strong>原子性执行</strong>（全部成功或全部回滚）：</p>
+<pre><code class="highlight typescript"><span class="keyword">import</span> &#123;
+  <span class="title class_">Connection</span>,
+  <span class="title class_">Keypair</span>,
+  <span class="variable constant_">LAMPORTS_PER_SOL</span>,
+  <span class="title class_">SystemProgram</span>,
+  <span class="title class_">Transaction</span>,
+  sendAndConfirmTransaction,
+  <span class="title class_">ComputeBudgetProgram</span>,
+&#125; <span class="keyword">from</span> <span class="string">&quot;@solana/web3.js&quot;</span>;
+
+<span class="keyword">async</span> <span class="keyword">function</span> <span class="title function_">multiInstructionTransaction</span>(<span class="params"></span>) &#123;
+  <span class="keyword">const</span> connection = <span class="keyword">new</span> <span class="title class_">Connection</span>(
+    <span class="string">&quot;https://api.devnet.solana.com&quot;</span>,
+    <span class="string">&quot;confirmed&quot;</span>
+  );
+  <span class="keyword">const</span> payer = <span class="title class_">Keypair</span>.<span class="title function_">generate</span>();
+
+  <span class="comment">// 空投</span>
+  <span class="keyword">const</span> sig = <span class="keyword">await</span> connection.<span class="title function_">requestAirdrop</span>(
+    payer.<span class="property">publicKey</span>,
+    <span class="number">5</span> * <span class="variable constant_">LAMPORTS_PER_SOL</span>
+  );
+  <span class="keyword">await</span> connection.<span class="title function_">confirmTransaction</span>(sig);
+
+  <span class="comment">// 创建 3 个接收者</span>
+  <span class="keyword">const</span> receiver1 = <span class="title class_">Keypair</span>.<span class="title function_">generate</span>();
+  <span class="keyword">const</span> receiver2 = <span class="title class_">Keypair</span>.<span class="title function_">generate</span>();
+  <span class="keyword">const</span> receiver3 = <span class="title class_">Keypair</span>.<span class="title function_">generate</span>();
+
+  <span class="comment">// 构建包含多条指令的交易</span>
+  <span class="keyword">const</span> transaction = <span class="keyword">new</span> <span class="title class_">Transaction</span>();
+
+  <span class="comment">// 指令 1: 设置优先费</span>
+  transaction.<span class="title function_">add</span>(
+    <span class="title class_">ComputeBudgetProgram</span>.<span class="title function_">setComputeUnitPrice</span>(&#123;
+      <span class="attr">microLamports</span>: <span class="number">10_000</span>,
+    &#125;)
+  );
+
+  <span class="comment">// 指令 2: 转 1 SOL 给 receiver1</span>
+  transaction.<span class="title function_">add</span>(
+    <span class="title class_">SystemProgram</span>.<span class="title function_">transfer</span>(&#123;
+      <span class="attr">fromPubkey</span>: payer.<span class="property">publicKey</span>,
+      <span class="attr">toPubkey</span>: receiver1.<span class="property">publicKey</span>,
+      <span class="attr">lamports</span>: <span class="number">1</span> * <span class="variable constant_">LAMPORTS_PER_SOL</span>,
+    &#125;)
+  );
+
+  <span class="comment">// 指令 3: 转 0.5 SOL 给 receiver2</span>
+  transaction.<span class="title function_">add</span>(
+    <span class="title class_">SystemProgram</span>.<span class="title function_">transfer</span>(&#123;
+      <span class="attr">fromPubkey</span>: payer.<span class="property">publicKey</span>,
+      <span class="attr">toPubkey</span>: receiver2.<span class="property">publicKey</span>,
+      <span class="attr">lamports</span>: <span class="number">0.5</span> * <span class="variable constant_">LAMPORTS_PER_SOL</span>,
+    &#125;)
+  );
+
+  <span class="comment">// 指令 4: 转 0.3 SOL 给 receiver3</span>
+  transaction.<span class="title function_">add</span>(
+    <span class="title class_">SystemProgram</span>.<span class="title function_">transfer</span>(&#123;
+      <span class="attr">fromPubkey</span>: payer.<span class="property">publicKey</span>,
+      <span class="attr">toPubkey</span>: receiver3.<span class="property">publicKey</span>,
+      <span class="attr">lamports</span>: <span class="number">0.3</span> * <span class="variable constant_">LAMPORTS_PER_SOL</span>,
+    &#125;)
+  );
+
+  <span class="comment">// 原子性发送 —— 4 条指令全部成功或全部回滚</span>
+  <span class="keyword">const</span> txSig = <span class="keyword">await</span> <span class="title function_">sendAndConfirmTransaction</span>(
+    connection,
+    transaction,
+    [payer]
+  );
+
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;✅ 批量转账成功:&quot;</span>, txSig);
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Receiver1:&quot;</span>, <span class="keyword">await</span> connection.<span class="title function_">getBalance</span>(receiver1.<span class="property">publicKey</span>));
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Receiver2:&quot;</span>, <span class="keyword">await</span> connection.<span class="title function_">getBalance</span>(receiver2.<span class="property">publicKey</span>));
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Receiver3:&quot;</span>, <span class="keyword">await</span> connection.<span class="title function_">getBalance</span>(receiver3.<span class="property">publicKey</span>));
+&#125;
+
+<span class="title function_">multiInstructionTransaction</span>();</code></pre>
+
+<pre><code class="highlight plaintext">多指令交易执行流程：
+
+Transaction &#123;
+  instructions: [
+    Instr#1: ComputeBudget::SetPrice(10000),
+    Instr#2: SystemProgram::Transfer(payer → R1, 1 SOL),
+    Instr#3: SystemProgram::Transfer(payer → R2, 0.5 SOL),
+    Instr#4: SystemProgram::Transfer(payer → R3, 0.3 SOL),
+  ]
+&#125;
+
+SVM 执行：
+  ┌─────────────────────────────────────────────┐
+  │ 执行 Instr#1 ✅ → 设置优先费参数             │
+  │ 执行 Instr#2 ✅ → payer -1 SOL, R1 +1 SOL   │
+  │ 执行 Instr#3 ✅ → payer -0.5 SOL, R2 +0.5   │
+  │ 执行 Instr#4 ✅ → payer -0.3 SOL, R3 +0.3   │
+  │                                             │
+  │ 全部成功 → 提交状态变更 ✅                    │
+  └─────────────────────────────────────────────┘
+
+如果 Instr#3 失败（如余额不足）：
+  ┌─────────────────────────────────────────────┐
+  │ 执行 Instr#1 ✅                              │
+  │ 执行 Instr#2 ✅                              │
+  │ 执行 Instr#3 ❌ → 错误！                     │
+  │                                             │
+  │ 整笔交易回滚 → 所有变更撤销 ❌                 │
+  │ （但仍扣除手续费）                            │
+  └─────────────────────────────────────────────┘</code></pre>
+
+<h3 id="6-3-创建账户并初始化数据-——-自定义-Program-交互"><a href="#6-3-创建账户并初始化数据-——-自定义-Program-交互" class="headerlink" title="6.3 创建账户并初始化数据 —— 自定义 Program 交互"></a>6.3 创建账户并初始化数据 —— 自定义 Program 交互</h3><pre><code class="highlight rust"><span class="keyword">use</span> borsh::&#123;BorshDeserialize, BorshSerialize&#125;;
+<span class="keyword">use</span> solana_sdk::&#123;
+    instruction::&#123;AccountMeta, Instruction&#125;,
+    pubkey::Pubkey,
+    system_instruction,
+    transaction::Transaction,
+&#125;;
+
+<span class="comment">/// 自定义程序的数据结构</span>
+<span class="meta">#[derive(BorshSerialize, BorshDeserialize, Debug)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">CounterAccount</span> &#123;
+    <span class="keyword">pub</span> count: <span class="type">u64</span>,
+    <span class="keyword">pub</span> authority: Pubkey,
+&#125;
+
+<span class="comment">/// 自定义程序的指令枚举</span>
+<span class="meta">#[derive(BorshSerialize, BorshDeserialize)]</span>
+<span class="keyword">pub</span> <span class="keyword">enum</span> <span class="title class_">CounterInstruction</span> &#123;
+    <span class="comment">/// 初始化计数器</span>
+    Initialize,
+    <span class="comment">/// 增加计数</span>
+    Increment &#123; amount: <span class="type">u64</span> &#125;,
+    <span class="comment">/// 减少计数</span>
+    Decrement &#123; amount: <span class="type">u64</span> &#125;,
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">build_initialize_transaction</span>(
+    payer: &amp;Keypair,
+    counter_account: &amp;Keypair,
+    program_id: &amp;Pubkey,
+    recent_blockhash: Hash,
+) <span class="punctuation">-&gt;</span> Transaction &#123;
+    <span class="comment">// 计算存储 CounterAccount 所需的空间</span>
+    <span class="keyword">let</span> <span class="variable">space</span> = <span class="number">8</span> + <span class="number">32</span>; <span class="comment">// u64(8 bytes) + Pubkey(32 bytes) = 40 bytes</span>
+    
+    <span class="comment">// 计算租金豁免所需的最低余额</span>
+    <span class="keyword">let</span> <span class="variable">rent</span> = Rent::<span class="title function_ invoke__">default</span>().<span class="title function_ invoke__">minimum_balance</span>(space);
+
+    <span class="comment">// 指令 1: 创建账户（System Program）</span>
+    <span class="keyword">let</span> <span class="variable">create_account_ix</span> = system_instruction::<span class="title function_ invoke__">create_account</span>(
+        &amp;payer.<span class="title function_ invoke__">pubkey</span>(),           <span class="comment">// 资金来源（付租金）</span>
+        &amp;counter_account.<span class="title function_ invoke__">pubkey</span>(), <span class="comment">// 新账户地址</span>
+        rent,                      <span class="comment">// 需要存入的 lamports</span>
+        space <span class="keyword">as</span> <span class="type">u64</span>,              <span class="comment">// 数据空间大小</span>
+        program_id,                <span class="comment">// 新账户的 owner</span>
+    );
+
+    <span class="comment">// 指令 2: 初始化计数器（自定义 Program）</span>
+    <span class="keyword">let</span> <span class="variable">init_data</span> = CounterInstruction::Initialize
+        .<span class="title function_ invoke__">try_to_vec</span>()
+        .<span class="title function_ invoke__">unwrap</span>();
+    
+    <span class="keyword">let</span> <span class="variable">initialize_ix</span> = Instruction &#123;
+        program_id: *program_id,
+        accounts: <span class="built_in">vec!</span>[
+            AccountMeta::<span class="title function_ invoke__">new</span>(counter_account.<span class="title function_ invoke__">pubkey</span>(), <span class="literal">false</span>), <span class="comment">// 可写</span>
+            AccountMeta::<span class="title function_ invoke__">new</span>(payer.<span class="title function_ invoke__">pubkey</span>(), <span class="literal">true</span>),            <span class="comment">// 签名者 + 可写</span>
+            AccountMeta::<span class="title function_ invoke__">new_readonly</span>(
+                solana_sdk::sysvar::rent::<span class="title function_ invoke__">id</span>(), <span class="literal">false</span>          <span class="comment">// Rent sysvar</span>
+            ),
+        ],
+        data: init_data,
+    &#125;;
+
+    <span class="comment">// 构建包含两条指令的交易</span>
+    Transaction::<span class="title function_ invoke__">new_signed_with_payer</span>(
+        &amp;[create_account_ix, initialize_ix],
+        <span class="title function_ invoke__">Some</span>(&amp;payer.<span class="title function_ invoke__">pubkey</span>()),
+        &amp;[payer, counter_account], <span class="comment">// 两个账户都需要签名</span>
+        recent_blockhash,
+    )
+&#125;</code></pre>
+
+<h3 id="6-4-CPI（Cross-Program-Invocation）——-跨程序调用"><a href="#6-4-CPI（Cross-Program-Invocation）——-跨程序调用" class="headerlink" title="6.4 CPI（Cross-Program Invocation）—— 跨程序调用"></a>6.4 CPI（Cross-Program Invocation）—— 跨程序调用</h3><p>CPI 是 Solana 中程序之间相互调用的机制：</p>
+<pre><code class="highlight plaintext">┌──────────────────────────────────────────────────────────┐
+│                CPI（跨程序调用）示例                        │
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│  用户发起交易：调用 Program A                               │
+│                                                          │
+│  ┌─────────────────────────────┐                         │
+│  │       Program A             │                         │
+│  │                             │                         │
+│  │  1. 处理业务逻辑             │                         │
+│  │  2. 构建 CPI 指令            │                         │
+│  │  3. invoke() 调用 Program B │                         │
+│  │        │                    │                         │
+│  └────────┼────────────────────┘                         │
+│           │                                              │
+│           ▼  CPI                                         │
+│  ┌─────────────────────────────┐                         │
+│  │       Program B             │                         │
+│  │  (例如 Token Program)       │                         │
+│  │                             │                         │
+│  │  执行 Token 转账            │                         │
+│  │  返回结果给 Program A       │                         │
+│  └─────────────────────────────┘                         │
+│                                                          │
+│  CPI 调用深度限制: 最多 4 层                               │
+│  Program A → B → C → D (最多4层嵌套)                      │
+└──────────────────────────────────────────────────────────┘</code></pre>
+
+<p><strong>Anchor 框架中的 CPI 示例</strong>：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> anchor_lang::prelude::*;
+<span class="keyword">use</span> anchor_spl::token::&#123;<span class="keyword">self</span>, Token, TokenAccount, Transfer&#125;;
+
+declare_id!(<span class="string">&quot;YourProgramId11111111111111111111&quot;</span>);
+
+<span class="meta">#[program]</span>
+<span class="keyword">pub</span> <span class="keyword">mod</span> my_program &#123;
+    <span class="keyword">use</span> super::*;
+
+    <span class="comment">/// 通过 CPI 调用 Token Program 进行转账</span>
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">transfer_tokens</span>(ctx: Context&lt;TransferTokens&gt;, amount: <span class="type">u64</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;()&gt; &#123;
+        <span class="comment">// 构建 CPI 上下文</span>
+        <span class="keyword">let</span> <span class="variable">cpi_accounts</span> = Transfer &#123;
+            from: ctx.accounts.from_token_account.<span class="title function_ invoke__">to_account_info</span>(),
+            to: ctx.accounts.to_token_account.<span class="title function_ invoke__">to_account_info</span>(),
+            authority: ctx.accounts.authority.<span class="title function_ invoke__">to_account_info</span>(),
+        &#125;;
+        
+        <span class="keyword">let</span> <span class="variable">cpi_program</span> = ctx.accounts.token_program.<span class="title function_ invoke__">to_account_info</span>();
+        <span class="keyword">let</span> <span class="variable">cpi_ctx</span> = CpiContext::<span class="title function_ invoke__">new</span>(cpi_program, cpi_accounts);
+        
+        <span class="comment">// 执行 CPI 调用</span>
+        token::<span class="title function_ invoke__">transfer</span>(cpi_ctx, amount)?;
+        
+        msg!(<span class="string">&quot;✅ CPI 转账成功: &#123;&#125; tokens&quot;</span>, amount);
+        <span class="title function_ invoke__">Ok</span>(())
+    &#125;
+&#125;
+
+<span class="meta">#[derive(Accounts)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">TransferTokens</span>&lt;<span class="symbol">&#x27;info</span>&gt; &#123;
+    <span class="meta">#[account(mut)]</span>
+    <span class="keyword">pub</span> from_token_account: Account&lt;<span class="symbol">&#x27;info</span>, TokenAccount&gt;,
+    
+    <span class="meta">#[account(mut)]</span>
+    <span class="keyword">pub</span> to_token_account: Account&lt;<span class="symbol">&#x27;info</span>, TokenAccount&gt;,
+    
+    <span class="comment">/// 转出方的授权者，必须签名</span>
+    <span class="keyword">pub</span> authority: Signer&lt;<span class="symbol">&#x27;info</span>&gt;,
+    
+    <span class="comment">/// Token Program（CPI 目标）</span>
+    <span class="keyword">pub</span> token_program: Program&lt;<span class="symbol">&#x27;info</span>, Token&gt;,
+&#125;</code></pre>
+
+<p><strong>使用 PDA 签名的 CPI（invoke_signed）</strong>：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> solana_program::&#123;
+    account_info::AccountInfo,
+    entrypoint::ProgramResult,
+    program::invoke_signed,
+    pubkey::Pubkey,
+    system_instruction,
+&#125;;
+
+<span class="comment">/// 使用 PDA 作为签名者进行 CPI</span>
+<span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">cpi_with_pda_signer</span>(
+    program_id: &amp;Pubkey,
+    pda_account: &amp;AccountInfo,
+    recipient: &amp;AccountInfo,
+    system_program: &amp;AccountInfo,
+    amount: <span class="type">u64</span>,
+    bump_seed: <span class="type">u8</span>,
+) <span class="punctuation">-&gt;</span> ProgramResult &#123;
+    <span class="comment">// PDA 的种子</span>
+    <span class="keyword">let</span> <span class="variable">seeds</span>: &amp;[&amp;[<span class="type">u8</span>]] = &amp;[
+        <span class="string">b&quot;vault&quot;</span>,          <span class="comment">// 固定种子</span>
+        &amp;[bump_seed],      <span class="comment">// bump seed</span>
+    ];
+    <span class="keyword">let</span> <span class="variable">signer_seeds</span>: &amp;[&amp;[&amp;[<span class="type">u8</span>]]] = &amp;[seeds];
+
+    <span class="comment">// 构建转账指令</span>
+    <span class="keyword">let</span> <span class="variable">transfer_ix</span> = system_instruction::<span class="title function_ invoke__">transfer</span>(
+        pda_account.key,
+        recipient.key,
+        amount,
+    );
+
+    <span class="comment">// 使用 PDA 签名执行 CPI</span>
+    <span class="title function_ invoke__">invoke_signed</span>(
+        &amp;transfer_ix,
+        &amp;[
+            pda_account.<span class="title function_ invoke__">clone</span>(),
+            recipient.<span class="title function_ invoke__">clone</span>(),
+            system_program.<span class="title function_ invoke__">clone</span>(),
+        ],
+        signer_seeds, <span class="comment">// PDA 签名种子</span>
+    )?;
+
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;</code></pre>
+
+<hr>
+<h2 id="七、Versioned-Transaction-与-Address-Lookup-Tables"><a href="#七、Versioned-Transaction-与-Address-Lookup-Tables" class="headerlink" title="七、Versioned Transaction 与 Address Lookup Tables"></a>七、Versioned Transaction 与 Address Lookup Tables</h2><h3 id="7-1-为什么需要-Versioned-Transaction？"><a href="#7-1-为什么需要-Versioned-Transaction？" class="headerlink" title="7.1 为什么需要 Versioned Transaction？"></a>7.1 为什么需要 Versioned Transaction？</h3><p>传统交易（Legacy Transaction）受限于 1232 字节的大小限制，当涉及大量账户时容易超出。<strong>Versioned Transaction</strong> 配合 <strong>Address Lookup Table (ALT)</strong> 解决了这个问题。</p>
+<pre><code class="highlight plaintext">┌──────────────────────────────────────────────────────────┐
+│         Legacy vs Versioned Transaction                   │
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│  Legacy Transaction:                                     │
+│  ┌─────────────────────────────────────────────┐         │
+│  │ account_keys: [                              │         │
+│  │   Pubkey1 (32 bytes),  ← 完整公钥            │         │
+│  │   Pubkey2 (32 bytes),                        │         │
+│  │   Pubkey3 (32 bytes),                        │         │
+│  │   ...                                        │         │
+│  │   Pubkey20 (32 bytes), ← 20个 = 640 bytes!   │         │
+│  │ ]                                            │         │
+│  │ 空间很快用完 😢                               │         │
+│  └─────────────────────────────────────────────┘         │
+│                                                          │
+│  Versioned Transaction (v0):                             │
+│  ┌─────────────────────────────────────────────┐         │
+│  │ account_keys: [                              │         │
+│  │   Pubkey1 (32 bytes),  ← 只放必须签名的       │         │
+│  │   Pubkey2 (32 bytes),                        │         │
+│  │ ]                                            │         │
+│  │ address_table_lookups: [                     │         │
+│  │   &#123; table: ALT_Pubkey,                       │         │
+│  │     writable_indexes: [0, 3, 7],  ← 只需1字节 │         │
+│  │     readonly_indexes: [1, 2, 5],             │         │
+│  │   &#125;                                          │         │
+│  │ ]                                            │         │
+│  │ 节省大量空间 🎉                               │         │
+│  └─────────────────────────────────────────────┘         │
+└──────────────────────────────────────────────────────────┘</code></pre>
+
+<h3 id="7-2-使用-Address-Lookup-Table"><a href="#7-2-使用-Address-Lookup-Table" class="headerlink" title="7.2 使用 Address Lookup Table"></a>7.2 使用 Address Lookup Table</h3><pre><code class="highlight typescript"><span class="keyword">import</span> &#123;
+  <span class="title class_">Connection</span>,
+  <span class="title class_">Keypair</span>,
+  <span class="title class_">PublicKey</span>,
+  <span class="title class_">TransactionMessage</span>,
+  <span class="title class_">VersionedTransaction</span>,
+  <span class="title class_">AddressLookupTableProgram</span>,
+  <span class="title class_">SystemProgram</span>,
+  <span class="variable constant_">LAMPORTS_PER_SOL</span>,
+  sendAndConfirmTransaction,
+&#125; <span class="keyword">from</span> <span class="string">&quot;@solana/web3.js&quot;</span>;
+
+<span class="keyword">async</span> <span class="keyword">function</span> <span class="title function_">useAddressLookupTable</span>(<span class="params"></span>) &#123;
+  <span class="keyword">const</span> connection = <span class="keyword">new</span> <span class="title class_">Connection</span>(
+    <span class="string">&quot;https://api.devnet.solana.com&quot;</span>,
+    <span class="string">&quot;confirmed&quot;</span>
+  );
+  <span class="keyword">const</span> payer = <span class="title class_">Keypair</span>.<span class="title function_">generate</span>();
+
+  <span class="comment">// 空投</span>
+  <span class="keyword">await</span> connection.<span class="title function_">requestAirdrop</span>(payer.<span class="property">publicKey</span>, <span class="number">5</span> * <span class="variable constant_">LAMPORTS_PER_SOL</span>);
+
+  <span class="comment">// ─── 步骤 1: 创建 Address Lookup Table ───</span>
+  <span class="keyword">const</span> slot = <span class="keyword">await</span> connection.<span class="title function_">getSlot</span>();
+  <span class="keyword">const</span> [createLutIx, lutAddress] =
+    <span class="title class_">AddressLookupTableProgram</span>.<span class="title function_">createLookupTable</span>(&#123;
+      <span class="attr">authority</span>: payer.<span class="property">publicKey</span>,
+      <span class="attr">payer</span>: payer.<span class="property">publicKey</span>,
+      <span class="attr">recentSlot</span>: slot,
+    &#125;);
+
+  <span class="comment">// ─── 步骤 2: 向 LUT 中添加地址 ───</span>
+  <span class="keyword">const</span> addresses = <span class="title class_">Array</span>.<span class="title function_">from</span>(&#123; <span class="attr">length</span>: <span class="number">20</span> &#125;, <span class="function">() =&gt;</span>
+    <span class="title class_">Keypair</span>.<span class="title function_">generate</span>().<span class="property">publicKey</span>
+  );
+
+  <span class="keyword">const</span> extendIx = <span class="title class_">AddressLookupTableProgram</span>.<span class="title function_">extendLookupTable</span>(&#123;
+    <span class="attr">payer</span>: payer.<span class="property">publicKey</span>,
+    <span class="attr">authority</span>: payer.<span class="property">publicKey</span>,
+    <span class="attr">lookupTable</span>: lutAddress,
+    <span class="attr">addresses</span>: addresses,
+  &#125;);
+
+  <span class="comment">// 发送创建 + 扩展 LUT 的交易</span>
+  <span class="comment">// ...（省略发送逻辑）</span>
+
+  <span class="comment">// ─── 步骤 3: 等待 LUT 激活后使用 ───</span>
+  <span class="keyword">const</span> lutAccount = <span class="keyword">await</span> connection.<span class="title function_">getAddressLookupTable</span>(lutAddress);
+
+  <span class="comment">// ─── 步骤 4: 构建 Versioned Transaction ───</span>
+  <span class="keyword">const</span> transferIxs = addresses.<span class="title function_">map</span>(<span class="function">(<span class="params">addr</span>) =&gt;</span>
+    <span class="title class_">SystemProgram</span>.<span class="title function_">transfer</span>(&#123;
+      <span class="attr">fromPubkey</span>: payer.<span class="property">publicKey</span>,
+      <span class="attr">toPubkey</span>: addr,
+      <span class="attr">lamports</span>: <span class="number">0.001</span> * <span class="variable constant_">LAMPORTS_PER_SOL</span>,
+    &#125;)
+  );
+
+  <span class="comment">// 使用 V0 消息格式</span>
+  <span class="keyword">const</span> messageV0 = <span class="keyword">new</span> <span class="title class_">TransactionMessage</span>(&#123;
+    <span class="attr">payerKey</span>: payer.<span class="property">publicKey</span>,
+    <span class="attr">recentBlockhash</span>: (<span class="keyword">await</span> connection.<span class="title function_">getLatestBlockhash</span>()).<span class="property">blockhash</span>,
+    <span class="attr">instructions</span>: transferIxs,
+  &#125;).<span class="title function_">compileToV0Message</span>([lutAccount.<span class="property">value</span>!]); <span class="comment">// 传入 LUT</span>
+
+  <span class="keyword">const</span> versionedTx = <span class="keyword">new</span> <span class="title class_">VersionedTransaction</span>(messageV0);
+  versionedTx.<span class="title function_">sign</span>([payer]);
+
+  <span class="comment">// 发送 Versioned Transaction</span>
+  <span class="keyword">const</span> txSig = <span class="keyword">await</span> connection.<span class="title function_">sendTransaction</span>(versionedTx);
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;✅ Versioned Transaction 发送成功:&quot;</span>, txSig);
+&#125;</code></pre>
+
+<hr>
+<h2 id="八、交易错误处理与调试"><a href="#八、交易错误处理与调试" class="headerlink" title="八、交易错误处理与调试"></a>八、交易错误处理与调试</h2><h3 id="8-1-常见交易错误"><a href="#8-1-常见交易错误" class="headerlink" title="8.1 常见交易错误"></a>8.1 常见交易错误</h3><pre><code class="highlight plaintext">┌──────────────────────────────────────────────────────────────┐
+│                    常见交易错误及解决方案                       │
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│  错误                          │ 原因              │ 解决方案 │
+│  ─────────────────────────────┼──────────────────┼─────────│
+│  BlockhashNotFound            │ blockhash 过期    │ 重新获取 │
+│  InsufficientFundsForRent     │ 租金不足          │ 充值     │
+│  InsufficientFunds            │ SOL 余额不足      │ 充值     │
+│  AccountNotFound              │ 账户不存在        │ 先创建   │
+│  InvalidAccountData           │ 数据格式错误      │ 检查序列 │
+│  InvalidProgramId             │ 程序ID错误        │ 核实地址 │
+│  SignatureVerification        │ 签名无效          │ 检查私钥 │
+│  TransactionTooLarge          │ 交易超过1232字节  │ 用 ALT  │
+│  ComputationalBudgetExceeded  │ CU 超限          │ 设置上限 │
+│  AccountBorrowFailed          │ 账户被重复引用    │ 检查账户 │
+│  ProgramFailedToComplete      │ 程序执行超时      │ 优化代码 │
+│  PrivilegeEscalation          │ 权限提升错误      │ 检查权限 │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘</code></pre>
+
+<h3 id="8-2-错误处理最佳实践"><a href="#8-2-错误处理最佳实践" class="headerlink" title="8.2 错误处理最佳实践"></a>8.2 错误处理最佳实践</h3><pre><code class="highlight typescript"><span class="keyword">import</span> &#123;
+  <span class="title class_">Connection</span>,
+  <span class="title class_">Transaction</span>,
+  sendAndConfirmTransaction,
+  <span class="title class_">TransactionExpiredBlockheightExceededError</span>,
+  <span class="title class_">SendTransactionError</span>,
+&#125; <span class="keyword">from</span> <span class="string">&quot;@solana/web3.js&quot;</span>;
+
+<span class="keyword">async</span> <span class="keyword">function</span> <span class="title function_">sendWithRetry</span>(<span class="params"></span>
+<span class="params">  <span class="attr">connection</span>: <span class="title class_">Connection</span>,</span>
+<span class="params">  <span class="attr">transaction</span>: <span class="title class_">Transaction</span>,</span>
+<span class="params">  <span class="attr">signers</span>: <span class="title class_">Keypair</span>[],</span>
+<span class="params">  <span class="attr">maxRetries</span>: <span class="built_in">number</span> = <span class="number">3</span></span>
+<span class="params"></span>): <span class="title class_">Promise</span>&lt;<span class="built_in">string</span>&gt; &#123;
+  <span class="keyword">for</span> (<span class="keyword">let</span> attempt = <span class="number">1</span>; attempt &lt;= maxRetries; attempt++) &#123;
+    <span class="keyword">try</span> &#123;
+      <span class="comment">// 每次重试都获取新的 blockhash</span>
+      <span class="keyword">const</span> &#123; blockhash, lastValidBlockHeight &#125; =
+        <span class="keyword">await</span> connection.<span class="title function_">getLatestBlockhash</span>(<span class="string">&quot;confirmed&quot;</span>);
+      
+      transaction.<span class="property">recentBlockhash</span> = blockhash;
+      transaction.<span class="property">lastValidBlockHeight</span> = lastValidBlockHeight;
+
+      <span class="keyword">const</span> signature = <span class="keyword">await</span> <span class="title function_">sendAndConfirmTransaction</span>(
+        connection,
+        transaction,
+        signers,
+        &#123;
+          <span class="attr">commitment</span>: <span class="string">&quot;confirmed&quot;</span>,
+          <span class="attr">maxRetries</span>: <span class="number">3</span>,
+        &#125;
+      );
+
+      <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">`✅ 交易成功 (第 <span class="subst">$&#123;attempt&#125;</span> 次尝试)`</span>);
+      <span class="keyword">return</span> signature;
+    &#125; <span class="keyword">catch</span> (error) &#123;
+      <span class="variable language_">console</span>.<span class="title function_">error</span>(<span class="string">`❌ 第 <span class="subst">$&#123;attempt&#125;</span> 次尝试失败:`</span>, error);
+
+      <span class="keyword">if</span> (error <span class="keyword">instanceof</span> <span class="title class_">TransactionExpiredBlockheightExceededError</span>) &#123;
+        <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;⏰ Blockhash 已过期，重新获取...&quot;</span>);
+        <span class="keyword">continue</span>; <span class="comment">// 重试</span>
+      &#125;
+
+      <span class="keyword">if</span> (error <span class="keyword">instanceof</span> <span class="title class_">SendTransactionError</span>) &#123;
+        <span class="keyword">const</span> logs = error.<span class="property">logs</span>;
+        <span class="keyword">if</span> (logs) &#123;
+          <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;📋 程序日志:&quot;</span>);
+          logs.<span class="title function_">forEach</span>(<span class="function">(<span class="params">log</span>) =&gt;</span> <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;  &quot;</span>, log));
+        &#125;
+      &#125;
+
+      <span class="keyword">if</span> (attempt === maxRetries) &#123;
+        <span class="keyword">throw</span> error; <span class="comment">// 最后一次重试仍失败</span>
+      &#125;
+    &#125;
+  &#125;
+  <span class="keyword">throw</span> <span class="keyword">new</span> <span class="title class_">Error</span>(<span class="string">&quot;交易发送失败&quot;</span>);
+&#125;</code></pre>
+
+<h3 id="8-3-模拟交易（Simulate）"><a href="#8-3-模拟交易（Simulate）" class="headerlink" title="8.3 模拟交易（Simulate）"></a>8.3 模拟交易（Simulate）</h3><p>在实际发送前先模拟执行，检查是否会成功：</p>
+<pre><code class="highlight typescript"><span class="keyword">async</span> <span class="keyword">function</span> <span class="title function_">simulateBeforeSend</span>(<span class="params"></span>
+<span class="params">  <span class="attr">connection</span>: <span class="title class_">Connection</span>,</span>
+<span class="params">  <span class="attr">transaction</span>: <span class="title class_">Transaction</span></span>
+<span class="params"></span>) &#123;
+  <span class="comment">// 模拟交易执行</span>
+  <span class="keyword">const</span> simulation = <span class="keyword">await</span> connection.<span class="title function_">simulateTransaction</span>(transaction);
+
+  <span class="keyword">if</span> (simulation.<span class="property">value</span>.<span class="property">err</span>) &#123;
+    <span class="variable language_">console</span>.<span class="title function_">error</span>(<span class="string">&quot;❌ 模拟失败:&quot;</span>, simulation.<span class="property">value</span>.<span class="property">err</span>);
+    <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;📋 日志:&quot;</span>);
+    simulation.<span class="property">value</span>.<span class="property">logs</span>?.<span class="title function_">forEach</span>(<span class="function">(<span class="params">log</span>) =&gt;</span> <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;  &quot;</span>, log));
+    <span class="keyword">return</span> <span class="literal">false</span>;
+  &#125;
+
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;✅ 模拟成功&quot;</span>);
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;消耗 CU:&quot;</span>, simulation.<span class="property">value</span>.<span class="property">unitsConsumed</span>);
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;📋 日志:&quot;</span>);
+  simulation.<span class="property">value</span>.<span class="property">logs</span>?.<span class="title function_">forEach</span>(<span class="function">(<span class="params">log</span>) =&gt;</span> <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;  &quot;</span>, log));
+  <span class="keyword">return</span> <span class="literal">true</span>;
+&#125;
+
+<span class="comment">// 使用方式</span>
+<span class="keyword">const</span> success = <span class="keyword">await</span> <span class="title function_">simulateBeforeSend</span>(connection, transaction);
+<span class="keyword">if</span> (success) &#123;
+  <span class="keyword">const</span> sig = <span class="keyword">await</span> <span class="title function_">sendAndConfirmTransaction</span>(connection, tx, [payer]);
+&#125;</code></pre>
+
+<hr>
+<h2 id="九、Anchor-框架中的交易与指令"><a href="#九、Anchor-框架中的交易与指令" class="headerlink" title="九、Anchor 框架中的交易与指令"></a>九、Anchor 框架中的交易与指令</h2><h3 id="9-1-Anchor-如何简化指令定义"><a href="#9-1-Anchor-如何简化指令定义" class="headerlink" title="9.1 Anchor 如何简化指令定义"></a>9.1 Anchor 如何简化指令定义</h3><p>Anchor 是 Solana 最流行的开发框架，它大幅简化了指令的定义和账户验证：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> anchor_lang::prelude::*;
+
+declare_id!(<span class="string">&quot;Counter11111111111111111111111111111&quot;</span>);
+
+<span class="meta">#[program]</span>
+<span class="keyword">pub</span> <span class="keyword">mod</span> counter &#123;
+    <span class="keyword">use</span> super::*;
+
+    <span class="comment">/// 初始化计数器</span>
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">initialize</span>(ctx: Context&lt;Initialize&gt;) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;()&gt; &#123;
+        <span class="keyword">let</span> <span class="variable">counter</span> = &amp;<span class="keyword">mut</span> ctx.accounts.counter;
+        counter.count = <span class="number">0</span>;
+        counter.authority = ctx.accounts.authority.<span class="title function_ invoke__">key</span>();
+        msg!(<span class="string">&quot;计数器已初始化，count = 0&quot;</span>);
+        <span class="title function_ invoke__">Ok</span>(())
+    &#125;
+
+    <span class="comment">/// 增加计数</span>
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">increment</span>(ctx: Context&lt;Increment&gt;, amount: <span class="type">u64</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;()&gt; &#123;
+        <span class="keyword">let</span> <span class="variable">counter</span> = &amp;<span class="keyword">mut</span> ctx.accounts.counter;
+        counter.count = counter.count
+            .<span class="title function_ invoke__">checked_add</span>(amount)
+            .<span class="title function_ invoke__">ok_or</span>(ErrorCode::Overflow)?;
+        msg!(<span class="string">&quot;计数增加到: &#123;&#125;&quot;</span>, counter.count);
+        <span class="title function_ invoke__">Ok</span>(())
+    &#125;
+
+    <span class="comment">/// 减少计数</span>
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">decrement</span>(ctx: Context&lt;Decrement&gt;, amount: <span class="type">u64</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;()&gt; &#123;
+        <span class="keyword">let</span> <span class="variable">counter</span> = &amp;<span class="keyword">mut</span> ctx.accounts.counter;
+        require!(counter.count &gt;= amount, ErrorCode::Underflow);
+        counter.count -= amount;
+        msg!(<span class="string">&quot;计数减少到: &#123;&#125;&quot;</span>, counter.count);
+        <span class="title function_ invoke__">Ok</span>(())
+    &#125;
+&#125;
+
+<span class="comment">/// 初始化指令的账户约束</span>
+<span class="meta">#[derive(Accounts)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">Initialize</span>&lt;<span class="symbol">&#x27;info</span>&gt; &#123;
+    <span class="comment">/// 新的计数器账户</span>
+    <span class="comment">/// init: 自动创建账户</span>
+    <span class="comment">/// payer: 谁支付租金</span>
+    <span class="comment">/// space: 数据大小 = 8(discriminator) + 8(u64) + 32(Pubkey)</span>
+    <span class="meta">#[account(init, payer = authority, space = 8 + 8 + 32)]</span>
+    <span class="keyword">pub</span> counter: Account&lt;<span class="symbol">&#x27;info</span>, Counter&gt;,
+    
+    <span class="comment">/// 初始化者（费用支付者）</span>
+    <span class="meta">#[account(mut)]</span>
+    <span class="keyword">pub</span> authority: Signer&lt;<span class="symbol">&#x27;info</span>&gt;,
+    
+    <span class="comment">/// System Program（创建账户需要）</span>
+    <span class="keyword">pub</span> system_program: Program&lt;<span class="symbol">&#x27;info</span>, System&gt;,
+&#125;
+
+<span class="comment">/// Increment 指令的账户约束</span>
+<span class="meta">#[derive(Accounts)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">Increment</span>&lt;<span class="symbol">&#x27;info</span>&gt; &#123;
+    <span class="meta">#[account(</span>
+<span class="meta">        mut, </span>
+<span class="meta">        has_one = authority  // 验证 authority 是否匹配</span>
+<span class="meta">    )]</span>
+    <span class="keyword">pub</span> counter: Account&lt;<span class="symbol">&#x27;info</span>, Counter&gt;,
+    <span class="keyword">pub</span> authority: Signer&lt;<span class="symbol">&#x27;info</span>&gt;,
+&#125;
+
+<span class="comment">/// Decrement 指令的账户约束</span>
+<span class="meta">#[derive(Accounts)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">Decrement</span>&lt;<span class="symbol">&#x27;info</span>&gt; &#123;
+    <span class="meta">#[account(</span>
+<span class="meta">        mut, </span>
+<span class="meta">        has_one = authority</span>
+<span class="meta">    )]</span>
+    <span class="keyword">pub</span> counter: Account&lt;<span class="symbol">&#x27;info</span>, Counter&gt;,
+    <span class="keyword">pub</span> authority: Signer&lt;<span class="symbol">&#x27;info</span>&gt;,
+&#125;
+
+<span class="comment">/// 计数器数据账户结构</span>
+<span class="meta">#[account]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">Counter</span> &#123;
+    <span class="keyword">pub</span> count: <span class="type">u64</span>,
+    <span class="keyword">pub</span> authority: Pubkey,
+&#125;
+
+<span class="comment">/// 自定义错误</span>
+<span class="meta">#[error_code]</span>
+<span class="keyword">pub</span> <span class="keyword">enum</span> <span class="title class_">ErrorCode</span> &#123;
+    <span class="meta">#[msg(<span class="string">&quot;计数器溢出&quot;</span>)]</span>
+    Overflow,
+    <span class="meta">#[msg(<span class="string">&quot;计数器下溢&quot;</span>)]</span>
+    Underflow,
+&#125;</code></pre>
+
+<h3 id="9-2-客户端调用-Anchor-程序"><a href="#9-2-客户端调用-Anchor-程序" class="headerlink" title="9.2 客户端调用 Anchor 程序"></a>9.2 客户端调用 Anchor 程序</h3><pre><code class="highlight typescript"><span class="keyword">import</span> * <span class="keyword">as</span> anchor <span class="keyword">from</span> <span class="string">&quot;@coral-xyz/anchor&quot;</span>;
+<span class="keyword">import</span> &#123; <span class="title class_">Program</span> &#125; <span class="keyword">from</span> <span class="string">&quot;@coral-xyz/anchor&quot;</span>;
+<span class="keyword">import</span> &#123; <span class="title class_">Counter</span> &#125; <span class="keyword">from</span> <span class="string">&quot;../target/types/counter&quot;</span>;
+<span class="keyword">import</span> &#123; <span class="title class_">Keypair</span>, <span class="title class_">SystemProgram</span> &#125; <span class="keyword">from</span> <span class="string">&quot;@solana/web3.js&quot;</span>;
+
+<span class="keyword">async</span> <span class="keyword">function</span> <span class="title function_">main</span>(<span class="params"></span>) &#123;
+  <span class="comment">// 配置 Anchor Provider</span>
+  <span class="keyword">const</span> provider = anchor.<span class="property">AnchorProvider</span>.<span class="title function_">env</span>();
+  anchor.<span class="title function_">setProvider</span>(provider);
+
+  <span class="comment">// 获取程序接口</span>
+  <span class="keyword">const</span> program = anchor.<span class="property">workspace</span>.<span class="property">Counter</span> <span class="keyword">as</span> <span class="title class_">Program</span>&lt;<span class="title class_">Counter</span>&gt;;
+
+  <span class="comment">// 生成计数器账户</span>
+  <span class="keyword">const</span> counterAccount = <span class="title class_">Keypair</span>.<span class="title function_">generate</span>();
+
+  <span class="comment">// ─── 调用 initialize 指令 ───</span>
+  <span class="keyword">const</span> initTx = <span class="keyword">await</span> program.<span class="property">methods</span>
+    .<span class="title function_">initialize</span>()
+    .<span class="title function_">accounts</span>(&#123;
+      <span class="attr">counter</span>: counterAccount.<span class="property">publicKey</span>,
+      <span class="attr">authority</span>: provider.<span class="property">wallet</span>.<span class="property">publicKey</span>,
+      <span class="attr">systemProgram</span>: <span class="title class_">SystemProgram</span>.<span class="property">programId</span>,
+    &#125;)
+    .<span class="title function_">signers</span>([counterAccount])
+    .<span class="title function_">rpc</span>();
+
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;✅ 初始化交易:&quot;</span>, initTx);
+
+  <span class="comment">// ─── 调用 increment 指令 ───</span>
+  <span class="keyword">const</span> incrTx = <span class="keyword">await</span> program.<span class="property">methods</span>
+    .<span class="title function_">increment</span>(<span class="keyword">new</span> anchor.<span class="title function_">BN</span>(<span class="number">5</span>))  <span class="comment">// amount = 5</span>
+    .<span class="title function_">accounts</span>(&#123;
+      <span class="attr">counter</span>: counterAccount.<span class="property">publicKey</span>,
+      <span class="attr">authority</span>: provider.<span class="property">wallet</span>.<span class="property">publicKey</span>,
+    &#125;)
+    .<span class="title function_">rpc</span>();
+
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;✅ 增加计数交易:&quot;</span>, incrTx);
+
+  <span class="comment">// ─── 读取账户数据 ───</span>
+  <span class="keyword">const</span> counterData = <span class="keyword">await</span> program.<span class="property">account</span>.<span class="property">counter</span>.<span class="title function_">fetch</span>(
+    counterAccount.<span class="property">publicKey</span>
+  );
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;当前计数:&quot;</span>, counterData.<span class="property">count</span>.<span class="title function_">toString</span>()); <span class="comment">// 输出: 5</span>
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Authority:&quot;</span>, counterData.<span class="property">authority</span>.<span class="title function_">toString</span>());
+
+  <span class="comment">// ─── 调用 decrement 指令 ───</span>
+  <span class="keyword">const</span> decrTx = <span class="keyword">await</span> program.<span class="property">methods</span>
+    .<span class="title function_">decrement</span>(<span class="keyword">new</span> anchor.<span class="title function_">BN</span>(<span class="number">2</span>))  <span class="comment">// amount = 2</span>
+    .<span class="title function_">accounts</span>(&#123;
+      <span class="attr">counter</span>: counterAccount.<span class="property">publicKey</span>,
+      <span class="attr">authority</span>: provider.<span class="property">wallet</span>.<span class="property">publicKey</span>,
+    &#125;)
+    .<span class="title function_">rpc</span>();
+
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;✅ 减少计数交易:&quot;</span>, decrTx);
+
+  <span class="keyword">const</span> finalData = <span class="keyword">await</span> program.<span class="property">account</span>.<span class="property">counter</span>.<span class="title function_">fetch</span>(
+    counterAccount.<span class="property">publicKey</span>
+  );
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;最终计数:&quot;</span>, finalData.<span class="property">count</span>.<span class="title function_">toString</span>()); <span class="comment">// 输出: 3</span>
+&#125;
+
+<span class="title function_">main</span>();</code></pre>
+
+<hr>
+<h2 id="十、Native-Program-指令参考"><a href="#十、Native-Program-指令参考" class="headerlink" title="十、Native Program 指令参考"></a>十、Native Program 指令参考</h2><h3 id="10-1-System-Program-常用指令"><a href="#10-1-System-Program-常用指令" class="headerlink" title="10.1 System Program 常用指令"></a>10.1 System Program 常用指令</h3><pre><code class="highlight plaintext">┌──────────────────────────────────────────────────────────┐
+│           System Program (11111111111111111111111111111)  │
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│  指令                 │ 功能               │ 常见场景     │
+│  ────────────────────┼───────────────────┼────────────  │
+│  CreateAccount       │ 创建新账户          │ 初始化数据   │
+│  Transfer            │ 转移 SOL           │ 支付/转账    │
+│  Assign              │ 更改 owner         │ 分配给程序   │
+│  Allocate            │ 分配空间           │ 预分配data   │
+│  CreateAccountWithSeed│ 带种子创建账户     │ 确定性地址   │
+│  AdvanceNonceAccount │ 推进 Nonce         │ 离线交易     │
+│  InitializeNonceAccount│ 初始化 Nonce     │ 离线交易     │
+│                                                          │
+└──────────────────────────────────────────────────────────┘</code></pre>
+
+<pre><code class="highlight rust"><span class="keyword">use</span> solana_sdk::system_instruction;
+
+<span class="comment">// ── CreateAccount: 创建新账户 ──</span>
+<span class="keyword">let</span> <span class="variable">create_ix</span> = system_instruction::<span class="title function_ invoke__">create_account</span>(
+    &amp;payer,          <span class="comment">// 付费者</span>
+    &amp;new_account,    <span class="comment">// 新账户</span>
+    rent_lamports,   <span class="comment">// 租金</span>
+    space <span class="keyword">as</span> <span class="type">u64</span>,    <span class="comment">// 数据空间</span>
+    &amp;program_id,     <span class="comment">// owner（新账户的拥有者）</span>
+);
+
+<span class="comment">// ── Transfer: 转移 SOL ──</span>
+<span class="keyword">let</span> <span class="variable">transfer_ix</span> = system_instruction::<span class="title function_ invoke__">transfer</span>(
+    &amp;from,          <span class="comment">// 发送者</span>
+    &amp;to,            <span class="comment">// 接收者</span>
+    lamports,       <span class="comment">// 金额（lamports）</span>
+);
+
+<span class="comment">// ── Assign: 更改账户的 owner ──</span>
+<span class="keyword">let</span> <span class="variable">assign_ix</span> = system_instruction::<span class="title function_ invoke__">assign</span>(
+    &amp;account,       <span class="comment">// 账户</span>
+    &amp;new_owner,     <span class="comment">// 新 owner</span>
+);
+
+<span class="comment">// ── Allocate: 为账户分配空间 ──</span>
+<span class="keyword">let</span> <span class="variable">allocate_ix</span> = system_instruction::<span class="title function_ invoke__">allocate</span>(
+    &amp;account,       <span class="comment">// 账户</span>
+    space <span class="keyword">as</span> <span class="type">u64</span>,   <span class="comment">// 空间大小</span>
+);</code></pre>
+
+<h3 id="10-2-Token-Program-常用指令"><a href="#10-2-Token-Program-常用指令" class="headerlink" title="10.2 Token Program 常用指令"></a>10.2 Token Program 常用指令</h3><pre><code class="highlight typescript"><span class="keyword">import</span> &#123;
+  createMint,
+  createAssociatedTokenAccount,
+  mintTo,
+  transfer,
+  getAccount,
+  <span class="variable constant_">TOKEN_PROGRAM_ID</span>,
+&#125; <span class="keyword">from</span> <span class="string">&quot;@solana/spl-token&quot;</span>;
+
+<span class="keyword">async</span> <span class="keyword">function</span> <span class="title function_">tokenOperations</span>(<span class="params">connection, payer</span>) &#123;
+  <span class="comment">// ── 创建代币 Mint ──</span>
+  <span class="keyword">const</span> mint = <span class="keyword">await</span> <span class="title function_">createMint</span>(
+    connection,
+    payer,              <span class="comment">// Fee payer</span>
+    payer.<span class="property">publicKey</span>,    <span class="comment">// Mint Authority（铸币权）</span>
+    payer.<span class="property">publicKey</span>,    <span class="comment">// Freeze Authority（冻结权，可为null）</span>
+    <span class="number">9</span>,                  <span class="comment">// Decimals（小数位数）</span>
+  );
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Mint 地址:&quot;</span>, mint.<span class="title function_">toBase58</span>());
+
+  <span class="comment">// ── 创建关联代币账户 (ATA) ──</span>
+  <span class="keyword">const</span> tokenAccount = <span class="keyword">await</span> <span class="title function_">createAssociatedTokenAccount</span>(
+    connection,
+    payer,              <span class="comment">// Fee payer</span>
+    mint,               <span class="comment">// 代币 Mint</span>
+    payer.<span class="property">publicKey</span>,    <span class="comment">// 账户拥有者</span>
+  );
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Token Account:&quot;</span>, tokenAccount.<span class="title function_">toBase58</span>());
+
+  <span class="comment">// ── 铸造代币 ──</span>
+  <span class="keyword">await</span> <span class="title function_">mintTo</span>(
+    connection,
+    payer,              <span class="comment">// Fee payer</span>
+    mint,               <span class="comment">// Mint</span>
+    tokenAccount,       <span class="comment">// 目标 Token Account</span>
+    payer,              <span class="comment">// Mint Authority（签名者）</span>
+    <span class="number">1_000_000_000</span>,      <span class="comment">// 数量（含小数，9位 = 1个代币）</span>
+  );
+
+  <span class="comment">// ── 转移代币 ──</span>
+  <span class="keyword">const</span> recipient = <span class="title class_">Keypair</span>.<span class="title function_">generate</span>();
+  <span class="keyword">const</span> recipientATA = <span class="keyword">await</span> <span class="title function_">createAssociatedTokenAccount</span>(
+    connection, payer, mint, recipient.<span class="property">publicKey</span>
+  );
+
+  <span class="keyword">await</span> <span class="title function_">transfer</span>(
+    connection,
+    payer,              <span class="comment">// Fee payer</span>
+    tokenAccount,       <span class="comment">// 发送方 Token Account</span>
+    recipientATA,       <span class="comment">// 接收方 Token Account</span>
+    payer,              <span class="comment">// 发送方 Authority（签名者）</span>
+    <span class="number">500_000_000</span>,        <span class="comment">// 转 0.5 个代币</span>
+  );
+
+  <span class="comment">// ── 查询余额 ──</span>
+  <span class="keyword">const</span> info = <span class="keyword">await</span> <span class="title function_">getAccount</span>(connection, tokenAccount);
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;余额:&quot;</span>, info.<span class="property">amount</span>.<span class="title function_">toString</span>()); <span class="comment">// 500000000 (0.5 token)</span>
+&#125;</code></pre>
+
+<hr>
+<h2 id="十一、交易调试与监控工具"><a href="#十一、交易调试与监控工具" class="headerlink" title="十一、交易调试与监控工具"></a>十一、交易调试与监控工具</h2><h3 id="11-1-Solana-Explorer"><a href="#11-1-Solana-Explorer" class="headerlink" title="11.1 Solana Explorer"></a>11.1 Solana Explorer</h3><p>访问 <a href="https://explorer.solana.com/">https://explorer.solana.com</a> 可以查看任何交易的详细信息：</p>
+<pre><code class="highlight plaintext">浏览器中一笔交易的信息结构：
+
+┌───────────────────────────────────────────────────┐
+│  Transaction: 5xYz...AbCd                         │
+├───────────────────────────────────────────────────┤
+│                                                   │
+│  Status: ✅ Success / ❌ Failed                    │
+│  Block: #123456789                                │
+│  Timestamp: 2024-01-15 10:30:45 UTC               │
+│  Fee: 0.000005 SOL (5000 lamports)               │
+│  Compute Units: 12,345 / 200,000                  │
+│                                                   │
+│  ┌─ Account Inputs ──────────────────────────┐   │
+│  │ #0 💰📝 Fee Payer (AAA...)   -0.500005 SOL│   │
+│  │ #1    📝 Receiver  (BBB...)  +0.500000 SOL│   │
+│  │ #2       System Program                    │   │
+│  └────────────────────────────────────────────┘   │
+│                                                   │
+│  ┌─ Instructions ────────────────────────────┐   │
+│  │ #1 System Program: Transfer                │   │
+│  │    From: AAA... → To: BBB...               │   │
+│  │    Amount: 500,000,000 lamports            │   │
+│  └────────────────────────────────────────────┘   │
+│                                                   │
+│  ┌─ Program Logs ────────────────────────────┐   │
+│  │ Program 1111...1111 invoke [1]             │   │
+│  │ Program 1111...1111 success                │   │
+│  └────────────────────────────────────────────┘   │
+│                                                   │
+└───────────────────────────────────────────────────┘</code></pre>
+
+<h3 id="11-2-CLI-调试命令"><a href="#11-2-CLI-调试命令" class="headerlink" title="11.2 CLI 调试命令"></a>11.2 CLI 调试命令</h3><pre><code class="highlight bash"><span class="comment"># 查看交易详情</span>
+solana confirm -v &lt;TRANSACTION_SIGNATURE&gt;
+
+<span class="comment"># 获取账户信息</span>
+solana account &lt;ACCOUNT_ADDRESS&gt;
+
+<span class="comment"># 查看程序日志</span>
+solana logs &lt;PROGRAM_ID&gt;
+
+<span class="comment"># 监听所有交易日志（实时）</span>
+solana logs --url devnet
+
+<span class="comment"># 模拟交易（不实际执行）</span>
+<span class="comment"># 使用 solana-test-validator 进行本地测试</span>
+solana-test-validator
+
+<span class="comment"># 空投 SOL（仅 devnet/testnet）</span>
+solana airdrop 2 &lt;ADDRESS&gt; --url devnet
+
+<span class="comment"># 获取当前区块高度</span>
+solana block-height --url devnet
+
+<span class="comment"># 查看最近的交易</span>
+solana transaction-history &lt;ADDRESS&gt; --<span class="built_in">limit</span> 10</code></pre>
+
+<h3 id="11-3-程序日志（msg-宏）"><a href="#11-3-程序日志（msg-宏）" class="headerlink" title="11.3 程序日志（msg! 宏）"></a>11.3 程序日志（msg! 宏）</h3><pre><code class="highlight rust"><span class="keyword">use</span> solana_program::msg;
+
+<span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">process_instruction</span>(
+    program_id: &amp;Pubkey,
+    accounts: &amp;[AccountInfo],
+    instruction_data: &amp;[<span class="type">u8</span>],
+) <span class="punctuation">-&gt;</span> ProgramResult &#123;
+    msg!(<span class="string">&quot;程序入口点被调用&quot;</span>);
+    msg!(<span class="string">&quot;程序 ID: &#123;&#125;&quot;</span>, program_id);
+    msg!(<span class="string">&quot;账户数量: &#123;&#125;&quot;</span>, accounts.<span class="title function_ invoke__">len</span>());
+    msg!(<span class="string">&quot;指令数据长度: &#123;&#125;&quot;</span>, instruction_data.<span class="title function_ invoke__">len</span>());
+
+    <span class="comment">// 解析指令</span>
+    <span class="keyword">let</span> <span class="variable">instruction</span> = instruction_data[<span class="number">0</span>];
+    msg!(<span class="string">&quot;指令类型: &#123;&#125;&quot;</span>, instruction);
+
+    <span class="keyword">match</span> instruction &#123;
+        <span class="number">0</span> =&gt; &#123;
+            msg!(<span class="string">&quot;执行初始化...&quot;</span>);
+            <span class="comment">// ... 初始化逻辑</span>
+            msg!(<span class="string">&quot;✅ 初始化完成&quot;</span>);
+        &#125;
+        <span class="number">1</span> =&gt; &#123;
+            <span class="keyword">let</span> <span class="variable">amount</span> = <span class="type">u64</span>::<span class="title function_ invoke__">from_le_bytes</span>(
+                instruction_data[<span class="number">1</span>..<span class="number">9</span>].<span class="title function_ invoke__">try_into</span>().<span class="title function_ invoke__">unwrap</span>()
+            );
+            msg!(<span class="string">&quot;执行转账，金额: &#123;&#125; lamports&quot;</span>, amount);
+            <span class="comment">// ... 转账逻辑</span>
+        &#125;
+        _ =&gt; &#123;
+            msg!(<span class="string">&quot;❌ 未知指令: &#123;&#125;&quot;</span>, instruction);
+            <span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(ProgramError::InvalidInstructionData);
+        &#125;
+    &#125;
+
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;</code></pre>
+
+<hr>
+<h2 id="十二、最佳实践总结"><a href="#十二、最佳实践总结" class="headerlink" title="十二、最佳实践总结"></a>十二、最佳实践总结</h2><h3 id="12-1-交易构建最佳实践"><a href="#12-1-交易构建最佳实践" class="headerlink" title="12.1 交易构建最佳实践"></a>12.1 交易构建最佳实践</h3><pre><code class="highlight plaintext">┌──────────────────────────────────────────────────────────────┐
+│                    交易构建最佳实践清单                        │
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│  ✅ 合理设置 Compute Unit：                                   │
+│     • 先模拟获取实际 CU 消耗                                  │
+│     • 设置为实际消耗的 1.2-1.5 倍                             │
+│     • 避免设置过高浪费优先费                                   │
+│                                                              │
+│  ✅ 使用优先费提高打包概率：                                    │
+│     • 在网络拥堵时设置 priority fee                           │
+│     • 使用 getRecentPrioritizationFees 获取推荐值             │
+│                                                              │
+│  ✅ 正确处理 Blockhash：                                      │
+│     • 总是获取最新 blockhash                                  │
+│     • 利用 lastValidBlockHeight 判断过期                     │
+│     • 过期后重新获取并重试                                    │
+│                                                              │
+│  ✅ 最小化账户数量：                                           │
+│     • 只声明必要的账户                                        │
+│     • 超过限制时使用 Address Lookup Table                     │
+│                                                              │
+│  ✅ 利用交易原子性：                                           │
+│     • 将关联操作放在同一笔交易中                               │
+│     • 确保&quot;全部成功或全部回滚&quot;的语义                           │
+│                                                              │
+│  ✅ 发送前模拟：                                               │
+│     • 使用 simulateTransaction 预检查                        │
+│     • 分析 logs 排查问题                                     │
+│                                                              │
+│  ✅ 重试策略：                                                │
+│     • 实现指数退避重试                                        │
+│     • 区分可重试错误和不可重试错误                              │
+│     • Blockhash 过期 → 可重试                                │
+│     • 余额不足 → 不可重试                                    │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘</code></pre>
+
+<h3 id="12-2-指令设计最佳实践"><a href="#12-2-指令设计最佳实践" class="headerlink" title="12.2 指令设计最佳实践"></a>12.2 指令设计最佳实践</h3><pre><code class="highlight plaintext">┌──────────────────────────────────────────────────────────────┐
+│                    指令设计最佳实践清单                        │
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│  ✅ 账户权限最小化：                                           │
+│     • 只有确实需要写入的账户设为 is_writable: true             │
+│     • 只有确实需要签名的账户设为 is_signer: true               │
+│     • 程序和 Sysvar 始终设为 readonly                        │
+│                                                              │
+│  ✅ 数据序列化：                                               │
+│     • 使用 Borsh 进行高效序列化                               │
+│     • 指令数据第一个字节通常是指令类型标识                      │
+│     • Anchor 自动使用 8 字节 discriminator                   │
+│                                                              │
+│  ✅ 安全检查：                                                │
+│     • 验证所有账户的 owner 是否正确                            │
+│     • 验证签名者权限                                          │
+│     • 使用 PDA 进行确定性地址派生                             │
+│     • 检查账户是否已初始化（防止重复初始化）                    │
+│                                                              │
+│  ✅ CPI 安全：                                                │
+│     • 验证 CPI 目标程序的 program_id                         │
+│     • 使用 invoke_signed 而非直接传递签名                     │
+│     • 注意 CPI 深度限制（最多 4 层）                          │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘</code></pre>
+
+<hr>
+<h2 id="十三、概念总结回顾"><a href="#十三、概念总结回顾" class="headerlink" title="十三、概念总结回顾"></a>十三、概念总结回顾</h2><pre><code class="highlight plaintext">┌──────────────────────────────────────────────────────────────────┐
+│                  Solana SVM 交易指令知识图谱                      │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│                        ┌──────────┐                              │
+│                        │   SVM    │                              │
+│                        │ 执行引擎  │                              │
+│                        └────┬─────┘                              │
+│                             │                                    │
+│               ┌─────────────┼──────────────┐                     │
+│               │             │              │                     │
+│          ┌────▼─────┐ ┌────▼─────┐ ┌──────▼────┐                │
+│          │ Sealevel │ │   BPF    │ │   Bank    │                │
+│          │ 并行引擎  │ │ Runtime  │ │ 状态管理   │                │
+│          └──────────┘ └──────────┘ └───────────┘                │
+│                             │                                    │
+│                      ┌──────▼──────┐                             │
+│                      │ Transaction │                             │
+│                      │    交易     │                              │
+│                      └──────┬──────┘                             │
+│                             │                                    │
+│              ┌──────────────┼───────────────┐                    │
+│              │              │               │                    │
+│       ┌──────▼─────┐ ┌─────▼──────┐ ┌──────▼──────┐            │
+│       │ Signatures │ │  Message   │ │  Blockhash  │            │
+│       │   签名      │ │   消息体    │ │  区块哈希    │            │
+│       └────────────┘ └─────┬──────┘ └─────────────┘            │
+│                            │                                    │
+│              ┌─────────────┼──────────────┐                     │
+│              │             │              │                     │
+│       ┌──────▼─────┐ ┌────▼──────┐ ┌─────▼─────────┐          │
+│       │   Header   │ │  Account  │ │ Instructions  │          │
+│       │   消息头    │ │   Keys    │ │    指令数组    │          │
+│       └────────────┘ └───────────┘ └───────┬───────┘          │
+│                                            │                    │
+│                                  ┌─────────▼─────────┐         │
+│                                  │   Instruction     │         │
+│                                  ├───────────────────┤         │
+│                                  │ • program_id      │         │
+│                                  │ • accounts []     │         │
+│                                  │ • data []         │         │
+│                                  └───────────────────┘         │
+│                                                                  │
+│  核心要点：                                                       │
+│  • SVM 通过 Sealevel 实现交易并行执行                              │
+│  • 交易由签名 + 消息体组成，消息体包含指令列表                       │
+│  • 指令是最小执行单元，指定程序、账户、参数                          │
+│  • 交易具有原子性，一条指令失败则全部回滚                            │
+│  • 账户必须预先声明，支持读写权限控制                                │
+│  • Compute Unit 是计算资源度量，类似 Gas                           │
+│  • Versioned Transaction + ALT 解决交易大小限制                    │
+│  • CPI 实现程序间调用，最多 4 层嵌套                               │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘</code></pre>
+
+<hr>
+<h2 id="参考资源"><a href="#参考资源" class="headerlink" title="参考资源"></a>参考资源</h2><table>
+<thead>
+<tr>
+<th>资源</th>
+<th>链接</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Solana 官方文档</td>
+<td><a href="https://solana.com/docs">https://solana.com/docs</a></td>
+</tr>
+<tr>
+<td>Solana Cookbook</td>
+<td><a href="https://solanacookbook.com/">https://solanacookbook.com</a></td>
+</tr>
+<tr>
+<td>Anchor 框架文档</td>
+<td><a href="https://www.anchor-lang.com/">https://www.anchor-lang.com</a></td>
+</tr>
+<tr>
+<td>Solana Playground</td>
+<td><a href="https://beta.solpg.io/">https://beta.solpg.io</a></td>
+</tr>
+<tr>
+<td>Solana Explorer</td>
+<td><a href="https://explorer.solana.com/">https://explorer.solana.com</a></td>
+</tr>
+<tr>
+<td>Solana Stack Exchange</td>
+<td><a href="https://solana.stackexchange.com/">https://solana.stackexchange.com</a></td>
+</tr>
+<tr>
+<td>SVM 源码</td>
+<td><a href="https://github.com/solana-labs/solana">https://github.com/solana-labs/solana</a></td>
+</tr>
+<tr>
+<td>@solana&#x2F;web3.js</td>
+<td><a href="https://solana-labs.github.io/solana-web3.js">https://solana-labs.github.io/solana-web3.js</a></td>
+</tr>
+</tbody></table>
+<hr>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
