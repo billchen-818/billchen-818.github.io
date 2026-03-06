@@ -1,0 +1,963 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Solana Anchor 框架总结</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Solana Anchor 框架总结</h1><div class="time">2026-03-06</div><ul class="tags"><li><span>#</span><a href="/tags/Solana/">Solana</a></li></ul><blockquote>
+<p>Anchor 是 Solana 生态中最主流的链上程序（Smart Contract）开发框架，类似于以太坊的 Hardhat&#x2F;Foundry。它提供了 <strong>IDL 自动生成、账户序列化&#x2F;反序列化、安全校验宏</strong> 等能力，让开发者可以快速开发、测试与部署 Solana 程序。</p>
+</blockquote>
+<hr>
+<h2 id="一、Anchor-框架总览"><a href="#一、Anchor-框架总览" class="headerlink" title="一、Anchor 框架总览"></a>一、Anchor 框架总览</h2><h3 id="1-1-Anchor-是什么？"><a href="#1-1-Anchor-是什么？" class="headerlink" title="1.1 Anchor 是什么？"></a>1.1 Anchor 是什么？</h3><p>Anchor 是 Solana 程序开发的全栈框架，核心能力包括：</p>
+<table>
+<thead>
+<tr>
+<th>能力</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Rust 宏</strong></td>
+<td>通过 <code>#[program]</code>、<code>#[derive(Accounts)]</code> 等宏，自动生成序列化&#x2F;反序列化与安全校验代码</td>
+</tr>
+<tr>
+<td><strong>IDL 生成</strong></td>
+<td>自动生成 Interface Definition Language 文件，供前端&#x2F;客户端调用</td>
+</tr>
+<tr>
+<td><strong>CLI 工具</strong></td>
+<td>提供 <code>anchor init</code>、<code>anchor build</code>、<code>anchor test</code>、<code>anchor deploy</code> 等命令</td>
+</tr>
+<tr>
+<td><strong>TypeScript SDK</strong></td>
+<td>内置 <code>@coral-xyz/anchor</code> 客户端 SDK，方便编写测试和前端集成</td>
+</tr>
+<tr>
+<td><strong>本地验证器</strong></td>
+<td>集成 <code>solana-test-validator</code>，支持本地测试</td>
+</tr>
+</tbody></table>
+<h3 id="1-2-Anchor-与原生-Solana-对比"><a href="#1-2-Anchor-与原生-Solana-对比" class="headerlink" title="1.2 Anchor 与原生 Solana 对比"></a>1.2 Anchor 与原生 Solana 对比</h3><pre><code class="highlight plaintext">  原生 Solana Program                   Anchor Program
+┌─────────────────────────┐      ┌─────────────────────────┐
+│  手动解析指令数据         │      │  自动反序列化指令数据     │
+│  手动校验账户             │      │  宏自动生成校验逻辑       │
+│  手动序列化/反序列化      │      │  Borsh 自动处理          │
+│  手动编写 IDL            │      │  自动生成 IDL            │
+│  ~200 行代码             │      │  ~50 行代码              │
+│  容易出安全漏洞           │      │  内置安全检查             │
+└─────────────────────────┘      └─────────────────────────┘</code></pre>
+
+<h3 id="1-3-Anchor-程序架构"><a href="#1-3-Anchor-程序架构" class="headerlink" title="1.3 Anchor 程序架构"></a>1.3 Anchor 程序架构</h3><pre><code class="highlight plaintext">┌────────────────────────────────────────────────────────────────┐
+│                    Anchor 程序架构                               │
+├────────────────────────────────────────────────────────────────┤
+│                                                                │
+│   Client (TS/JS)                                               │
+│       │                                                        │
+│       │  通过 IDL 调用                                          │
+│       ▼                                                        │
+│   ┌──────────────────────────────────────────┐                 │
+│   │           Anchor Program (Rust)          │                 │
+│   ├──────────────────────────────────────────┤                 │
+│   │                                          │                 │
+│   │  #[program] ─── 定义指令处理函数          │                 │
+│   │       │                                  │                 │
+│   │       ├─── initialize()                  │                 │
+│   │       ├─── add()                         │                 │
+│   │       └─── subtract()                    │                 │
+│   │                                          │                 │
+│   │  #[derive(Accounts)] ─── 定义账户结构     │                 │
+│   │       │                                  │                 │
+│   │       ├─── 账户校验 (owner, signer)      │                 │
+│   │       ├─── 账户初始化 (init, payer)      │                 │
+│   │       └─── 约束检查 (constraint, has_one)│                 │
+│   │                                          │                 │
+│   │  #[account] ─── 定义数据账户结构          │                 │
+│   │       │                                  │                 │
+│   │       └─── 自动实现序列化/反序列化        │                 │
+│   │                                          │                 │
+│   └──────────────────────────────────────────┘                 │
+│       │                                                        │
+│       ▼                                                        │
+│   ┌──────────────────────────────────────────┐                 │
+│   │         Solana Runtime (SVM)             │                 │
+│   │    读写账户数据 / 扣除 Rent / CPI 调用    │                 │
+│   └──────────────────────────────────────────┘                 │
+└────────────────────────────────────────────────────────────────┘</code></pre>
+
+<hr>
+<h2 id="二、环境准备"><a href="#二、环境准备" class="headerlink" title="二、环境准备"></a>二、环境准备</h2><h3 id="2-1-安装-Rust"><a href="#2-1-安装-Rust" class="headerlink" title="2.1 安装 Rust"></a>2.1 安装 Rust</h3><pre><code class="highlight bash"><span class="comment"># 安装 Rust（如果尚未安装）</span>
+curl --proto <span class="string">&#x27;=https&#x27;</span> --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+<span class="comment"># 验证安装</span>
+rustc --version
+cargo --version</code></pre>
+
+<h3 id="2-2-安装-Solana-CLI"><a href="#2-2-安装-Solana-CLI" class="headerlink" title="2.2 安装 Solana CLI"></a>2.2 安装 Solana CLI</h3><pre><code class="highlight bash"><span class="comment"># 安装 Solana CLI</span>
+sh -c <span class="string">&quot;<span class="subst">$(curl -sSfL https://release.anza.xyz/stable/install)</span>&quot;</span>
+
+<span class="comment"># 添加到 PATH（根据终端提示操作）</span>
+<span class="built_in">export</span> PATH=<span class="string">&quot;<span class="variable">$HOME</span>/.local/share/solana/install/active_release/bin:<span class="variable">$PATH</span>&quot;</span>
+
+<span class="comment"># 验证安装</span>
+solana --version</code></pre>
+
+<h3 id="2-3-安装-Node-js-npm"><a href="#2-3-安装-Node-js-npm" class="headerlink" title="2.3 安装 Node.js &amp; npm"></a>2.3 安装 Node.js &amp; npm</h3><pre><code class="highlight bash"><span class="comment"># 使用 nvm 安装 Node.js（推荐）</span>
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+nvm install 20
+nvm use 20
+
+<span class="comment"># 验证</span>
+node --version
+npm --version</code></pre>
+
+<h3 id="2-4-安装-Anchor-CLI"><a href="#2-4-安装-Anchor-CLI" class="headerlink" title="2.4 安装 Anchor CLI"></a>2.4 安装 Anchor CLI</h3><pre><code class="highlight bash"><span class="comment"># 使用 AVM（Anchor Version Manager）安装</span>
+cargo install --git https://github.com/coral-xyz/anchor avm --force
+avm install latest
+avm use latest
+
+<span class="comment"># 验证</span>
+anchor --version</code></pre>
+
+<h3 id="2-5-配置-Solana-钱包"><a href="#2-5-配置-Solana-钱包" class="headerlink" title="2.5 配置 Solana 钱包"></a>2.5 配置 Solana 钱包</h3><pre><code class="highlight bash"><span class="comment"># 生成新的密钥对（开发用）</span>
+solana-keygen new --outfile ~/.config/solana/id.json
+
+<span class="comment"># 切换到开发网（Devnet）</span>
+solana config <span class="built_in">set</span> --url https://api.devnet.solana.com
+
+<span class="comment"># 获取空投（每次最多 2 SOL）</span>
+solana airdrop 2
+
+<span class="comment"># 查看余额</span>
+solana balance
+
+<span class="comment"># 查看当前配置</span>
+solana config get</code></pre>
+
+<p>输出示例：</p>
+<pre><code class="highlight plaintext">Config File: /Users/yourname/.config/solana/cli/config.yml
+RPC URL: https://api.devnet.solana.com
+WebSocket URL: wss://api.devnet.solana.com/ (computed)
+Keypair Path: /Users/yourname/.config/solana/id.json
+Commitment: confirmed</code></pre>
+
+<h3 id="2-6-环境检查清单"><a href="#2-6-环境检查清单" class="headerlink" title="2.6 环境检查清单"></a>2.6 环境检查清单</h3><pre><code class="highlight plaintext">┌─────────────────────────────────────────────────────────┐
+│                    环境检查清单 ✓                         │
+├──────────────┬──────────────────────────────────────────┤
+│  工具         │  命令                                    │
+├──────────────┼──────────────────────────────────────────┤
+│  Rust        │  rustc --version    (&gt;= 1.75.0)         │
+│  Cargo       │  cargo --version                         │
+│  Solana CLI  │  solana --version   (&gt;= 1.18.0)         │
+│  Node.js     │  node --version     (&gt;= 18.0.0)         │
+│  npm         │  npm --version                           │
+│  Anchor      │  anchor --version   (&gt;= 0.30.0)         │
+│  钱包        │  solana address     (显示公钥地址)        │
+│  余额        │  solana balance     (&gt;= 2 SOL)          │
+│  网络        │  solana config get  (确认为 devnet)       │
+└──────────────┴──────────────────────────────────────────┘</code></pre>
+
+<hr>
+<h2 id="三、Anchor-项目详解"><a href="#三、Anchor-项目详解" class="headerlink" title="三、Anchor 项目详解"></a>三、Anchor 项目详解</h2><h3 id="3-1-新建项目"><a href="#3-1-新建项目" class="headerlink" title="3.1 新建项目"></a>3.1 新建项目</h3><pre><code class="highlight bash"><span class="comment"># 创建新的 Anchor 项目</span>
+anchor init my_calculator
+<span class="built_in">cd</span> my_calculator</code></pre>
+
+<h3 id="3-2-项目目录结构"><a href="#3-2-项目目录结构" class="headerlink" title="3.2 项目目录结构"></a>3.2 项目目录结构</h3><pre><code class="highlight plaintext">my_calculator/
+├── Anchor.toml              # Anchor 配置文件（网络、程序 ID、部署配置）
+├── Cargo.toml               # Rust 工作空间配置
+├── package.json             # Node.js 依赖（测试用）
+├── tsconfig.json            # TypeScript 配置
+│
+├── programs/                # 链上程序（智能合约）目录
+│   └── my_calculator/
+│       ├── Cargo.toml       # 程序的 Rust 依赖
+│       ├── Xargo.toml       # 交叉编译配置
+│       └── src/
+│           └── lib.rs       # 🔥 程序主入口（核心代码在这里）
+│
+├── tests/                   # 测试目录
+│   └── my_calculator.ts     # 🧪 TypeScript 测试文件
+│
+├── migrations/              # 部署迁移脚本
+│   └── deploy.ts
+│
+└── target/                  # 编译输出（build 后生成）
+    ├── idl/                 # 📋 自动生成的 IDL 文件
+    │   └── my_calculator.json
+    ├── types/               # 📋 自动生成的 TypeScript 类型
+    │   └── my_calculator.ts
+    └── deploy/              # 编译后的 .so 程序文件
+        └── my_calculator-keypair.json</code></pre>
+
+<h3 id="3-3-Anchor-toml-配置文件"><a href="#3-3-Anchor-toml-配置文件" class="headerlink" title="3.3 Anchor.toml 配置文件"></a>3.3 Anchor.toml 配置文件</h3><pre><code class="highlight toml"><span class="section">[features]</span>
+<span class="attr">seeds</span> = <span class="literal">false</span>
+<span class="attr">skip-lint</span> = <span class="literal">false</span>
+
+<span class="section">[programs.localnet]</span>
+<span class="attr">my_calculator</span> = <span class="string">&quot;你的ProgramID&quot;</span>   <span class="comment"># 程序 ID（build 后自动生成）</span>
+
+<span class="section">[programs.devnet]</span>
+<span class="attr">my_calculator</span> = <span class="string">&quot;你的ProgramID&quot;</span>
+
+<span class="section">[registry]</span>
+<span class="attr">url</span> = <span class="string">&quot;https://api.apr.dev&quot;</span>
+
+<span class="section">[provider]</span>
+<span class="attr">cluster</span> = <span class="string">&quot;Localnet&quot;</span>               <span class="comment"># 默认使用本地网络</span>
+<span class="attr">wallet</span> = <span class="string">&quot;~/.config/solana/id.json&quot;</span>
+
+<span class="section">[scripts]</span>
+<span class="attr">test</span> = <span class="string">&quot;yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts&quot;</span></code></pre>
+
+<h3 id="3-4-常用-Anchor-CLI-命令"><a href="#3-4-常用-Anchor-CLI-命令" class="headerlink" title="3.4 常用 Anchor CLI 命令"></a>3.4 常用 Anchor CLI 命令</h3><pre><code class="highlight bash"><span class="comment"># 初始化项目</span>
+anchor init &lt;project_name&gt;
+
+<span class="comment"># 编译程序</span>
+anchor build
+
+<span class="comment"># 运行测试（自动启动本地验证器）</span>
+anchor <span class="built_in">test</span>
+
+<span class="comment"># 仅运行测试（不重启验证器）</span>
+anchor <span class="built_in">test</span> --skip-local-validator
+
+<span class="comment"># 部署到指定网络</span>
+anchor deploy --provider.cluster devnet
+
+<span class="comment"># 查看程序 ID（密钥对）</span>
+solana address -k target/deploy/my_calculator-keypair.json
+
+<span class="comment"># 生成新的程序密钥对</span>
+anchor keys list
+anchor keys <span class="built_in">sync</span></code></pre>
+
+<h3 id="3-5-Anchor-核心宏说明"><a href="#3-5-Anchor-核心宏说明" class="headerlink" title="3.5 Anchor 核心宏说明"></a>3.5 Anchor 核心宏说明</h3><pre><code class="highlight plaintext">┌──────────────────────────────────────────────────────────────┐
+│                   Anchor 核心宏体系                           │
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│  #[program]                                                  │
+│  ├── 定义程序模块，包含所有指令处理函数                         │
+│  ├── 每个 pub fn 自动成为一个可调用的指令                      │
+│  └── 函数签名：fn xxx(ctx: Context&lt;T&gt;, args...) -&gt; Result&lt;()&gt;│
+│                                                              │
+│  #[derive(Accounts)]                                         │
+│  ├── 定义指令所需的账户结构                                    │
+│  ├── 自动生成账户校验逻辑                                     │
+│  └── 常用属性:                                                │
+│      ├── #[account(init, payer, space)]  初始化新账户          │
+│      ├── #[account(mut)]                 可变账户              │
+│      ├── #[account(has_one)]             所有权校验            │
+│      └── #[account(seeds, bump)]         PDA 账户             │
+│                                                              │
+│  #[account]                                                  │
+│  ├── 定义链上存储的数据结构                                    │
+│  ├── 自动实现 Borsh 序列化/反序列化                            │
+│  └── 自动添加 8 字节的 discriminator（鉴别器）                 │
+│                                                              │
+│  #[error_code]                                               │
+│  ├── 定义自定义错误枚举                                       │
+│  └── 每个变体可附加 #[msg(&quot;...&quot;)] 错误信息                     │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘</code></pre>
+
+<hr>
+<h2 id="四、示例合约：计算器程序"><a href="#四、示例合约：计算器程序" class="headerlink" title="四、示例合约：计算器程序"></a>四、示例合约：计算器程序</h2><h3 id="4-1-完整合约代码"><a href="#4-1-完整合约代码" class="headerlink" title="4.1 完整合约代码"></a>4.1 完整合约代码</h3><p>编辑 <code>programs/my_calculator/src/lib.rs</code>：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> anchor_lang::prelude::*;
+
+<span class="comment">// 声明程序 ID（anchor build 后自动替换）</span>
+declare_id!(<span class="string">&quot;你的ProgramID&quot;</span>);
+
+<span class="meta">#[program]</span>
+<span class="keyword">pub</span> <span class="keyword">mod</span> my_calculator &#123;
+    <span class="keyword">use</span> super::*;
+
+    <span class="comment">/// 初始化计算器账户</span>
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">initialize</span>(ctx: Context&lt;Initialize&gt;) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;()&gt; &#123;
+        <span class="keyword">let</span> <span class="variable">calculator</span> = &amp;<span class="keyword">mut</span> ctx.accounts.calculator;
+        calculator.result = <span class="number">0</span>;
+        calculator.owner = ctx.accounts.user.<span class="title function_ invoke__">key</span>();
+        msg!(<span class="string">&quot;Calculator initialized! Owner: &#123;&#125;&quot;</span>, calculator.owner);
+        <span class="title function_ invoke__">Ok</span>(())
+    &#125;
+
+    <span class="comment">/// 加法运算</span>
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">add</span>(ctx: Context&lt;Calculate&gt;, a: <span class="type">i64</span>, b: <span class="type">i64</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;()&gt; &#123;
+        <span class="keyword">let</span> <span class="variable">calculator</span> = &amp;<span class="keyword">mut</span> ctx.accounts.calculator;
+        calculator.result = a
+            .<span class="title function_ invoke__">checked_add</span>(b)
+            .<span class="title function_ invoke__">ok_or</span>(ErrorCode::Overflow)?;
+        msg!(<span class="string">&quot;&#123;&#125; + &#123;&#125; = &#123;&#125;&quot;</span>, a, b, calculator.result);
+        <span class="title function_ invoke__">Ok</span>(())
+    &#125;
+
+    <span class="comment">/// 减法运算</span>
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">subtract</span>(ctx: Context&lt;Calculate&gt;, a: <span class="type">i64</span>, b: <span class="type">i64</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;()&gt; &#123;
+        <span class="keyword">let</span> <span class="variable">calculator</span> = &amp;<span class="keyword">mut</span> ctx.accounts.calculator;
+        calculator.result = a
+            .<span class="title function_ invoke__">checked_sub</span>(b)
+            .<span class="title function_ invoke__">ok_or</span>(ErrorCode::Underflow)?;
+        msg!(<span class="string">&quot;&#123;&#125; - &#123;&#125; = &#123;&#125;&quot;</span>, a, b, calculator.result);
+        <span class="title function_ invoke__">Ok</span>(())
+    &#125;
+
+    <span class="comment">/// 乘法运算</span>
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">multiply</span>(ctx: Context&lt;Calculate&gt;, a: <span class="type">i64</span>, b: <span class="type">i64</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;()&gt; &#123;
+        <span class="keyword">let</span> <span class="variable">calculator</span> = &amp;<span class="keyword">mut</span> ctx.accounts.calculator;
+        calculator.result = a
+            .<span class="title function_ invoke__">checked_mul</span>(b)
+            .<span class="title function_ invoke__">ok_or</span>(ErrorCode::Overflow)?;
+        msg!(<span class="string">&quot;&#123;&#125; × &#123;&#125; = &#123;&#125;&quot;</span>, a, b, calculator.result);
+        <span class="title function_ invoke__">Ok</span>(())
+    &#125;
+
+    <span class="comment">/// 除法运算</span>
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">divide</span>(ctx: Context&lt;Calculate&gt;, a: <span class="type">i64</span>, b: <span class="type">i64</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;()&gt; &#123;
+        require!(b != <span class="number">0</span>, ErrorCode::DivisionByZero);
+        <span class="keyword">let</span> <span class="variable">calculator</span> = &amp;<span class="keyword">mut</span> ctx.accounts.calculator;
+        calculator.result = a
+            .<span class="title function_ invoke__">checked_div</span>(b)
+            .<span class="title function_ invoke__">ok_or</span>(ErrorCode::Overflow)?;
+        msg!(<span class="string">&quot;&#123;&#125; ÷ &#123;&#125; = &#123;&#125;&quot;</span>, a, b, calculator.result);
+        <span class="title function_ invoke__">Ok</span>(())
+    &#125;
+&#125;
+
+<span class="comment">/// ========== 账户结构定义 ==========</span>
+
+<span class="comment">/// Initialize 指令所需的账户</span>
+<span class="meta">#[derive(Accounts)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">Initialize</span>&lt;<span class="symbol">&#x27;info</span>&gt; &#123;
+    <span class="comment">/// 新建计算器数据账户</span>
+    <span class="comment">/// - init: 创建账户</span>
+    <span class="comment">/// - payer: 由 user 支付创建费用</span>
+    <span class="comment">/// - space: 8 (discriminator) + Calculator 数据大小</span>
+    <span class="meta">#[account(</span>
+<span class="meta">        init,</span>
+<span class="meta">        payer = user,</span>
+<span class="meta">        space = 8 + Calculator::INIT_SPACE</span>
+<span class="meta">    )]</span>
+    <span class="keyword">pub</span> calculator: Account&lt;<span class="symbol">&#x27;info</span>, Calculator&gt;,
+
+    <span class="comment">/// 签名者（支付创建费用）</span>
+    <span class="meta">#[account(mut)]</span>
+    <span class="keyword">pub</span> user: Signer&lt;<span class="symbol">&#x27;info</span>&gt;,
+
+    <span class="comment">/// System Program（创建账户需要）</span>
+    <span class="keyword">pub</span> system_program: Program&lt;<span class="symbol">&#x27;info</span>, System&gt;,
+&#125;
+
+<span class="comment">/// Calculate 指令所需的账户</span>
+<span class="meta">#[derive(Accounts)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">Calculate</span>&lt;<span class="symbol">&#x27;info</span>&gt; &#123;
+    <span class="comment">/// 计算器数据账户（可变，需要写入结果）</span>
+    <span class="comment">/// has_one = owner: 校验 calculator.owner == owner.key()</span>
+    <span class="meta">#[account(mut, has_one = owner)]</span>
+    <span class="keyword">pub</span> calculator: Account&lt;<span class="symbol">&#x27;info</span>, Calculator&gt;,
+
+    <span class="comment">/// 所有者（必须签名）</span>
+    <span class="keyword">pub</span> owner: Signer&lt;<span class="symbol">&#x27;info</span>&gt;,
+&#125;
+
+<span class="comment">/// ========== 数据账户结构 ==========</span>
+
+<span class="comment">/// 计算器数据账户</span>
+<span class="meta">#[account]</span>
+<span class="meta">#[derive(InitSpace)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">Calculator</span> &#123;
+    <span class="comment">/// 所有者公钥</span>
+    <span class="keyword">pub</span> owner: Pubkey,     <span class="comment">// 32 bytes</span>
+    <span class="comment">/// 运算结果</span>
+    <span class="keyword">pub</span> result: <span class="type">i64</span>,       <span class="comment">// 8 bytes</span>
+&#125;
+
+<span class="comment">/// ========== 自定义错误 ==========</span>
+
+<span class="meta">#[error_code]</span>
+<span class="keyword">pub</span> <span class="keyword">enum</span> <span class="title class_">ErrorCode</span> &#123;
+    <span class="meta">#[msg(<span class="string">&quot;Math overflow occurred&quot;</span>)]</span>
+    Overflow,
+    <span class="meta">#[msg(<span class="string">&quot;Math underflow occurred&quot;</span>)]</span>
+    Underflow,
+    <span class="meta">#[msg(<span class="string">&quot;Division by zero&quot;</span>)]</span>
+    DivisionByZero,
+&#125;</code></pre>
+
+<h3 id="4-2-代码结构解析"><a href="#4-2-代码结构解析" class="headerlink" title="4.2 代码结构解析"></a>4.2 代码结构解析</h3><pre><code class="highlight plaintext">┌────────────────────────────────────────────────────────────────────┐
+│                    lib.rs 代码结构解析                               │
+├────────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│  use anchor_lang::prelude::*;      ← 导入 Anchor 预置模块          │
+│                                                                    │
+│  declare_id!(&quot;...&quot;);               ← 声明程序链上地址               │
+│                                                                    │
+│  ┌──────────────────────────────────────────────────────┐          │
+│  │ #[program]                                          │          │
+│  │ mod my_calculator &#123;                                 │          │
+│  │     fn initialize(ctx) → 初始化计算器                │          │
+│  │     fn add(ctx, a, b)  → 加法                       │          │
+│  │     fn subtract(ctx, a, b) → 减法                   │          │
+│  │     fn multiply(ctx, a, b) → 乘法                   │          │
+│  │     fn divide(ctx, a, b)   → 除法                   │          │
+│  │ &#125;                                                   │          │
+│  └──────────────────────────────────────────────────────┘          │
+│                                                                    │
+│  ┌──────────────────────────────────────────────────────┐          │
+│  │ #[derive(Accounts)]                                 │          │
+│  │ struct Initialize &#123;                                 │          │
+│  │     calculator: Account&lt;Calculator&gt;  ← init 新账户   │          │
+│  │     user: Signer                     ← 付款签名者    │          │
+│  │     system_program: Program&lt;System&gt;  ← 系统程序      │          │
+│  │ &#125;                                                   │          │
+│  │                                                     │          │
+│  │ struct Calculate &#123;                                  │          │
+│  │     calculator: Account&lt;Calculator&gt;  ← mut 可变账户  │          │
+│  │     owner: Signer                    ← 所有者签名    │          │
+│  │ &#125;                                                   │          │
+│  └──────────────────────────────────────────────────────┘          │
+│                                                                    │
+│  ┌──────────────────────────────────────────────────────┐          │
+│  │ #[account]                                          │          │
+│  │ struct Calculator &#123;                                 │          │
+│  │     owner: Pubkey   (32 bytes)                      │          │
+│  │     result: i64     (8 bytes)                       │          │
+│  │ &#125;                                                   │          │
+│  │                                                     │          │
+│  │ 总空间 = 8 (discriminator) + 32 + 8 = 48 bytes     │          │
+│  └──────────────────────────────────────────────────────┘          │
+│                                                                    │
+│  ┌──────────────────────────────────────────────────────┐          │
+│  │ #[error_code]                                       │          │
+│  │ enum ErrorCode &#123; Overflow, Underflow, DivByZero &#125;   │          │
+│  └──────────────────────────────────────────────────────┘          │
+│                                                                    │
+└────────────────────────────────────────────────────────────────────┘</code></pre>
+
+<h3 id="4-3-账户约束详解"><a href="#4-3-账户约束详解" class="headerlink" title="4.3 账户约束详解"></a>4.3 账户约束详解</h3><p>Anchor 提供了丰富的账户约束属性，下面是常用约束：</p>
+<table>
+<thead>
+<tr>
+<th>约束</th>
+<th>用法</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>init</code></td>
+<td><code>#[account(init, payer = x, space = n)]</code></td>
+<td>创建并初始化新账户</td>
+</tr>
+<tr>
+<td><code>mut</code></td>
+<td><code>#[account(mut)]</code></td>
+<td>标记账户可变（可写入）</td>
+</tr>
+<tr>
+<td><code>has_one</code></td>
+<td><code>#[account(has_one = field)]</code></td>
+<td>校验账户字段与另一个账户 key 匹配</td>
+</tr>
+<tr>
+<td><code>seeds</code></td>
+<td><code>#[account(seeds = [b&quot;xxx&quot;], bump)]</code></td>
+<td>PDA 账户推导</td>
+</tr>
+<tr>
+<td><code>close</code></td>
+<td><code>#[account(close = target)]</code></td>
+<td>关闭账户，将 lamports 转给 target</td>
+</tr>
+<tr>
+<td><code>constraint</code></td>
+<td><code>#[account(constraint = expr)]</code></td>
+<td>自定义布尔约束</td>
+</tr>
+<tr>
+<td><code>realloc</code></td>
+<td><code>#[account(realloc = n, ...)]</code></td>
+<td>重新分配账户空间</td>
+</tr>
+</tbody></table>
+<p><strong>PDA 账户示例：</strong></p>
+<pre><code class="highlight rust"><span class="meta">#[derive(Accounts)]</span>
+<span class="meta">#[instruction(seed_value: String)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">CreatePDA</span>&lt;<span class="symbol">&#x27;info</span>&gt; &#123;
+    <span class="meta">#[account(</span>
+<span class="meta">        init,</span>
+<span class="meta">        payer = user,</span>
+<span class="meta">        space = 8 + 32 + 4 + 200,</span>
+<span class="meta">        seeds = [b<span class="string">&quot;my_seed&quot;</span>, user.key().as_ref()]</span>,
+        bump
+    )]
+    <span class="keyword">pub</span> pda_account: Account&lt;<span class="symbol">&#x27;info</span>, MyData&gt;,
+
+    <span class="meta">#[account(mut)]</span>
+    <span class="keyword">pub</span> user: Signer&lt;<span class="symbol">&#x27;info</span>&gt;,
+
+    <span class="keyword">pub</span> system_program: Program&lt;<span class="symbol">&#x27;info</span>, System&gt;,
+&#125;</code></pre>
+
+<h3 id="4-4-Anchor-账户类型说明"><a href="#4-4-Anchor-账户类型说明" class="headerlink" title="4.4 Anchor 账户类型说明"></a>4.4 Anchor 账户类型说明</h3><table>
+<thead>
+<tr>
+<th>类型</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Account&lt;&#39;info, T&gt;</code></td>
+<td>已反序列化的数据账户，自动校验 owner 和 discriminator</td>
+</tr>
+<tr>
+<td><code>Signer&lt;&#39;info&gt;</code></td>
+<td>必须签名的账户</td>
+</tr>
+<tr>
+<td><code>Program&lt;&#39;info, T&gt;</code></td>
+<td>程序账户（如 System Program、Token Program）</td>
+</tr>
+<tr>
+<td><code>SystemAccount&lt;&#39;info&gt;</code></td>
+<td>普通系统账户（不反序列化）</td>
+</tr>
+<tr>
+<td><code>UncheckedAccount&lt;&#39;info&gt;</code></td>
+<td>不进行任何校验的账户（⚠️ 需手动校验，危险）</td>
+</tr>
+<tr>
+<td><code>AccountInfo&lt;&#39;info&gt;</code></td>
+<td>原始账户信息</td>
+</tr>
+<tr>
+<td><code>AccountLoader&lt;&#39;info, T&gt;</code></td>
+<td>用于 Zero-Copy 反序列化的大账户</td>
+</tr>
+</tbody></table>
+<hr>
+<h2 id="五、测试"><a href="#五、测试" class="headerlink" title="五、测试"></a>五、测试</h2><h3 id="5-1-TypeScript-测试代码"><a href="#5-1-TypeScript-测试代码" class="headerlink" title="5.1 TypeScript 测试代码"></a>5.1 TypeScript 测试代码</h3><p>编辑 <code>tests/my_calculator.ts</code>：</p>
+<pre><code class="highlight typescript"><span class="keyword">import</span> * <span class="keyword">as</span> anchor <span class="keyword">from</span> <span class="string">&quot;@coral-xyz/anchor&quot;</span>;
+<span class="keyword">import</span> &#123; <span class="title class_">Program</span> &#125; <span class="keyword">from</span> <span class="string">&quot;@coral-xyz/anchor&quot;</span>;
+<span class="keyword">import</span> &#123; <span class="title class_">MyCalculator</span> &#125; <span class="keyword">from</span> <span class="string">&quot;../target/types/my_calculator&quot;</span>;
+<span class="keyword">import</span> &#123; assert &#125; <span class="keyword">from</span> <span class="string">&quot;chai&quot;</span>;
+
+<span class="title function_">describe</span>(<span class="string">&quot;my_calculator&quot;</span>, <span class="function">() =&gt;</span> &#123;
+  <span class="comment">// 配置 provider</span>
+  <span class="keyword">const</span> provider = anchor.<span class="property">AnchorProvider</span>.<span class="title function_">env</span>();
+  anchor.<span class="title function_">setProvider</span>(provider);
+
+  <span class="keyword">const</span> program = anchor.<span class="property">workspace</span>.<span class="property">MyCalculator</span> <span class="keyword">as</span> <span class="title class_">Program</span>&lt;<span class="title class_">MyCalculator</span>&gt;;
+
+  <span class="comment">// 生成新的 Keypair 作为 calculator 账户</span>
+  <span class="keyword">const</span> calculator = anchor.<span class="property">web3</span>.<span class="property">Keypair</span>.<span class="title function_">generate</span>();
+
+  <span class="title function_">it</span>(<span class="string">&quot;初始化计算器&quot;</span>, <span class="title function_">async</span> () =&gt; &#123;
+    <span class="comment">// 调用 initialize 指令</span>
+    <span class="keyword">const</span> tx = <span class="keyword">await</span> program.<span class="property">methods</span>
+      .<span class="title function_">initialize</span>()
+      .<span class="title function_">accounts</span>(&#123;
+        <span class="attr">calculator</span>: calculator.<span class="property">publicKey</span>,
+        <span class="attr">user</span>: provider.<span class="property">wallet</span>.<span class="property">publicKey</span>,
+        <span class="attr">systemProgram</span>: anchor.<span class="property">web3</span>.<span class="property">SystemProgram</span>.<span class="property">programId</span>,
+      &#125;)
+      .<span class="title function_">signers</span>([calculator])
+      .<span class="title function_">rpc</span>();
+
+    <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Initialize tx:&quot;</span>, tx);
+
+    <span class="comment">// 获取链上账户数据并验证</span>
+    <span class="keyword">const</span> account = <span class="keyword">await</span> program.<span class="property">account</span>.<span class="property">calculator</span>.<span class="title function_">fetch</span>(
+      calculator.<span class="property">publicKey</span>
+    );
+    assert.<span class="title function_">ok</span>(account.<span class="property">owner</span>.<span class="title function_">equals</span>(provider.<span class="property">wallet</span>.<span class="property">publicKey</span>));
+    assert.<span class="title function_">ok</span>(account.<span class="property">result</span>.<span class="title function_">toNumber</span>() === <span class="number">0</span>);
+    <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Calculator owner:&quot;</span>, account.<span class="property">owner</span>.<span class="title function_">toString</span>());
+  &#125;);
+
+  <span class="title function_">it</span>(<span class="string">&quot;加法: 5 + 3 = 8&quot;</span>, <span class="title function_">async</span> () =&gt; &#123;
+    <span class="keyword">const</span> tx = <span class="keyword">await</span> program.<span class="property">methods</span>
+      .<span class="title function_">add</span>(<span class="keyword">new</span> anchor.<span class="title function_">BN</span>(<span class="number">5</span>), <span class="keyword">new</span> anchor.<span class="title function_">BN</span>(<span class="number">3</span>))
+      .<span class="title function_">accounts</span>(&#123;
+        <span class="attr">calculator</span>: calculator.<span class="property">publicKey</span>,
+        <span class="attr">owner</span>: provider.<span class="property">wallet</span>.<span class="property">publicKey</span>,
+      &#125;)
+      .<span class="title function_">rpc</span>();
+
+    <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Add tx:&quot;</span>, tx);
+
+    <span class="keyword">const</span> account = <span class="keyword">await</span> program.<span class="property">account</span>.<span class="property">calculator</span>.<span class="title function_">fetch</span>(
+      calculator.<span class="property">publicKey</span>
+    );
+    assert.<span class="title function_">ok</span>(account.<span class="property">result</span>.<span class="title function_">toNumber</span>() === <span class="number">8</span>);
+    <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Result:&quot;</span>, account.<span class="property">result</span>.<span class="title function_">toNumber</span>());
+  &#125;);
+
+  <span class="title function_">it</span>(<span class="string">&quot;减法: 10 - 4 = 6&quot;</span>, <span class="title function_">async</span> () =&gt; &#123;
+    <span class="keyword">const</span> tx = <span class="keyword">await</span> program.<span class="property">methods</span>
+      .<span class="title function_">subtract</span>(<span class="keyword">new</span> anchor.<span class="title function_">BN</span>(<span class="number">10</span>), <span class="keyword">new</span> anchor.<span class="title function_">BN</span>(<span class="number">4</span>))
+      .<span class="title function_">accounts</span>(&#123;
+        <span class="attr">calculator</span>: calculator.<span class="property">publicKey</span>,
+        <span class="attr">owner</span>: provider.<span class="property">wallet</span>.<span class="property">publicKey</span>,
+      &#125;)
+      .<span class="title function_">rpc</span>();
+
+    <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Subtract tx:&quot;</span>, tx);
+
+    <span class="keyword">const</span> account = <span class="keyword">await</span> program.<span class="property">account</span>.<span class="property">calculator</span>.<span class="title function_">fetch</span>(
+      calculator.<span class="property">publicKey</span>
+    );
+    assert.<span class="title function_">ok</span>(account.<span class="property">result</span>.<span class="title function_">toNumber</span>() === <span class="number">6</span>);
+    <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Result:&quot;</span>, account.<span class="property">result</span>.<span class="title function_">toNumber</span>());
+  &#125;);
+
+  <span class="title function_">it</span>(<span class="string">&quot;乘法: 7 × 8 = 56&quot;</span>, <span class="title function_">async</span> () =&gt; &#123;
+    <span class="keyword">const</span> tx = <span class="keyword">await</span> program.<span class="property">methods</span>
+      .<span class="title function_">multiply</span>(<span class="keyword">new</span> anchor.<span class="title function_">BN</span>(<span class="number">7</span>), <span class="keyword">new</span> anchor.<span class="title function_">BN</span>(<span class="number">8</span>))
+      .<span class="title function_">accounts</span>(&#123;
+        <span class="attr">calculator</span>: calculator.<span class="property">publicKey</span>,
+        <span class="attr">owner</span>: provider.<span class="property">wallet</span>.<span class="property">publicKey</span>,
+      &#125;)
+      .<span class="title function_">rpc</span>();
+
+    <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Multiply tx:&quot;</span>, tx);
+
+    <span class="keyword">const</span> account = <span class="keyword">await</span> program.<span class="property">account</span>.<span class="property">calculator</span>.<span class="title function_">fetch</span>(
+      calculator.<span class="property">publicKey</span>
+    );
+    assert.<span class="title function_">ok</span>(account.<span class="property">result</span>.<span class="title function_">toNumber</span>() === <span class="number">56</span>);
+    <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Result:&quot;</span>, account.<span class="property">result</span>.<span class="title function_">toNumber</span>());
+  &#125;);
+
+  <span class="title function_">it</span>(<span class="string">&quot;除法: 100 ÷ 5 = 20&quot;</span>, <span class="title function_">async</span> () =&gt; &#123;
+    <span class="keyword">const</span> tx = <span class="keyword">await</span> program.<span class="property">methods</span>
+      .<span class="title function_">divide</span>(<span class="keyword">new</span> anchor.<span class="title function_">BN</span>(<span class="number">100</span>), <span class="keyword">new</span> anchor.<span class="title function_">BN</span>(<span class="number">5</span>))
+      .<span class="title function_">accounts</span>(&#123;
+        <span class="attr">calculator</span>: calculator.<span class="property">publicKey</span>,
+        <span class="attr">owner</span>: provider.<span class="property">wallet</span>.<span class="property">publicKey</span>,
+      &#125;)
+      .<span class="title function_">rpc</span>();
+
+    <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Divide tx:&quot;</span>, tx);
+
+    <span class="keyword">const</span> account = <span class="keyword">await</span> program.<span class="property">account</span>.<span class="property">calculator</span>.<span class="title function_">fetch</span>(
+      calculator.<span class="property">publicKey</span>
+    );
+    assert.<span class="title function_">ok</span>(account.<span class="property">result</span>.<span class="title function_">toNumber</span>() === <span class="number">20</span>);
+    <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Result:&quot;</span>, account.<span class="property">result</span>.<span class="title function_">toNumber</span>());
+  &#125;);
+
+  <span class="title function_">it</span>(<span class="string">&quot;除以零应该失败&quot;</span>, <span class="title function_">async</span> () =&gt; &#123;
+    <span class="keyword">try</span> &#123;
+      <span class="keyword">await</span> program.<span class="property">methods</span>
+        .<span class="title function_">divide</span>(<span class="keyword">new</span> anchor.<span class="title function_">BN</span>(<span class="number">10</span>), <span class="keyword">new</span> anchor.<span class="title function_">BN</span>(<span class="number">0</span>))
+        .<span class="title function_">accounts</span>(&#123;
+          <span class="attr">calculator</span>: calculator.<span class="property">publicKey</span>,
+          <span class="attr">owner</span>: provider.<span class="property">wallet</span>.<span class="property">publicKey</span>,
+        &#125;)
+        .<span class="title function_">rpc</span>();
+      assert.<span class="title function_">fail</span>(<span class="string">&quot;Should have thrown an error&quot;</span>);
+    &#125; <span class="keyword">catch</span> (err) &#123;
+      <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Expected error:&quot;</span>, err.<span class="property">message</span>);
+      assert.<span class="title function_">ok</span>(err.<span class="property">message</span>.<span class="title function_">includes</span>(<span class="string">&quot;DivisionByZero&quot;</span>));
+    &#125;
+  &#125;);
+&#125;);</code></pre>
+
+<h3 id="5-2-运行测试"><a href="#5-2-运行测试" class="headerlink" title="5.2 运行测试"></a>5.2 运行测试</h3><pre><code class="highlight bash"><span class="comment"># 运行测试（会自动启动本地验证器、编译、部署、执行测试）</span>
+anchor <span class="built_in">test</span></code></pre>
+
+<p>测试输出示例：</p>
+<pre><code class="highlight plaintext">my_calculator
+  ✔ 初始化计算器 (432ms)
+  Initialize tx: 5Kz...xxx
+  Calculator owner: 7nY...xxx
+  ✔ 加法: 5 + 3 = 8 (456ms)
+  Add tx: 3Rf...xxx
+  Result: 8
+  ✔ 减法: 10 - 4 = 6 (401ms)
+  Subtract tx: 2Ab...xxx
+  Result: 6
+  ✔ 乘法: 7 × 8 = 56 (398ms)
+  Multiply tx: 4Cd...xxx
+  Result: 56
+  ✔ 除法: 100 ÷ 5 = 20 (412ms)
+  Divide tx: 6Ef...xxx
+  Result: 20
+  ✔ 除以零应该失败 (215ms)
+  Expected error: DivisionByZero
+
+6 passing (2s)</code></pre>
+
+<h3 id="5-3-测试中的核心-API"><a href="#5-3-测试中的核心-API" class="headerlink" title="5.3 测试中的核心 API"></a>5.3 测试中的核心 API</h3><pre><code class="highlight plaintext">┌────────────────────────────────────────────────────────────────────┐
+│                  Anchor TypeScript 测试 API                        │
+├────────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│  调用指令:                                                         │
+│  program.methods                                                   │
+│      .instructionName(args...)     ← 指令名 + 参数                 │
+│      .accounts(&#123; ... &#125;)            ← 传入所需账户                  │
+│      .signers([...])               ← 额外签名者                   │
+│      .rpc()                        ← 发送交易并确认                │
+│                                                                    │
+│  查询账户:                                                         │
+│  program.account                                                   │
+│      .accountType                  ← 账户类型名（驼峰）            │
+│      .fetch(pubkey)                ← 获取单个账户数据              │
+│      .all()                        ← 获取所有该类型账户             │
+│      .fetchMultiple([...])         ← 批量获取                     │
+│                                                                    │
+│  常用工具:                                                         │
+│  anchor.web3.Keypair.generate()    ← 生成新密钥对                  │
+│  anchor.web3.SystemProgram.programId ← System Program ID           │
+│  new anchor.BN(value)              ← 创建大数（u64/i64等）         │
+│  provider.wallet.publicKey         ← 当前钱包公钥                  │
+│                                                                    │
+└────────────────────────────────────────────────────────────────────┘</code></pre>
+
+<hr>
+<h2 id="六、部署到-Devnet"><a href="#六、部署到-Devnet" class="headerlink" title="六、部署到 Devnet"></a>六、部署到 Devnet</h2><h3 id="6-1-部署步骤"><a href="#6-1-部署步骤" class="headerlink" title="6.1 部署步骤"></a>6.1 部署步骤</h3><pre><code class="highlight bash"><span class="comment"># 1. 切换到 Devnet</span>
+solana config <span class="built_in">set</span> --url https://api.devnet.solana.com
+
+<span class="comment"># 2. 确保有足够余额</span>
+solana balance
+solana airdrop 2    <span class="comment"># 如余额不足，申请空投</span>
+
+<span class="comment"># 3. 修改 Anchor.toml 中的 cluster</span>
+<span class="comment">#    [provider]</span>
+<span class="comment">#    cluster = &quot;Devnet&quot;</span>
+
+<span class="comment"># 4. 编译</span>
+anchor build
+
+<span class="comment"># 5. 获取程序 ID 并更新</span>
+anchor keys list
+<span class="comment"># 将输出的 Program ID 更新到：</span>
+<span class="comment"># - lib.rs 中的 declare_id!(&quot;...&quot;)</span>
+<span class="comment"># - Anchor.toml 中的 [programs.devnet]</span>
+
+<span class="comment"># 6. 重新编译（更新 Program ID 后）</span>
+anchor build
+
+<span class="comment"># 7. 部署到 Devnet</span>
+anchor deploy --provider.cluster devnet</code></pre>
+
+<h3 id="6-2-部署流程图"><a href="#6-2-部署流程图" class="headerlink" title="6.2 部署流程图"></a>6.2 部署流程图</h3><pre><code class="highlight plaintext">┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
+│  anchor  │     │  anchor  │     │  更新     │     │  anchor  │
+│  build   │────►│  keys    │────►│  Program  │────►│  build   │
+│          │     │  list    │     │  ID       │     │  (重新)   │
+└──────────┘     └──────────┘     └──────────┘     └──────────┘
+                                                        │
+                                                        ▼
+┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
+│  验证    │     │  查看    │     │  链上    │     │  anchor  │
+│  部署    │◄────│  交易    │◄────│  确认    │◄────│  deploy  │
+│  成功    │     │  hash    │     │          │     │          │
+└──────────┘     └──────────┘     └──────────┘     └──────────┘</code></pre>
+
+<h3 id="6-3-验证部署"><a href="#6-3-验证部署" class="headerlink" title="6.3 验证部署"></a>6.3 验证部署</h3><pre><code class="highlight bash"><span class="comment"># 查看部署的程序</span>
+solana program show &lt;PROGRAM_ID&gt;
+
+<span class="comment"># 在 Solana Explorer 上查看</span>
+<span class="comment"># https://explorer.solana.com/address/&lt;PROGRAM_ID&gt;?cluster=devnet</span></code></pre>
+
+<p>输出示例：</p>
+<pre><code class="highlight plaintext">Program Id: CalcXXX...YourProgramID
+Owner: BPFLoaderUpgradeab1e11111111111111111111111
+ProgramData Address: PrgDXXX...
+Authority: 7nY...YourWalletAddress
+Last Deployed In Slot: 123456789
+Data Length: 196608 (0x30000) bytes
+Balance: 1.36 SOL</code></pre>
+
+<hr>
+<h2 id="七、Anchor-进阶概念"><a href="#七、Anchor-进阶概念" class="headerlink" title="七、Anchor 进阶概念"></a>七、Anchor 进阶概念</h2><h3 id="7-1-CPI（跨程序调用）"><a href="#7-1-CPI（跨程序调用）" class="headerlink" title="7.1 CPI（跨程序调用）"></a>7.1 CPI（跨程序调用）</h3><p>CPI 是 Solana 程序之间相互调用的机制，Anchor 简化了 CPI 的编写：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> anchor_lang::prelude::*;
+<span class="keyword">use</span> anchor_spl::token::&#123;<span class="keyword">self</span>, Token, TokenAccount, Transfer&#125;;
+
+<span class="comment">// CPI 调用示例：转移 SPL Token</span>
+<span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">transfer_tokens</span>(ctx: Context&lt;TransferTokens&gt;, amount: <span class="type">u64</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;()&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">cpi_accounts</span> = Transfer &#123;
+        from: ctx.accounts.from_token_account.<span class="title function_ invoke__">to_account_info</span>(),
+        to: ctx.accounts.to_token_account.<span class="title function_ invoke__">to_account_info</span>(),
+        authority: ctx.accounts.authority.<span class="title function_ invoke__">to_account_info</span>(),
+    &#125;;
+    <span class="keyword">let</span> <span class="variable">cpi_program</span> = ctx.accounts.token_program.<span class="title function_ invoke__">to_account_info</span>();
+    <span class="keyword">let</span> <span class="variable">cpi_ctx</span> = CpiContext::<span class="title function_ invoke__">new</span>(cpi_program, cpi_accounts);
+
+    token::<span class="title function_ invoke__">transfer</span>(cpi_ctx, amount)?;
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;
+
+<span class="meta">#[derive(Accounts)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">TransferTokens</span>&lt;<span class="symbol">&#x27;info</span>&gt; &#123;
+    <span class="meta">#[account(mut)]</span>
+    <span class="keyword">pub</span> from_token_account: Account&lt;<span class="symbol">&#x27;info</span>, TokenAccount&gt;,
+    <span class="meta">#[account(mut)]</span>
+    <span class="keyword">pub</span> to_token_account: Account&lt;<span class="symbol">&#x27;info</span>, TokenAccount&gt;,
+    <span class="keyword">pub</span> authority: Signer&lt;<span class="symbol">&#x27;info</span>&gt;,
+    <span class="keyword">pub</span> token_program: Program&lt;<span class="symbol">&#x27;info</span>, Token&gt;,
+&#125;</code></pre>
+
+<h3 id="7-2-PDA-签名（CPI-with-PDA-Signer）"><a href="#7-2-PDA-签名（CPI-with-PDA-Signer）" class="headerlink" title="7.2 PDA 签名（CPI with PDA Signer）"></a>7.2 PDA 签名（CPI with PDA Signer）</h3><pre><code class="highlight rust"><span class="comment">// 使用 PDA 作为签名者进行 CPI 调用</span>
+<span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">transfer_with_pda</span>(ctx: Context&lt;PdaTransfer&gt;, amount: <span class="type">u64</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;()&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">seeds</span> = &amp;[
+        <span class="string">b&quot;vault&quot;</span>,
+        ctx.accounts.authority.key.<span class="title function_ invoke__">as_ref</span>(),
+        &amp;[ctx.bumps.vault],
+    ];
+    <span class="keyword">let</span> <span class="variable">signer_seeds</span> = &amp;[&amp;seeds[..]];
+
+    <span class="keyword">let</span> <span class="variable">cpi_ctx</span> = CpiContext::<span class="title function_ invoke__">new_with_signer</span>(
+        ctx.accounts.token_program.<span class="title function_ invoke__">to_account_info</span>(),
+        Transfer &#123;
+            from: ctx.accounts.vault_token.<span class="title function_ invoke__">to_account_info</span>(),
+            to: ctx.accounts.user_token.<span class="title function_ invoke__">to_account_info</span>(),
+            authority: ctx.accounts.vault.<span class="title function_ invoke__">to_account_info</span>(),
+        &#125;,
+        signer_seeds,
+    );
+
+    token::<span class="title function_ invoke__">transfer</span>(cpi_ctx, amount)?;
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;</code></pre>
+
+<h3 id="7-3-事件（Events）"><a href="#7-3-事件（Events）" class="headerlink" title="7.3 事件（Events）"></a>7.3 事件（Events）</h3><pre><code class="highlight rust"><span class="comment">// 定义事件</span>
+<span class="meta">#[event]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">CalculationEvent</span> &#123;
+    <span class="keyword">pub</span> operator: Pubkey,
+    <span class="keyword">pub</span> operation: <span class="type">String</span>,
+    <span class="keyword">pub</span> operand_a: <span class="type">i64</span>,
+    <span class="keyword">pub</span> operand_b: <span class="type">i64</span>,
+    <span class="keyword">pub</span> result: <span class="type">i64</span>,
+    <span class="keyword">pub</span> timestamp: <span class="type">i64</span>,
+&#125;
+
+<span class="comment">// 在指令中触发事件</span>
+<span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">add</span>(ctx: Context&lt;Calculate&gt;, a: <span class="type">i64</span>, b: <span class="type">i64</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;()&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">calculator</span> = &amp;<span class="keyword">mut</span> ctx.accounts.calculator;
+    calculator.result = a.<span class="title function_ invoke__">checked_add</span>(b).<span class="title function_ invoke__">ok_or</span>(ErrorCode::Overflow)?;
+
+    <span class="comment">// 触发事件</span>
+    emit!(CalculationEvent &#123;
+        operator: ctx.accounts.owner.<span class="title function_ invoke__">key</span>(),
+        operation: <span class="string">&quot;add&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+        operand_a: a,
+        operand_b: b,
+        result: calculator.result,
+        timestamp: Clock::<span class="title function_ invoke__">get</span>()?.unix_timestamp,
+    &#125;);
+
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;</code></pre>
+
+<p><strong>TypeScript 监听事件：</strong></p>
+<pre><code class="highlight typescript"><span class="comment">// 监听链上事件</span>
+<span class="keyword">const</span> listener = program.<span class="title function_">addEventListener</span>(<span class="string">&quot;calculationEvent&quot;</span>, <span class="function">(<span class="params">event, slot</span>) =&gt;</span> &#123;
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Event:&quot;</span>, event);
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Operator:&quot;</span>, event.<span class="property">operator</span>.<span class="title function_">toString</span>());
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Operation:&quot;</span>, event.<span class="property">operation</span>);
+  <span class="variable language_">console</span>.<span class="title function_">log</span>(<span class="string">&quot;Result:&quot;</span>, event.<span class="property">result</span>.<span class="title function_">toNumber</span>());
+&#125;);
+
+<span class="comment">// 移除监听</span>
+<span class="keyword">await</span> program.<span class="title function_">removeEventListener</span>(listener);</code></pre>
+
+<hr>
+<h2 id="八、安全最佳实践"><a href="#八、安全最佳实践" class="headerlink" title="八、安全最佳实践"></a>八、安全最佳实践</h2><h3 id="8-1-常见安全问题"><a href="#8-1-常见安全问题" class="headerlink" title="8.1 常见安全问题"></a>8.1 常见安全问题</h3><pre><code class="highlight plaintext">┌────────────────────────────────────────────────────────────────┐
+│                Anchor 安全检查清单                               │
+├────────────────────────────────────────────────────────────────┤
+│                                                                │
+│  ✅ 始终使用 has_one 校验账户所有权                              │
+│     #[account(mut, has_one = owner)]                           │
+│                                                                │
+│  ✅ 使用 constraint 添加自定义校验                               │
+│     #[account(constraint = amount &gt; 0 @ ErrorCode::Invalid)]   │
+│                                                                │
+│  ✅ 使用 checked_add / checked_sub 防止溢出                     │
+│     a.checked_add(b).ok_or(ErrorCode::Overflow)?               │
+│                                                                │
+│  ✅ PDA 使用 seeds + bump 确保唯一性                            │
+│     #[account(seeds = [...], bump)]                            │
+│                                                                │
+│  ✅ 避免使用 UncheckedAccount（除非手动校验）                    │
+│     /// CHECK: 已手动校验                                      │
+│     pub unsafe_account: UncheckedAccount&lt;&#x27;info&gt;                │
+│                                                                │
+│  ✅ 关闭账户时使用 close 约束，防止复活攻击                      │
+│     #[account(mut, close = receiver)]                          │
+│                                                                │
+│  ❌ 不要信任客户端传入的数据，始终做服务端校验                    │
+│  ❌ 不要忽略 Signer 检查                                       │
+│  ❌ 不要在生产环境使用硬编码密钥                                 │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘</code></pre>
+
+<h3 id="8-2-常见攻击向量"><a href="#8-2-常见攻击向量" class="headerlink" title="8.2 常见攻击向量"></a>8.2 常见攻击向量</h3><table>
+<thead>
+<tr>
+<th>攻击类型</th>
+<th>说明</th>
+<th>Anchor 防护</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>缺少签名校验</strong></td>
+<td>未验证调用者身份</td>
+<td><code>Signer&lt;&#39;info&gt;</code> 自动校验</td>
+</tr>
+<tr>
+<td><strong>缺少所有权校验</strong></td>
+<td>未验证账户 owner</td>
+<td><code>Account&lt;&#39;info, T&gt;</code> 自动校验 owner</td>
+</tr>
+<tr>
+<td><strong>整数溢出</strong></td>
+<td>算术运算溢出</td>
+<td>使用 <code>checked_*</code> 系列方法</td>
+</tr>
+<tr>
+<td><strong>账户复活</strong></td>
+<td>关闭的账户被重新使用</td>
+<td><code>close</code> 约束 + discriminator 校验</td>
+</tr>
+<tr>
+<td><strong>PDA 替换</strong></td>
+<td>伪造 PDA 账户</td>
+<td><code>seeds + bump</code> 约束自动校验</td>
+</tr>
+<tr>
+<td><strong>重入攻击</strong></td>
+<td>递归调用漏洞</td>
+<td>Solana 运行时天然防护（单线程执行）</td>
+</tr>
+</tbody></table>
+<hr>
+<h2 id="九、完整开发工作流"><a href="#九、完整开发工作流" class="headerlink" title="九、完整开发工作流"></a>九、完整开发工作流</h2><pre><code class="highlight plaintext">┌─────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
+│  1.初始化 │──►│ 2.编写合约│──►│ 3.编译   │──►│ 4.测试   │
+│  anchor  │   │  lib.rs  │   │  anchor  │   │  anchor  │
+│  init    │   │          │   │  build   │   │  test    │
+└─────────┘   └──────────┘   └──────────┘   └──────────┘
+                                                   │
+                                             ┌─────▼─────┐
+                                             │ 测试通过？  │
+                                             └─────┬─────┘
+                                          是 │          │ 否
+                                             ▼          ▼
+                                       ┌──────────┐  返回步骤2
+                                       │ 5.部署到  │  修复问题
+                                       │  Devnet  │
+                                       │  anchor  │
+                                       │  deploy  │
+                                       └──────────┘
+                                             │
+                                             ▼
+                                       ┌──────────┐
+                                       │ 6.集成   │
+                                       │  前端    │
+                                       │  测试    │
+                                       └──────────┘
+                                             │
+                                             ▼
+                                       ┌──────────┐
+                                       │ 7.部署到  │
+                                       │  Mainnet │
+                                       └──────────┘</code></pre>
+
+<hr>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
