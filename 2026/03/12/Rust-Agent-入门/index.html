@@ -1,0 +1,156 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust Agent 入门</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust Agent 入门</h1><div class="time">2026-03-12</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>AI Agent 是当下最火的技术方向之一，但大多数教程都在用 Python。其实 Rust 生态中已经有了成熟的 Agent 框架——<code>rig-core</code>，它让我们可以用 Rust 的高性能和类型安全优势来构建 AI 智能体。本文将带你从零开始，使用 rig-core + 本地 Ollama 模型，用不到 20 行 Rust 代码跑通你的第一个 AI Agent。</p>
+<h2 id="rig-core介绍"><a href="#rig-core介绍" class="headerlink" title="rig-core介绍"></a>rig-core介绍</h2><p><code>rig-core</code> 是 Rust 生态中一个用于构建 LLM 应用和 AI Agent 的开源框架，由 <a href="https://github.com/0xPlaygrounds/rig">Rig</a> 项目提供。它的设计目标是让 Rust 开发者能够以类型安全、高性能的方式快速集成大语言模型能力。</p>
+<h3 id="核心特性"><a href="#核心特性" class="headerlink" title="核心特性"></a>核心特性</h3><ul>
+<li><strong>多模型支持</strong>：内置对 OpenAI、Anthropic、Cohere、Google Gemini 等主流模型提供商的支持，同时兼容任何 OpenAI API 格式的服务（如本地 Ollama）。</li>
+<li><strong>统一抽象层</strong>：通过 <code>CompletionModel</code> 和 <code>EmbeddingModel</code> 等 trait，将不同模型提供商统一到相同的接口下，切换模型只需改一行代码。</li>
+<li><strong>Agent 构建</strong>：支持为 Agent 设定系统提示词（preamble）、挂载工具（Tool）、配置上下文，轻松构建具备自主决策和工具调用能力的智能体。</li>
+<li><strong>Tool 机制</strong>：通过实现 <code>Tool</code> trait，可以让 LLM 调用自定义的 Rust 函数，实现搜索、计算、数据库查询等外部能力的集成。</li>
+<li><strong>RAG 支持</strong>：提供向量存储和文档嵌入的抽象，支持构建检索增强生成（RAG）管道。</li>
+<li><strong>类型安全</strong>：充分利用 Rust 的类型系统，模型输入输出、工具参数等均有编译期检查，减少运行时错误。</li>
+<li><strong>异步优先</strong>：基于 <code>tokio</code> 异步运行时，天然支持高并发场景。</li>
+</ul>
+<h3 id="基本用法示例"><a href="#基本用法示例" class="headerlink" title="基本用法示例"></a>基本用法示例</h3><p>以下是使用 rig-core 连接本地 Ollama 进行简单对话的代码骨架：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> rig::providers::openai;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// 创建一个兼容 OpenAI 接口的客户端，指向本地 Ollama</span>
+    <span class="keyword">let</span> <span class="variable">client</span> = openai::Client::<span class="title function_ invoke__">from_url</span>(<span class="string">&quot;http://localhost:11434/v1&quot;</span>, <span class="string">&quot;ollama&quot;</span>);
+
+    <span class="comment">// 使用本地模型构建一个 Agent</span>
+    <span class="keyword">let</span> <span class="variable">agent</span> = client
+        .<span class="title function_ invoke__">agent</span>(<span class="string">&quot;deepseek-r1:8b&quot;</span>)
+        .<span class="title function_ invoke__">preamble</span>(<span class="string">&quot;你是一个有帮助的AI助手，请用中文回答。&quot;</span>)
+        .<span class="title function_ invoke__">build</span>();
+
+    <span class="comment">// 发送 prompt 并获取回复</span>
+    <span class="keyword">let</span> <span class="variable">response</span> = agent.<span class="title function_ invoke__">prompt</span>(<span class="string">&quot;请介绍一下Rust语言&quot;</span>).<span class="keyword">await</span>.<span class="title function_ invoke__">unwrap</span>();
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, response);
+&#125;</code></pre>
+
+<h3 id="添加依赖"><a href="#添加依赖" class="headerlink" title="添加依赖"></a>添加依赖</h3><p>在 <code>Cargo.toml</code> 中添加：</p>
+<pre><code class="highlight toml"><span class="section">[dependencies]</span>
+<span class="attr">anyhow</span> = <span class="string">&quot;1.0.102&quot;</span>
+<span class="attr">rig-core</span> = <span class="string">&quot;0.32.0&quot;</span>
+<span class="attr">serde</span> = &#123; version = <span class="string">&quot;1.0.228&quot;</span>, features = [<span class="string">&quot;serde_derive&quot;</span>] &#125;
+<span class="attr">tokio</span> = &#123; version = <span class="string">&quot;1.50.0&quot;</span>, features = [<span class="string">&quot;macros&quot;</span>, <span class="string">&quot;rt&quot;</span>, <span class="string">&quot;rt-multi-thread&quot;</span>] &#125;</code></pre>
+
+<p>rig-core 的 API 设计简洁直观，配合 Rust 的安全性和性能优势，非常适合用来构建生产级别的 AI Agent 应用。接下来我们先在本地部署 Ollama，然后用 rig-core 编写实际的测试代码。</p>
+<h2 id="本地部署ollama"><a href="#本地部署ollama" class="headerlink" title="本地部署ollama"></a>本地部署ollama</h2><p>Ollama 是一个开源的本地大语言模型运行框架，它让你可以在自己的电脑上轻松运行各种开源 LLM（如 Llama、Mistral、Gemma、Qwen 等），无需依赖云端 API，数据完全留在本地，兼顾隐私与便捷。</p>
+<h3 id="Ollama-的核心特点"><a href="#Ollama-的核心特点" class="headerlink" title="Ollama 的核心特点"></a>Ollama 的核心特点</h3><ul>
+<li><strong>一键部署</strong>：通过简单的命令行即可下载并运行模型，例如 <code>ollama run llama3</code> 就能启动 Llama 3 模型进行对话。</li>
+<li><strong>本地运行</strong>：所有推理计算都在本地完成，不需要联网，适合对数据隐私有要求的场景。</li>
+<li><strong>兼容 OpenAI API</strong>：Ollama 默认在 <code>http://localhost:11434</code> 提供 REST API 服务，接口格式兼容 OpenAI Chat Completions API，因此大多数支持 OpenAI 的客户端库（包括 rig-core）都可以直接对接。</li>
+<li><strong>跨平台支持</strong>：支持 macOS、Linux 和 Windows，且对 Apple Silicon（M 系列芯片）的 GPU 加速有良好支持。</li>
+<li><strong>丰富的模型库</strong>：内置模型仓库，支持数百个开源模型，涵盖对话、代码生成、嵌入等多种任务。</li>
+</ul>
+<h3 id="安装-Ollama"><a href="#安装-Ollama" class="headerlink" title="安装 Ollama"></a>安装 Ollama</h3><p>macOS 上可以直接通过官网或 Homebrew 安装：</p>
+<pre><code class="highlight bash"><span class="comment"># 方式一：官网下载安装包</span>
+<span class="comment"># 访问 https://ollama.com 下载 macOS 版本</span>
+
+<span class="comment"># 方式二：Homebrew 安装</span>
+brew install ollama</code></pre>
+
+<h3 id="下载并运行模型"><a href="#下载并运行模型" class="headerlink" title="下载并运行模型"></a>下载并运行模型</h3><p>安装完成后，使用 <code>ollama run</code> 命令即可拉取模型并启动交互式对话：</p>
+<pre><code class="highlight bash"><span class="comment"># 运行 deepseek-r1:8b 模型（首次会自动下载）</span>
+ollama run deepseek-r1:8b
+
+<span class="comment"># 查看本地已下载的模型列表</span>
+ollama list</code></pre>
+
+<p><img src="/../img/ollama-run.png" alt="图片"></p>
+<h3 id="以服务方式启动"><a href="#以服务方式启动" class="headerlink" title="以服务方式启动"></a>以服务方式启动</h3><p>如果你需要通过 API 调用模型（我们后面的 Rust 代码就是这种方式），需要确保 Ollama 服务正在运行：</p>
+<pre><code class="highlight bash"><span class="comment"># 启动 Ollama 服务（macOS 安装后通常会自动在后台运行）</span>
+ollama serve</code></pre>
+
+<p>服务启动后，可以通过 <code>curl</code> 验证：</p>
+<pre><code class="highlight bash">curl http://localhost:11434/api/generate -d <span class="string">&#x27;&#123;</span>
+<span class="string">  &quot;model&quot;: &quot;deepseek-r1:8b&quot;,</span>
+<span class="string">  &quot;prompt&quot;: &quot;你好&quot;,</span>
+<span class="string">  &quot;stream&quot;: false</span>
+<span class="string">&#125;&#x27;</span></code></pre>
+
+<p><img src="/../img/deep-seek.png"></p>
+<h2 id="项目搭建"><a href="#项目搭建" class="headerlink" title="项目搭建"></a>项目搭建</h2><p>我们新建cargo new agent-demo项目。</p>
+<h3 id="示例代码实现"><a href="#示例代码实现" class="headerlink" title="示例代码实现"></a>示例代码实现</h3><p>新建一个examples目录，我们只在examples中写测试代码。</p>
+<p>在examples里面新建文件<code>my_agent.rs</code>，在里面添加下面代码：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> anyhow::<span class="type">Result</span>;
+<span class="keyword">use</span> rig::&#123;
+    client::&#123;CompletionClient, Nothing&#125;,
+    completion::Prompt,
+    providers::ollama,
+&#125;;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;()&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">client</span> = ollama::Client::<span class="title function_ invoke__">new</span>(Nothing)?;
+    <span class="keyword">let</span> <span class="variable">agent</span> = client
+        .<span class="title function_ invoke__">agent</span>(<span class="string">&quot;deepseek-r1:8b&quot;</span>)
+        .<span class="title function_ invoke__">preamble</span>(<span class="string">&quot;你是一个专业的 Rust 编程助手。&quot;</span>)
+        .<span class="title function_ invoke__">build</span>();
+
+    <span class="keyword">let</span> <span class="variable">response</span> = agent.<span class="title function_ invoke__">prompt</span>(<span class="string">&quot;如何优化 Rust 的内存占用？&quot;</span>).<span class="keyword">await</span>.<span class="title function_ invoke__">unwrap</span>();
+
+    <span class="built_in">println!</span>(<span class="string">&quot;Agent: &#123;&#125;&quot;</span>, response);
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;</code></pre>
+
+<p>在Cargo.toml中添加下面依赖：</p>
+<pre><code class="highlight plaintext">anyhow = &quot;1.0.102&quot;
+rig-core = &quot;0.32.0&quot;
+serde = &#123; version = &quot;1.0.228&quot;, features = [&quot;serde_derive&quot;] &#125;
+tokio = &#123; version = &quot;1.50.0&quot;, features = [&quot;macros&quot;, &quot;rt&quot;, &quot;rt-multi-thread&quot;] &#125;</code></pre>
+
+<h4 id="运行示例测试"><a href="#运行示例测试" class="headerlink" title="运行示例测试"></a>运行示例测试</h4><pre><code class="highlight plaintext">cargo run --example my_agent</code></pre>
+
+<p><img src="/../img/example1.png"></p>
+<p><img src="/../img/example2.png"></p>
+<p><img src="/../img/example3.png"></p>
+<h3 id="修改命令传参"><a href="#修改命令传参" class="headerlink" title="修改命令传参"></a>修改命令传参</h3><p>我们再把代码修改下，移到main.rs中，如下：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> anyhow::<span class="type">Result</span>;
+<span class="keyword">use</span> rig::&#123;
+    client::&#123;CompletionClient, Nothing&#125;,
+    completion::Prompt,
+    providers::ollama,
+&#125;;
+<span class="keyword">use</span> std::env;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;()&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">question</span> = env::<span class="title function_ invoke__">args</span>()
+        .<span class="title function_ invoke__">nth</span>(<span class="number">1</span>)
+        .<span class="title function_ invoke__">expect</span>(<span class="string">&quot;请提供一个问题作为命令行参数，例如: cargo run -- \&quot;你的问题\&quot;&quot;</span>);
+
+    <span class="keyword">let</span> <span class="variable">client</span> = ollama::Client::<span class="title function_ invoke__">new</span>(Nothing)?;
+    <span class="keyword">let</span> <span class="variable">agent</span> = client
+        .<span class="title function_ invoke__">agent</span>(<span class="string">&quot;deepseek-r1:8b&quot;</span>)
+        .<span class="title function_ invoke__">preamble</span>(<span class="string">&quot;你是一个专业的 Rust 编程助手。&quot;</span>)
+        .<span class="title function_ invoke__">build</span>();
+
+    <span class="keyword">let</span> <span class="variable">response</span> = agent.<span class="title function_ invoke__">prompt</span>(&amp;question).<span class="keyword">await</span>.<span class="title function_ invoke__">unwrap</span>();
+
+    <span class="built_in">println!</span>(<span class="string">&quot;Agent: &#123;&#125;&quot;</span>, response);
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;</code></pre>
+
+<p>测试下：</p>
+<pre><code class="highlight plaintext">cargo run -- &quot;Rust中Copy是啥？&quot;</code></pre>
+
+<p>模型回复：</p>
+<p><img src="/../img/copy1.png"></p>
+<p><img src="/../img/copy2.png"></p>
+<h2 id="总结"><a href="#总结" class="headerlink" title="总结"></a>总结</h2><p>本文我们从零完成了一个 Rust AI Agent 的搭建，整个过程可以归纳为三步：</p>
+<ol>
+<li><strong>认识 rig-core</strong>：了解了这个 Rust Agent 框架的核心特性——多模型支持、统一接口抽象、类型安全、异步优先，它让 Rust 开发者也能便捷地构建 AI 应用。</li>
+<li><strong>本地部署 Ollama</strong>：在本地安装并运行了 deepseek-r1:8b 模型，通过兼容 OpenAI 的 API 接口为后续代码提供推理服务。</li>
+<li><strong>编写 Agent 代码</strong>：仅用不到 20 行 Rust 代码，就实现了与本地大模型的对话交互，并进一步支持了命令行传参的灵活调用方式。</li>
+</ol>
+<p>可以看到，借助 rig-core + Ollama 的组合，用 Rust 开发 AI Agent 的门槛并不高。而 Rust 带来的内存安全、高性能和零成本抽象，使其在构建生产级 Agent 服务时具备天然优势。</p>
+<p>当然，本文只是入门的第一步。rig-core 还支持 <strong>Tool 调用</strong>（让 LLM 执行自定义函数）、<strong>RAG</strong>（检索增强生成）、<strong>多轮对话</strong>等高级能力，后续文章我们会继续深入探索。</p>
+<p>如果你对 Rust + AI 感兴趣，不妨动手跑一跑，欢迎在评论区交流你的实践心得！</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
