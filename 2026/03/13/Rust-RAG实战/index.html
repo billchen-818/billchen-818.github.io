@@ -1,0 +1,323 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust RAG实战</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust RAG实战</h1><div class="time">2026-03-13</div><ul class="tags"><li><span>#</span><a href="/tags/AI/">AI</a></li></ul><p>你有没有遇到过这样的场景：你让 AI 回答一个关于你公司内部文档的问题，它却一本正经地胡说八道？大语言模型（LLM）虽然强大，但它的知识是”冻结”在训练数据里的，对你的私有数据一无所知。<strong>RAG（Retrieval-Augmented Generation，检索增强生成）</strong> 正是解决这个问题的利器——它让 AI 先”查资料”，再”回答问题”，从根本上消除幻觉、打通私有知识库。</p>
+<p>本文将带你从零理解 RAG 的核心原理，并使用 Rust + rig-core + Ollama，在本地构建一个能读懂 PDF 文档的 RAG 系统。</p>
+<hr>
+<h2 id="什么是-RAG？"><a href="#什么是-RAG？" class="headerlink" title="什么是 RAG？"></a>什么是 RAG？</h2><p>RAG（Retrieval-Augmented Generation）是一种将 <strong>信息检索</strong> 与 <strong>文本生成</strong> 相结合的 AI 架构模式。简单来说：</p>
+<blockquote>
+<p><strong>RAG &#x3D; 检索（Retrieval）+ 生成（Generation）</strong></p>
+</blockquote>
+<p>传统的 LLM 对话流程是：</p>
+<pre><code class="highlight plaintext">用户提问 → LLM 根据训练知识生成回答</code></pre>
+
+<p>RAG 的对话流程是：</p>
+<pre><code class="highlight plaintext">用户提问 → 从知识库中检索相关文档片段 → 将检索结果作为上下文注入 LLM → LLM 结合上下文生成回答</code></pre>
+
+<h3 id="为什么需要-RAG？"><a href="#为什么需要-RAG？" class="headerlink" title="为什么需要 RAG？"></a>为什么需要 RAG？</h3><table>
+<thead>
+<tr>
+<th>问题</th>
+<th>纯 LLM</th>
+<th>RAG</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>知识时效性</td>
+<td>受限于训练数据截止日期</td>
+<td>可随时更新知识库</td>
+</tr>
+<tr>
+<td>私有数据</td>
+<td>完全不了解</td>
+<td>可接入企业内部文档</td>
+</tr>
+<tr>
+<td>幻觉问题</td>
+<td>容易编造事实</td>
+<td>基于真实文档回答，可溯源</td>
+</tr>
+<tr>
+<td>成本</td>
+<td>微调模型成本高昂</td>
+<td>无需微调，只需维护文档库</td>
+</tr>
+</tbody></table>
+<p>一句话总结：<strong>RAG 让 LLM 从”凭记忆答题”变成了”开卷考试”。</strong></p>
+<hr>
+<h2 id="RAG-的核心架构"><a href="#RAG-的核心架构" class="headerlink" title="RAG 的核心架构"></a>RAG 的核心架构</h2><p>一个完整的 RAG 系统包含两个阶段：<strong>离线索引阶段</strong> 和 <strong>在线查询阶段</strong>。</p>
+<h3 id="离线索引阶段（Indexing）"><a href="#离线索引阶段（Indexing）" class="headerlink" title="离线索引阶段（Indexing）"></a>离线索引阶段（Indexing）</h3><p>这个阶段的目标是将你的文档数据预处理好，存入向量数据库，供后续检索使用。</p>
+<pre><code class="highlight plaintext">原始文档（PDF/TXT/HTML/...）
+    ↓
+文档解析（提取纯文本）
+    ↓
+文本分块（Chunking）
+    ↓
+向量化（Embedding）
+    ↓
+存入向量数据库（Vector Store）</code></pre>
+
+<h3 id="在线查询阶段（Querying）"><a href="#在线查询阶段（Querying）" class="headerlink" title="在线查询阶段（Querying）"></a>在线查询阶段（Querying）</h3><p>用户提问时，系统实时检索最相关的文档片段，注入给 LLM 生成答案。</p>
+<pre><code class="highlight plaintext">用户提问
+    ↓
+问题向量化（Embedding）
+    ↓
+在向量数据库中检索最相似的文档片段（Top-K）
+    ↓
+将问题 + 检索到的文档片段一起发送给 LLM
+    ↓
+LLM 生成基于上下文的回答</code></pre>
+
+<hr>
+<h2 id="Embedding（向量嵌入）原理"><a href="#Embedding（向量嵌入）原理" class="headerlink" title="Embedding（向量嵌入）原理"></a>Embedding（向量嵌入）原理</h2><p>Embedding 是 RAG 的核心技术之一，理解它对掌握整个 RAG 流程至关重要。</p>
+<h3 id="什么是-Embedding？"><a href="#什么是-Embedding？" class="headerlink" title="什么是 Embedding？"></a>什么是 Embedding？</h3><p>Embedding 是一种将文本（单词、句子、段落）映射为 <strong>高维空间中的稠密向量</strong> 的技术。简单说，就是把人类语言翻译成计算机能理解和比较的数字列表。</p>
+<p>例如：</p>
+<pre><code class="highlight plaintext">&quot;Rust 是一门系统编程语言&quot; → [0.12, -0.45, 0.78, 0.33, ..., -0.21]  （维度可能是768或更高）
+&quot;Rust 注重内存安全&quot;      → [0.15, -0.42, 0.75, 0.30, ..., -0.19]  （语义相近，向量也接近）
+&quot;今天天气真好&quot;           → [0.88, 0.12, -0.56, 0.01, ..., 0.67]  （语义不同，向量差异大）</code></pre>
+
+<h3 id="Embedding-的核心原理"><a href="#Embedding-的核心原理" class="headerlink" title="Embedding 的核心原理"></a>Embedding 的核心原理</h3><ol>
+<li><p><strong>语义编码</strong>：Embedding 模型（如 <code>nomic-embed-text</code>、OpenAI 的 <code>text-embedding-3-small</code>）通过在海量文本上训练，学会了将语义相似的文本映射到向量空间中相近的位置。</p>
+</li>
+<li><p><strong>相似度计算</strong>：两个向量的相似程度通常用 <strong>余弦相似度（Cosine Similarity）</strong> 来衡量：</p>
+</li>
+</ol>
+<p>$$\text{similarity}(\vec{A}, \vec{B}) &#x3D; \frac{\vec{A} \cdot \vec{B}}{|\vec{A}| \times |\vec{B}|}$$</p>
+<p>值域为 $[-1, 1]$，越接近 1 表示越相似。</p>
+<ol start="3">
+<li><strong>向量检索</strong>：当用户提问时，先将问题转化为向量，然后在向量数据库中用相似度算法（如 ANN，近似最近邻）找到最接近的文档片段。这就是 RAG 中”检索”步骤的数学本质。</li>
+</ol>
+<h3 id="为什么不直接用关键词搜索？"><a href="#为什么不直接用关键词搜索？" class="headerlink" title="为什么不直接用关键词搜索？"></a>为什么不直接用关键词搜索？</h3><p>关键词搜索是精确匹配，而 Embedding 是语义匹配：</p>
+<table>
+<thead>
+<tr>
+<th>搜索方式</th>
+<th>查询：”如何让程序更安全”</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>关键词搜索</td>
+<td>只能匹配包含”安全”这个词的文档</td>
+</tr>
+<tr>
+<td>向量检索</td>
+<td>能匹配到”内存安全”、”类型系统”、”所有权模型”等语义相关的内容</td>
+</tr>
+</tbody></table>
+<p>这就是为什么 RAG 系统普遍使用 Embedding + 向量检索，而不是简单的全文搜索。</p>
+<hr>
+<h2 id="文本分块（Chunking）策略"><a href="#文本分块（Chunking）策略" class="headerlink" title="文本分块（Chunking）策略"></a>文本分块（Chunking）策略</h2><p>在做 Embedding 之前，需要将长文档切分成合适大小的块。分块策略直接影响检索质量。</p>
+<h3 id="为什么要分块？"><a href="#为什么要分块？" class="headerlink" title="为什么要分块？"></a>为什么要分块？</h3><ul>
+<li><strong>模型限制</strong>：Embedding 模型对输入长度有限制，不能把整本书一次性喂进去。</li>
+<li><strong>检索精度</strong>：块太大，检索到的内容噪声多；块太小，上下文不完整。</li>
+<li><strong>LLM 上下文窗口</strong>：检索到的片段最终要拼入 LLM 的 prompt，上下文窗口有限。</li>
+</ul>
+<h3 id="常见分块策略"><a href="#常见分块策略" class="headerlink" title="常见分块策略"></a>常见分块策略</h3><table>
+<thead>
+<tr>
+<th>策略</th>
+<th>说明</th>
+<th>适用场景</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>固定大小分块</td>
+<td>按字符数&#x2F;Token 数切分</td>
+<td>通用场景</td>
+</tr>
+<tr>
+<td>段落分块</td>
+<td>按段落（<code>\n\n</code>）分割</td>
+<td>结构良好的文档</td>
+</tr>
+<tr>
+<td>语义分块</td>
+<td>根据语义相似度边界切分</td>
+<td>高质量检索需求</td>
+</tr>
+<tr>
+<td>递归分块</td>
+<td>先按大粒度分，再逐层细分</td>
+<td>复杂文档</td>
+</tr>
+</tbody></table>
+<p>本项目采用的是 <strong>段落分块 + 字符数上限</strong> 的策略：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">split_into_chunks</span>(text: &amp;<span class="type">str</span>, max_chars: <span class="type">usize</span>) <span class="punctuation">-&gt;</span> <span class="type">Vec</span>&lt;<span class="type">String</span>&gt; &#123;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">chunks</span> = <span class="type">Vec</span>::<span class="title function_ invoke__">new</span>();
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">current</span> = <span class="type">String</span>::<span class="title function_ invoke__">new</span>();
+    <span class="keyword">for</span> <span class="variable">para</span> <span class="keyword">in</span> text.<span class="title function_ invoke__">split</span>(<span class="string">&quot;\n\n&quot;</span>) &#123;
+        <span class="keyword">let</span> <span class="variable">para</span> = para.<span class="title function_ invoke__">trim</span>();
+        <span class="keyword">if</span> para.<span class="title function_ invoke__">is_empty</span>() &#123;
+            <span class="keyword">continue</span>;
+        &#125;
+        <span class="keyword">if</span> current.<span class="title function_ invoke__">len</span>() + para.<span class="title function_ invoke__">len</span>() + <span class="number">2</span> &gt; max_chars &amp;&amp; !current.<span class="title function_ invoke__">is_empty</span>() &#123;
+            chunks.<span class="title function_ invoke__">push</span>(current.<span class="title function_ invoke__">clone</span>());
+            current.<span class="title function_ invoke__">clear</span>();
+        &#125;
+        <span class="keyword">if</span> !current.<span class="title function_ invoke__">is_empty</span>() &#123;
+            current.<span class="title function_ invoke__">push_str</span>(<span class="string">&quot;\n\n&quot;</span>);
+        &#125;
+        current.<span class="title function_ invoke__">push_str</span>(para);
+    &#125;
+    <span class="keyword">if</span> !current.<span class="title function_ invoke__">is_empty</span>() &#123;
+        chunks.<span class="title function_ invoke__">push</span>(current);
+    &#125;
+    chunks
+&#125;</code></pre>
+
+<p>这段代码按双换行符（段落边界）分割文本，同时确保每个块不超过 <code>max_chars</code> 个字符（本项目设为 500）。</p>
+<hr>
+<h2 id="用-Rust-构建-RAG-系统实战"><a href="#用-Rust-构建-RAG-系统实战" class="headerlink" title="用 Rust 构建 RAG 系统实战"></a>用 Rust 构建 RAG 系统实战</h2><p>了解了原理，我们来看看如何用 Rust 实现一个完整的 RAG 系统。</p>
+<h3 id="技术栈"><a href="#技术栈" class="headerlink" title="技术栈"></a>技术栈</h3><table>
+<thead>
+<tr>
+<th>组件</th>
+<th>选择</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>语言</td>
+<td>Rust</td>
+<td>高性能、类型安全</td>
+</tr>
+<tr>
+<td>LLM 框架</td>
+<td>rig-core</td>
+<td>Rust 生态的 AI Agent 框架</td>
+</tr>
+<tr>
+<td>LLM 模型</td>
+<td>deepseek-r1:8b</td>
+<td>本地运行，通过 Ollama 提供服务</td>
+</tr>
+<tr>
+<td>Embedding 模型</td>
+<td>nomic-embed-text</td>
+<td>开源嵌入模型，Ollama 直接支持</td>
+</tr>
+<tr>
+<td>向量存储</td>
+<td>InMemoryVectorStore</td>
+<td>rig-core 内置的内存向量存储</td>
+</tr>
+<tr>
+<td>文档解析</td>
+<td>pdf-extract</td>
+<td>Rust PDF 文本提取库</td>
+</tr>
+</tbody></table>
+<h3 id="前置准备"><a href="#前置准备" class="headerlink" title="前置准备"></a>前置准备</h3><p>确保本地已安装并运行 Ollama，并拉取所需模型：</p>
+<pre><code class="highlight bash"><span class="comment"># 拉取 LLM 模型</span>
+ollama pull deepseek-r1:8b
+
+<span class="comment"># 拉取 Embedding 模型</span>
+ollama pull nomic-embed-text</code></pre>
+
+<h3 id="项目依赖"><a href="#项目依赖" class="headerlink" title="项目依赖"></a>项目依赖</h3><p><code>Cargo.toml</code> 中的依赖配置：</p>
+<pre><code class="highlight toml"><span class="section">[dependencies]</span>
+<span class="attr">anyhow</span> = <span class="string">&quot;1.0.102&quot;</span>
+<span class="attr">pdf-extract</span> = <span class="string">&quot;0.10.0&quot;</span>
+<span class="attr">rig-core</span> = <span class="string">&quot;0.32.0&quot;</span>
+<span class="attr">tokio</span> = &#123; version = <span class="string">&quot;1.50.0&quot;</span>, features = [<span class="string">&quot;rt&quot;</span>, <span class="string">&quot;macros&quot;</span>, <span class="string">&quot;rt-multi-thread&quot;</span>] &#125;
+<span class="attr">tracing-subscriber</span> = <span class="string">&quot;0.3&quot;</span>
+<span class="attr">tracing</span> = <span class="string">&quot;0.1&quot;</span></code></pre>
+
+<h3 id="完整代码解析"><a href="#完整代码解析" class="headerlink" title="完整代码解析"></a>完整代码解析</h3><p>下面是本项目 <code>main.rs</code> 的完整实现，我们逐步拆解：</p>
+<h4 id="第一步：解析-PDF-文档"><a href="#第一步：解析-PDF-文档" class="headerlink" title="第一步：解析 PDF 文档"></a>第一步：解析 PDF 文档</h4><pre><code class="highlight rust"><span class="keyword">use</span> pdf_extract::extract_text;
+
+<span class="keyword">fn</span> <span class="title function_">parse_pdf</span>(file_path: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="type">String</span>&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">text</span> = <span class="title function_ invoke__">extract_text</span>(file_path)?;
+    <span class="title function_ invoke__">Ok</span>(text)
+&#125;</code></pre>
+
+<p>使用 <code>pdf-extract</code> 库从 PDF 文件中提取纯文本。这是整个 RAG 流程的起点——将非结构化文档转化为可处理的文本。</p>
+<h4 id="第二步：文本分块"><a href="#第二步：文本分块" class="headerlink" title="第二步：文本分块"></a>第二步：文本分块</h4><pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">content</span> = <span class="title function_ invoke__">parse_pdf</span>(file_path)?;
+<span class="keyword">let</span> <span class="variable">chunks</span> = <span class="title function_ invoke__">split_into_chunks</span>(&amp;content, <span class="number">500</span>);</code></pre>
+
+<p>将提取的文本按段落分块，每块不超过 500 个字符。</p>
+<h4 id="第三步：生成-Embedding-并存入向量存储"><a href="#第三步：生成-Embedding-并存入向量存储" class="headerlink" title="第三步：生成 Embedding 并存入向量存储"></a>第三步：生成 Embedding 并存入向量存储</h4><pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">embedding_model</span> = ollama_client.<span class="title function_ invoke__">embedding_model</span>(<span class="string">&quot;nomic-embed-text&quot;</span>);
+<span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">builder</span> = EmbeddingsBuilder::<span class="title function_ invoke__">new</span>(embedding_model.<span class="title function_ invoke__">clone</span>());
+<span class="keyword">for</span> <span class="variable">chunk</span> <span class="keyword">in</span> &amp;chunks &#123;
+    builder = builder.<span class="title function_ invoke__">document</span>(chunk.<span class="title function_ invoke__">clone</span>())?;
+&#125;
+<span class="keyword">let</span> <span class="variable">embeddings</span> = builder.<span class="title function_ invoke__">build</span>().<span class="keyword">await</span>?;
+
+<span class="keyword">let</span> <span class="variable">vector_store</span> = InMemoryVectorStore::<span class="title function_ invoke__">from_documents</span>(embeddings);
+<span class="keyword">let</span> <span class="variable">index</span> = vector_store.<span class="title function_ invoke__">index</span>(embedding_model);</code></pre>
+
+<p>这几行代码完成了三件事：</p>
+<ol>
+<li>使用 Ollama 的 <code>nomic-embed-text</code> 模型将每个文本块转化为向量。</li>
+<li>将所有向量存入内存向量存储。</li>
+<li>创建索引，供后续检索使用。</li>
+</ol>
+<h4 id="第四步：构建-RAG-Agent-并启动交互"><a href="#第四步：构建-RAG-Agent-并启动交互" class="headerlink" title="第四步：构建 RAG Agent 并启动交互"></a>第四步：构建 RAG Agent 并启动交互</h4><pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">rag_agent</span> = ollama_client
+    .<span class="title function_ invoke__">agent</span>(<span class="string">&quot;deepseek-r1:8b&quot;</span>)
+    .<span class="title function_ invoke__">preamble</span>(<span class="string">&quot;您是一位乐于助人的助手，能够根据 PDF 文档中提供的上下文回答问题。&quot;</span>)
+    .<span class="title function_ invoke__">dynamic_context</span>(<span class="number">2</span>, index)
+    .<span class="title function_ invoke__">build</span>();
+
+<span class="keyword">let</span> <span class="variable">bot</span> = ChatBotBuilder::<span class="title function_ invoke__">new</span>().<span class="title function_ invoke__">agent</span>(rag_agent).<span class="title function_ invoke__">build</span>();
+bot.<span class="title function_ invoke__">run</span>().<span class="keyword">await</span>?;</code></pre>
+
+<p>关键在于 <code>.dynamic_context(2, index)</code> 这一行——它告诉 Agent：每次回答问题前，先从向量索引中检索最相关的 <strong>2 个</strong> 文档片段，作为上下文注入到 prompt 中。这就是 RAG 的核心机制。</p>
+<h3 id="运行效果"><a href="#运行效果" class="headerlink" title="运行效果"></a>运行效果</h3><pre><code class="highlight bash">cargo run</code></pre>
+
+<p>系统启动后会：</p>
+<ol>
+<li>解析指定的 PDF 文件</li>
+<li>将文本分块并生成 Embedding</li>
+<li>进入交互式聊天模式，你可以针对 PDF 内容提问</li>
+</ol>
+<hr>
+<h2 id="RAG-系统的优化方向"><a href="#RAG-系统的优化方向" class="headerlink" title="RAG 系统的优化方向"></a>RAG 系统的优化方向</h2><p>一个基础的 RAG 系统跑通后，还有很多可以优化的方向：</p>
+<table>
+<thead>
+<tr>
+<th>优化方向</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>分块策略优化</strong></td>
+<td>尝试语义分块、滑动窗口分块等更精细的策略</td>
+</tr>
+<tr>
+<td><strong>混合检索</strong></td>
+<td>结合向量检索 + BM25 关键词检索，提高召回率</td>
+</tr>
+<tr>
+<td><strong>重排序（Reranking）</strong></td>
+<td>对检索结果用交叉编码器重新打分，提升精度</td>
+</tr>
+<tr>
+<td><strong>持久化向量存储</strong></td>
+<td>从内存存储切换到 Qdrant、Milvus 等专业向量数据库</td>
+</tr>
+<tr>
+<td><strong>多文档格式支持</strong></td>
+<td>扩展支持 Word、HTML、Markdown 等更多格式</td>
+</tr>
+<tr>
+<td><strong>元数据过滤</strong></td>
+<td>为文档添加元数据（来源、时间），支持过滤检索</td>
+</tr>
+<tr>
+<td><strong>对话记忆</strong></td>
+<td>加入多轮对话上下文管理，提升交互体验</td>
+</tr>
+</tbody></table>
+<hr>
+<h2 id="总结"><a href="#总结" class="headerlink" title="总结"></a>总结</h2><p>本文从 RAG 的核心概念出发，深入介绍了 Embedding 向量嵌入原理、文本分块策略，以及完整的 RAG 系统架构，并用 Rust + rig-core + Ollama 在本地实现了一个能读懂 PDF 的 RAG 系统。</p>
+<p><strong>核心要点回顾：</strong></p>
+<ul>
+<li><strong>RAG</strong> 通过”先检索，再生成”的模式，让 LLM 能基于你的私有数据回答问题，有效减少幻觉。</li>
+<li><strong>Embedding</strong> 将文本映射为高维向量，使得语义相似的内容在向量空间中距离相近，是实现语义检索的基础。</li>
+<li><strong>文本分块</strong> 是连接文档和 Embedding 的桥梁，分块质量直接影响检索效果。</li>
+<li><strong>rig-core</strong> 为 Rust 开发者提供了简洁而强大的 RAG 构建能力，从 Embedding 到向量存储到 Agent 构建，一站式搞定。</li>
+</ul>
+<p>RAG 不是终点，而是 LLM 应用落地的起点。掌握了 RAG 的原理和实现，你就拥有了将 AI 能力与任何私有知识库深度融合的钥匙。接下来，不妨试试用自己的文档跑一遍，亲手感受”让 AI 开卷考试”的魅力吧！</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
