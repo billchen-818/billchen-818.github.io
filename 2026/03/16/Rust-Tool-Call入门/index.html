@@ -1,0 +1,575 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust Tool Call入门</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust Tool Call入门</h1><div class="time">2026-03-16</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>在前两篇文章中，我们用 Rust + rig-core 实现了 <a href="../rust-agent-demo/Rust%20Agent%E5%85%A5%E9%97%A8.md">AI Agent 对话</a> 和 <a href="../my-rag/Rust%20RAG%E5%85%A5%E9%97%A8.md">RAG 检索增强生成</a>。但你有没有想过：<strong>如果 LLM 不只是聊天，还能帮你查天气、做计算、调接口呢？</strong> 这就是 <strong>Tool Call（工具调用）</strong> 的能力——它让 LLM 从”只会说话”进化为”能动手干活”的智能体。</p>
+<p>本文将带你深入理解 Tool Call 的核心原理，并用 Rust + rig-core + Ollama 在本地实现一个支持多工具调用的 AI Agent。</p>
+<hr>
+<h2 id="什么是-Tool-Call？"><a href="#什么是-Tool-Call？" class="headerlink" title="什么是 Tool Call？"></a>什么是 Tool Call？</h2><p>Tool Call（工具调用），也叫 Function Calling（函数调用），是指 <strong>LLM 在对话过程中，根据用户意图主动选择并调用外部工具（函数）</strong> 的能力。</p>
+<p>传统 LLM 对话流程：</p>
+<pre><code class="highlight plaintext">用户提问 → LLM 生成文本回答（纯靠&quot;记忆&quot;）</code></pre>
+
+<p>有了 Tool Call 后：</p>
+<pre><code class="highlight plaintext">用户提问 → LLM 分析意图 → 决定调用哪个工具 → 传入参数 → 获取工具返回结果 → 结合结果生成最终回答</code></pre>
+
+<h3 id="一个直观的例子"><a href="#一个直观的例子" class="headerlink" title="一个直观的例子"></a>一个直观的例子</h3><p>当用户问：”上海今天天气怎么样？”</p>
+<ul>
+<li><strong>没有 Tool Call</strong>：LLM 只能说”我无法获取实时天气信息”或者编造一个答案。</li>
+<li><strong>有 Tool Call</strong>：LLM 识别出需要调用 <code>get_weather</code> 工具，传入参数 <code>city: &quot;上海&quot;</code>，获取真实天气数据后回答。</li>
+</ul>
+<h3 id="Tool-Call-vs-RAG"><a href="#Tool-Call-vs-RAG" class="headerlink" title="Tool Call vs RAG"></a>Tool Call vs RAG</h3><p>你可能会想：这和 RAG 有什么区别？</p>
+<table>
+<thead>
+<tr>
+<th>特性</th>
+<th>RAG</th>
+<th>Tool Call</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>核心思路</td>
+<td>先检索文档，再生成回答</td>
+<td>先调用函数，再生成回答</td>
+</tr>
+<tr>
+<td>数据来源</td>
+<td>预先索引的文档库</td>
+<td>实时调用的外部 API&#x2F;函数</td>
+</tr>
+<tr>
+<td>适用场景</td>
+<td>基于静态知识库的问答</td>
+<td>需要实时数据或执行操作的场景</td>
+</tr>
+<tr>
+<td>触发方式</td>
+<td>每次都检索</td>
+<td>LLM 自主判断是否需要调用</td>
+</tr>
+</tbody></table>
+<p>一句话总结：<strong>RAG 让 LLM “开卷考试”，Tool Call 让 LLM “动手实验”。</strong> 两者可以组合使用，构建更强大的 Agent。</p>
+<hr>
+<h2 id="Tool-Call-的工作原理"><a href="#Tool-Call-的工作原理" class="headerlink" title="Tool Call 的工作原理"></a>Tool Call 的工作原理</h2><p>Tool Call 的完整流程可以分为四个阶段：</p>
+<h3 id="1-工具注册（Tool-Registration）"><a href="#1-工具注册（Tool-Registration）" class="headerlink" title="1. 工具注册（Tool Registration）"></a>1. 工具注册（Tool Registration）</h3><p>在启动 Agent 之前，我们需要告诉 LLM 有哪些工具可用。每个工具需要提供：</p>
+<ul>
+<li><strong>名称（name）</strong>：工具的唯一标识，如 <code>get_weather</code></li>
+<li><strong>描述（description）</strong>：工具的功能说明，让 LLM 理解什么时候该用它</li>
+<li><strong>参数定义（parameters）</strong>：工具接受的输入参数及其类型</li>
+</ul>
+<pre><code class="highlight plaintext">可用工具列表：
+├── get_weather: 获取天气信息，参数: &#123; city: String &#125;
+├── get_local_time: 获取本地时间，参数: 无
+└── add: 执行加法操作，参数: &#123; x: u32, y: u32 &#125;</code></pre>
+
+<h3 id="2-意图识别与工具选择（Intent-Recognition）"><a href="#2-意图识别与工具选择（Intent-Recognition）" class="headerlink" title="2. 意图识别与工具选择（Intent Recognition）"></a>2. 意图识别与工具选择（Intent Recognition）</h3><p>当用户发送消息后，LLM 会分析用户意图，判断：</p>
+<ul>
+<li>是否需要调用工具？（普通聊天就直接回答）</li>
+<li>调用哪个工具？</li>
+<li>传入什么参数？</li>
+</ul>
+<p>LLM 的输出不再是普通文本，而是一个结构化的工具调用请求：</p>
+<pre><code class="highlight json"><span class="punctuation">&#123;</span>
+  <span class="attr">&quot;tool&quot;</span><span class="punctuation">:</span> <span class="string">&quot;get_weather&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;arguments&quot;</span><span class="punctuation">:</span> <span class="punctuation">&#123;</span>
+    <span class="attr">&quot;city&quot;</span><span class="punctuation">:</span> <span class="string">&quot;上海&quot;</span>
+  <span class="punctuation">&#125;</span>
+<span class="punctuation">&#125;</span></code></pre>
+
+<h3 id="3-工具执行（Tool-Execution）"><a href="#3-工具执行（Tool-Execution）" class="headerlink" title="3. 工具执行（Tool Execution）"></a>3. 工具执行（Tool Execution）</h3><p>框架（rig-core）收到 LLM 的工具调用请求后，会：</p>
+<ol>
+<li>根据工具名称找到对应的 Rust 函数</li>
+<li>反序列化参数</li>
+<li>执行函数，获取返回值</li>
+</ol>
+<h3 id="4-结果整合（Result-Integration）"><a href="#4-结果整合（Result-Integration）" class="headerlink" title="4. 结果整合（Result Integration）"></a>4. 结果整合（Result Integration）</h3><p>工具执行完毕后，框架将工具返回的结果重新注入给 LLM，LLM 结合工具结果生成最终的自然语言回答。</p>
+<pre><code class="highlight plaintext">工具返回: &#123; city: &quot;上海&quot;, temperature: 30, weather: &quot;Sunny&quot; &#125;
+LLM 最终回答: &quot;上海的天气是晴朗，温度是30度。&quot;</code></pre>
+
+<p>整个流程的时序图：</p>
+<pre><code class="highlight plaintext">用户 → Agent → LLM（分析意图）
+                  ↓
+              需要调用工具？
+              ├── 否 → 直接生成回答 → 返回用户
+              └── 是 → 输出工具调用请求
+                        ↓
+                  Agent 执行工具函数
+                        ↓
+                  将工具结果回传 LLM
+                        ↓
+                  LLM 生成最终回答 → 返回用户</code></pre>
+
+<hr>
+<h2 id="模型选择：不是所有模型都支持-Tool-Call"><a href="#模型选择：不是所有模型都支持-Tool-Call" class="headerlink" title="模型选择：不是所有模型都支持 Tool Call"></a>模型选择：不是所有模型都支持 Tool Call</h2><p>这是一个非常重要的注意事项：<strong>并非所有 LLM 都支持 Tool Call 能力</strong>。</p>
+<h3 id="哪些模型支持？"><a href="#哪些模型支持？" class="headerlink" title="哪些模型支持？"></a>哪些模型支持？</h3><table>
+<thead>
+<tr>
+<th>模型</th>
+<th>是否支持 Tool Call</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>qwen2.5</td>
+<td>✅ 支持</td>
+<td>对中文支持好，推荐使用</td>
+</tr>
+<tr>
+<td>llama3.1 &#x2F; llama3.2</td>
+<td>✅ 支持</td>
+<td>Meta 开源模型</td>
+</tr>
+<tr>
+<td>mistral</td>
+<td>✅ 支持</td>
+<td>Mistral AI 开源模型</td>
+</tr>
+<tr>
+<td>deepseek-r1</td>
+<td>❌ 不支持</td>
+<td>推理模型，专注思维链推理</td>
+</tr>
+<tr>
+<td>deepseek-v2</td>
+<td>✅ 支持</td>
+<td>DeepSeek 对话模型</td>
+</tr>
+</tbody></table>
+<h3 id="踩坑记录"><a href="#踩坑记录" class="headerlink" title="踩坑记录"></a>踩坑记录</h3><p>如果你使用不支持 Tool Call 的模型（如 <code>deepseek-r1:8b</code>），会收到类似下面的错误：</p>
+<pre><code class="highlight plaintext">thread &#x27;main&#x27; panicked at src/main.rs:30:50:
+called `Result::unwrap()` on an `Err` value: CompletionError(HttpError(
+  InvalidStatusCodeWithMessage(400, 
+  &quot;&#123;\&quot;error\&quot;:\&quot;registry.ollama.ai/library/deepseek-r1:8b does not support tools\&quot;&#125;&quot;)))</code></pre>
+
+<p>由于 <code>deepseek-r1</code> 是专注于思维链推理的模型，Ollama 官方明确标注其不支持 tools 能力，因此无法用于 Tool Call 场景。</p>
+<p><strong>解决方案</strong>：需要安装一个支持 Tool Call 的模型。本项目推荐使用 <code>qwen2.5:7b</code>，它对中文支持好且完整支持函数调用：</p>
+<pre><code class="highlight bash"><span class="comment"># 安装支持 Tool Call 的 qwen2.5 模型</span>
+ollama pull qwen2.5:7b</code></pre>
+
+<p>安装完成后，将代码中的模型名从 <code>deepseek-r1:8b</code> 改为 <code>qwen2.5:7b</code> 即可：</p>
+<pre><code class="highlight rust"><span class="comment">// ❌ deepseek-r1 不支持 Tool Call</span>
+<span class="keyword">let</span> <span class="variable">agent</span> = client.<span class="title function_ invoke__">agent</span>(<span class="string">&quot;deepseek-r1:8b&quot;</span>)
+
+<span class="comment">// ✅ 改用 qwen2.5，支持 Tool Call</span>
+<span class="keyword">let</span> <span class="variable">agent</span> = client.<span class="title function_ invoke__">agent</span>(<span class="string">&quot;qwen2.5:7b&quot;</span>)</code></pre>
+
+<hr>
+<h2 id="用-Rust-实现-Tool-Call-实战"><a href="#用-Rust-实现-Tool-Call-实战" class="headerlink" title="用 Rust 实现 Tool Call 实战"></a>用 Rust 实现 Tool Call 实战</h2><p>了解了原理，我们来看如何用 Rust + rig-core 实现一个支持多工具调用的 Agent。</p>
+<h3 id="技术栈"><a href="#技术栈" class="headerlink" title="技术栈"></a>技术栈</h3><table>
+<thead>
+<tr>
+<th>组件</th>
+<th>选择</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>语言</td>
+<td>Rust</td>
+<td>高性能、类型安全</td>
+</tr>
+<tr>
+<td>LLM 框架</td>
+<td>rig-core</td>
+<td>Rust 生态的 AI Agent 框架</td>
+</tr>
+<tr>
+<td>LLM 模型</td>
+<td>qwen2.5:7b</td>
+<td>支持 Tool Call，中文友好</td>
+</tr>
+<tr>
+<td>模型运行</td>
+<td>Ollama</td>
+<td>本地模型推理服务</td>
+</tr>
+</tbody></table>
+<h3 id="前置准备"><a href="#前置准备" class="headerlink" title="前置准备"></a>前置准备</h3><p>确保 Ollama 已安装并拉取模型：</p>
+<pre><code class="highlight bash"><span class="comment"># 拉取支持 Tool Call 的模型</span>
+ollama pull qwen2.5:7b</code></pre>
+
+<h3 id="项目结构"><a href="#项目结构" class="headerlink" title="项目结构"></a>项目结构</h3><pre><code class="highlight plaintext">tool/
+├── Cargo.toml
+└── src/
+    ├── main.rs        # 入口：构建 Agent，注册工具
+    ├── lib.rs         # 模块导出
+    ├── weather.rs     # 天气查询工具
+    ├── local.rs       # 本地时间工具
+    └── add.rs         # 加法运算工具</code></pre>
+
+<h3 id="项目依赖"><a href="#项目依赖" class="headerlink" title="项目依赖"></a>项目依赖</h3><p><code>Cargo.toml</code> 配置：</p>
+<pre><code class="highlight toml"><span class="section">[package]</span>
+<span class="attr">name</span> = <span class="string">&quot;tool&quot;</span>
+<span class="attr">version</span> = <span class="string">&quot;0.1.0&quot;</span>
+<span class="attr">edition</span> = <span class="string">&quot;2024&quot;</span>
+
+<span class="section">[dependencies]</span>
+<span class="attr">anyhow</span> = <span class="string">&quot;1.0.102&quot;</span>
+<span class="attr">chrono</span> = <span class="string">&quot;0.4.44&quot;</span>
+<span class="attr">rig-core</span> = <span class="string">&quot;0.32.0&quot;</span>
+<span class="attr">serde</span> = &#123; version = <span class="string">&quot;1.0.228&quot;</span>, features = [<span class="string">&quot;serde_derive&quot;</span>] &#125;
+<span class="attr">serde_json</span> = <span class="string">&quot;1.0.149&quot;</span>
+<span class="attr">thiserror</span> = <span class="string">&quot;2.0.18&quot;</span>
+<span class="attr">tokio</span> = &#123; version = <span class="string">&quot;1.50.0&quot;</span>, features = [<span class="string">&quot;macros&quot;</span>, <span class="string">&quot;rt&quot;</span>, <span class="string">&quot;rt-multi-thread&quot;</span>] &#125;</code></pre>
+
+<p>关键依赖说明：</p>
+<ul>
+<li><strong>rig-core</strong>：核心 Agent 框架，提供 <code>Tool</code> trait 和 Agent 构建能力</li>
+<li><strong>serde &#x2F; serde_json</strong>：序列化&#x2F;反序列化工具参数和返回值</li>
+<li><strong>thiserror</strong>：优雅的错误类型定义</li>
+<li><strong>chrono</strong>：获取本地时间（供 LocalTime 工具使用）</li>
+</ul>
+<hr>
+<h3 id="第一步：定义工具——天气查询"><a href="#第一步：定义工具——天气查询" class="headerlink" title="第一步：定义工具——天气查询"></a>第一步：定义工具——天气查询</h3><p>我们从最经典的天气查询工具开始。在 rig-core 中，实现一个 Tool 需要四个要素：</p>
+<ol>
+<li><strong>工具结构体</strong>：标识工具本身</li>
+<li><strong>参数类型（Args）</strong>：LLM 传入的参数</li>
+<li><strong>输出类型（Output）</strong>：工具返回的结果</li>
+<li><strong>错误类型（Error）</strong>：工具可能的错误</li>
+</ol>
+<p><code>src/weather.rs</code>：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> rig::&#123;completion::ToolDefinition, tool::Tool&#125;;
+<span class="keyword">use</span> serde::&#123;Deserialize, Serialize&#125;;
+
+<span class="meta">#[derive(Deserialize, Serialize)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">Weather</span>;
+
+<span class="meta">#[derive(Debug, Deserialize, Serialize)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">WeatherArgs</span> &#123;
+    city: <span class="type">String</span>,
+&#125;
+
+<span class="meta">#[derive(Debug, Serialize)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">WeatherResult</span> &#123;
+    city: <span class="type">String</span>,
+    temperature: <span class="type">i32</span>,
+    weather: <span class="type">String</span>,
+&#125;
+
+<span class="meta">#[derive(Debug, thiserror::Error)]</span>
+<span class="meta">#[error(<span class="string">&quot;天气工具错误&quot;</span>)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">WeatherError</span>;
+
+<span class="keyword">impl</span> <span class="title class_">Tool</span> <span class="keyword">for</span> <span class="title class_">Weather</span> &#123;
+    <span class="keyword">const</span> NAME: &amp;<span class="symbol">&#x27;static</span> <span class="type">str</span> = <span class="string">&quot;get_weather&quot;</span>;
+    <span class="keyword">type</span> <span class="title class_">Args</span> = WeatherArgs;
+    <span class="keyword">type</span> <span class="title class_">Error</span> = WeatherError;
+    <span class="keyword">type</span> <span class="title class_">Output</span> = WeatherResult;
+
+    <span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">definition</span>(&amp;<span class="keyword">self</span>, _prompt: <span class="type">String</span>) <span class="punctuation">-&gt;</span> ToolDefinition &#123;
+        ToolDefinition &#123;
+            name: <span class="keyword">Self</span>::NAME.<span class="title function_ invoke__">to_string</span>(),
+            description: <span class="string">&quot;获取天气信息&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+            parameters: serde_json::<span class="title function_ invoke__">to_value</span>(WeatherArgs &#123;
+                city: <span class="string">&quot;城市名称&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+            &#125;)
+            .<span class="title function_ invoke__">unwrap</span>(),
+        &#125;
+    &#125;
+
+    <span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">call</span>(&amp;<span class="keyword">self</span>, args: <span class="keyword">Self</span>::Args) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="keyword">Self</span>::Output, <span class="keyword">Self</span>::Error&gt; &#123;
+        <span class="title function_ invoke__">Ok</span>(<span class="title function_ invoke__">get_weather</span>(args).<span class="keyword">await</span>)
+    &#125;
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">get_weather</span>(args: WeatherArgs) <span class="punctuation">-&gt;</span> WeatherResult &#123;
+    WeatherResult &#123;
+        city: args.city,
+        temperature: <span class="number">30</span>,
+        weather: <span class="string">&quot;Sunny&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+    &#125;
+&#125;</code></pre>
+
+<p>逐一拆解：</p>
+<ul>
+<li><strong><code>const NAME</code></strong>：工具名称，LLM 通过这个名字来调用工具。</li>
+<li><strong><code>type Args</code></strong>：参数类型，需要实现 <code>Deserialize</code>，因为 LLM 输出的是 JSON，框架会自动反序列化。</li>
+<li><strong><code>type Output</code></strong>：返回类型，需要实现 <code>Serialize</code>，框架会将结果序列化后传回给 LLM。</li>
+<li><strong><code>definition()</code></strong>：返回工具的元信息（名称、描述、参数 schema），这些信息会随 prompt 一起发送给 LLM，帮助它理解工具能力。</li>
+<li><strong><code>call()</code></strong>：实际执行逻辑。这里用了一个模拟返回，实际项目中你可以调用真实的天气 API。</li>
+</ul>
+<blockquote>
+<p>💡 <strong>重点理解</strong>：<code>definition()</code> 返回的 <code>parameters</code> 字段不是”默认值”，而是”参数 schema”。它告诉 LLM 这个工具需要一个名为 <code>city</code> 的字符串参数。LLM 看到这个 schema 后，就知道调用时应该传什么样的参数。</p>
+</blockquote>
+<hr>
+<h3 id="第二步：定义工具——本地时间"><a href="#第二步：定义工具——本地时间" class="headerlink" title="第二步：定义工具——本地时间"></a>第二步：定义工具——本地时间</h3><p>一个不需要参数的工具示例。</p>
+<p><code>src/local.rs</code>：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> rig::&#123;completion::ToolDefinition, tool::Tool&#125;;
+<span class="keyword">use</span> serde::&#123;Deserialize, Serialize&#125;;
+
+<span class="meta">#[derive(Deserialize, Serialize)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">LocalTime</span>;
+
+<span class="meta">#[derive(Debug, thiserror::Error)]</span>
+<span class="meta">#[error(<span class="string">&quot;本地时间工具错误&quot;</span>)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">LocalTimeError</span>;
+
+<span class="keyword">impl</span> <span class="title class_">Tool</span> <span class="keyword">for</span> <span class="title class_">LocalTime</span> &#123;
+    <span class="keyword">const</span> NAME: &amp;<span class="symbol">&#x27;static</span> <span class="type">str</span> = <span class="string">&quot;get_local_time&quot;</span>;
+    <span class="keyword">type</span> <span class="title class_">Args</span> = ();
+    <span class="keyword">type</span> <span class="title class_">Error</span> = LocalTimeError;
+    <span class="keyword">type</span> <span class="title class_">Output</span> = <span class="type">String</span>;
+
+    <span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">definition</span>(&amp;<span class="keyword">self</span>, _prompt: <span class="type">String</span>) <span class="punctuation">-&gt;</span> ToolDefinition &#123;
+        ToolDefinition &#123;
+            name: <span class="keyword">Self</span>::NAME.<span class="title function_ invoke__">to_string</span>(),
+            description: <span class="string">&quot;获取本地时间&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+            parameters: serde_json::<span class="title function_ invoke__">to_value</span>(()).<span class="title function_ invoke__">unwrap</span>(),
+        &#125;
+    &#125;
+
+    <span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">call</span>(&amp;<span class="keyword">self</span>, _args: <span class="keyword">Self</span>::Args) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="keyword">Self</span>::Output, <span class="keyword">Self</span>::Error&gt; &#123;
+        <span class="title function_ invoke__">Ok</span>(chrono::Local::<span class="title function_ invoke__">now</span>().<span class="title function_ invoke__">to_rfc3339</span>())
+    &#125;
+&#125;</code></pre>
+
+<p>这个工具展示了最简形态：<strong>无参数输入，直接返回当前时间字符串</strong>。<code>type Args = ()</code> 表示不需要任何参数。</p>
+<hr>
+<h3 id="第三步：定义工具——加法计算"><a href="#第三步：定义工具——加法计算" class="headerlink" title="第三步：定义工具——加法计算"></a>第三步：定义工具——加法计算</h3><p>展示如何传递多个参数。</p>
+<p><code>src/add.rs</code>：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> rig::&#123;completion::ToolDefinition, tool::Tool&#125;;
+<span class="keyword">use</span> serde::&#123;Deserialize, Serialize&#125;;
+
+<span class="meta">#[derive(Deserialize, Serialize)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">Add</span>;
+
+<span class="meta">#[derive(Debug, Deserialize, Serialize)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">AddArgs</span> &#123;
+    x: <span class="type">u32</span>,
+    y: <span class="type">u32</span>,
+&#125;
+
+<span class="meta">#[derive(Debug, Serialize)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">AddResult</span> &#123;
+    sum: <span class="type">u32</span>,
+&#125;
+
+<span class="meta">#[derive(Debug, thiserror::Error)]</span>
+<span class="meta">#[error(<span class="string">&quot;加法工具错误&quot;</span>)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">AddError</span>;
+
+<span class="keyword">impl</span> <span class="title class_">Tool</span> <span class="keyword">for</span> <span class="title class_">Add</span> &#123;
+    <span class="keyword">const</span> NAME: &amp;<span class="symbol">&#x27;static</span> <span class="type">str</span> = <span class="string">&quot;add&quot;</span>;
+    <span class="keyword">type</span> <span class="title class_">Args</span> = AddArgs;
+    <span class="keyword">type</span> <span class="title class_">Error</span> = AddError;
+    <span class="keyword">type</span> <span class="title class_">Output</span> = AddResult;
+
+    <span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">definition</span>(&amp;<span class="keyword">self</span>, _prompt: <span class="type">String</span>) <span class="punctuation">-&gt;</span> ToolDefinition &#123;
+        ToolDefinition &#123;
+            name: <span class="keyword">Self</span>::NAME.<span class="title function_ invoke__">to_string</span>(),
+            description: <span class="string">&quot;执行加法操作&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+            parameters: serde_json::<span class="title function_ invoke__">to_value</span>(AddArgs &#123; x: <span class="number">0</span>, y: <span class="number">0</span> &#125;).<span class="title function_ invoke__">unwrap</span>(),
+        &#125;
+    &#125;
+
+    <span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">call</span>(&amp;<span class="keyword">self</span>, args: <span class="keyword">Self</span>::Args) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="keyword">Self</span>::Output, <span class="keyword">Self</span>::Error&gt; &#123;
+        <span class="title function_ invoke__">Ok</span>(<span class="title function_ invoke__">get_add</span>(args).<span class="keyword">await</span>)
+    &#125;
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">get_add</span>(args: AddArgs) <span class="punctuation">-&gt;</span> AddResult &#123;
+    AddResult &#123;
+        sum: args.x + args.y,
+    &#125;
+&#125;</code></pre>
+
+<hr>
+<h3 id="第四步：模块导出"><a href="#第四步：模块导出" class="headerlink" title="第四步：模块导出"></a>第四步：模块导出</h3><p><code>src/lib.rs</code>：</p>
+<pre><code class="highlight rust"><span class="keyword">pub</span> <span class="keyword">mod</span> add;
+<span class="keyword">pub</span> <span class="keyword">mod</span> local;
+<span class="keyword">pub</span> <span class="keyword">mod</span> weather;</code></pre>
+
+<hr>
+<h3 id="第五步：构建-Agent-并注册工具"><a href="#第五步：构建-Agent-并注册工具" class="headerlink" title="第五步：构建 Agent 并注册工具"></a>第五步：构建 Agent 并注册工具</h3><p><code>src/main.rs</code> 是整个项目的入口，负责创建 Agent 并把所有工具”挂载”上去。</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> anyhow::<span class="type">Result</span>;
+<span class="keyword">use</span> rig::&#123;
+    client::&#123;CompletionClient, Nothing&#125;,
+    completion::Prompt,
+    providers::ollama,
+&#125;;
+<span class="keyword">use</span> std::env;
+<span class="keyword">use</span> tool::&#123;add, local, weather&#125;;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;()&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">question</span> = env::<span class="title function_ invoke__">args</span>()
+        .<span class="title function_ invoke__">nth</span>(<span class="number">1</span>)
+        .<span class="title function_ invoke__">expect</span>(<span class="string">&quot;请提供一个问题作为命令行参数，例如: cargo run -- \&quot;你的问题\&quot;&quot;</span>);
+
+    <span class="keyword">let</span> <span class="variable">client</span> = ollama::Client::<span class="title function_ invoke__">new</span>(Nothing)?;
+
+    <span class="keyword">let</span> <span class="variable">weather_tool</span> = weather::Weather;
+    <span class="keyword">let</span> <span class="variable">local_time_tool</span> = local::LocalTime;
+    <span class="keyword">let</span> <span class="variable">add_tool</span> = add::Add;
+
+    <span class="keyword">let</span> <span class="variable">agent</span> = client
+        .<span class="title function_ invoke__">agent</span>(<span class="string">&quot;qwen2.5:7b&quot;</span>)
+        .<span class="title function_ invoke__">preamble</span>(<span class="string">&quot;你是一个智能助手，可以使用以下工具来回答用户的问题：&quot;</span>)
+        .<span class="title function_ invoke__">tool</span>(weather_tool)
+        .<span class="title function_ invoke__">tool</span>(local_time_tool)
+        .<span class="title function_ invoke__">tool</span>(add_tool)
+        .<span class="title function_ invoke__">build</span>();
+
+    <span class="keyword">let</span> <span class="variable">response</span> = agent.<span class="title function_ invoke__">prompt</span>(&amp;question).<span class="keyword">await</span>.<span class="title function_ invoke__">unwrap</span>();
+
+    <span class="built_in">println!</span>(<span class="string">&quot;Agent: &#123;&#125;&quot;</span>, response);
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;</code></pre>
+
+<p>关键代码解析：</p>
+<ol>
+<li><strong><code>ollama::Client::new(Nothing)</code></strong>：创建一个连接本地 Ollama 的客户端，<code>Nothing</code> 表示不需要额外配置（Ollama 默认跑在 <code>localhost:11434</code>）。</li>
+<li><strong><code>.agent(&quot;qwen2.5:7b&quot;)</code></strong>：指定使用 <code>qwen2.5:7b</code> 模型（必须支持 Tool Call）。</li>
+<li><strong><code>.preamble(...)</code></strong>：设置系统提示词，引导 LLM 的行为。</li>
+<li><strong><code>.tool(weather_tool)</code></strong>：注册工具。可以链式调用注册多个工具。</li>
+<li><strong><code>.build()</code></strong>：构建 Agent 实例。</li>
+<li><strong><code>agent.prompt(&amp;question)</code></strong>：发送用户问题。rig-core 会自动处理工具调用的完整流程——如果 LLM 决定调用工具，框架会执行工具、回传结果，最终返回整合后的回答。</li>
+</ol>
+<hr>
+<h3 id="运行测试"><a href="#运行测试" class="headerlink" title="运行测试"></a>运行测试</h3><p>编译并运行：</p>
+<pre><code class="highlight bash"><span class="comment"># 查询天气</span>
+cargo run -- <span class="string">&quot;上海天气怎么样？&quot;</span>
+<span class="comment"># Agent: 上海的天气是晴朗，温度是30度 Celsius。</span>
+
+<span class="comment"># 获取时间</span>
+cargo run -- <span class="string">&quot;现在几点了？&quot;</span>
+<span class="comment"># Agent: 现在的本地时间是2026年3月16日...</span>
+
+<span class="comment"># 执行计算</span>
+cargo run -- <span class="string">&quot;帮我算一下 123 + 456&quot;</span>
+<span class="comment"># Agent: 123 + 456 = 579</span>
+
+<span class="comment"># 普通聊天（不触发工具）</span>
+cargo run -- <span class="string">&quot;你好，介绍一下你自己&quot;</span>
+<span class="comment"># Agent: 你好！我是一个智能助手...</span></code></pre>
+
+<p>可以看到，LLM 会根据用户意图 <strong>自主决定</strong> 是否需要调用工具，以及调用哪一个工具。这就是 Tool Call 的魅力——Agent 拥有了”判断力”和”执行力”。</p>
+<hr>
+<h2 id="rig-core-中-Tool-trait-详解"><a href="#rig-core-中-Tool-trait-详解" class="headerlink" title="rig-core 中 Tool trait 详解"></a>rig-core 中 Tool trait 详解</h2><p>理解 <code>Tool</code> trait 是掌握 rig-core 工具调用的关键。下面是完整的 trait 定义及各部分的作用：</p>
+<pre><code class="highlight rust"><span class="keyword">pub</span> <span class="keyword">trait</span> <span class="title class_">Tool</span>: <span class="built_in">Send</span> + <span class="built_in">Sync</span> &#123;
+    <span class="comment">/// 工具名称，LLM 通过此名称识别和调用工具</span>
+    <span class="keyword">const</span> NAME: &amp;<span class="symbol">&#x27;static</span> <span class="type">str</span>;
+
+    <span class="comment">/// 工具接受的输入参数类型</span>
+    <span class="comment">/// 需要实现 Deserialize（从 LLM 的 JSON 输出反序列化）</span>
+    <span class="comment">/// 和 Serialize（序列化为参数 schema 供 LLM 理解）</span>
+    <span class="keyword">type</span> <span class="title class_">Args</span>: <span class="keyword">for</span>&lt;<span class="symbol">&#x27;a</span>&gt; Deserialize&lt;<span class="symbol">&#x27;a</span>&gt; + Serialize + <span class="built_in">Send</span>;
+
+    <span class="comment">/// 工具可能返回的错误类型</span>
+    <span class="keyword">type</span> <span class="title class_">Error</span>: std::error::Error + <span class="built_in">Send</span> + <span class="built_in">Sync</span>;
+
+    <span class="comment">/// 工具的输出类型</span>
+    <span class="comment">/// 需要实现 Serialize（序列化后回传给 LLM）</span>
+    <span class="keyword">type</span> <span class="title class_">Output</span>: Serialize;
+
+    <span class="comment">/// 返回工具的定义信息（名称、描述、参数 schema）</span>
+    <span class="comment">/// 这些信息会包含在发送给 LLM 的 prompt 中</span>
+    <span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">definition</span>(&amp;<span class="keyword">self</span>, prompt: <span class="type">String</span>) <span class="punctuation">-&gt;</span> ToolDefinition;
+
+    <span class="comment">/// 实际执行工具逻辑</span>
+    <span class="comment">/// 框架收到 LLM 的工具调用请求后，会调用此方法</span>
+    <span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">call</span>(&amp;<span class="keyword">self</span>, args: <span class="keyword">Self</span>::Args) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="keyword">Self</span>::Output, <span class="keyword">Self</span>::Error&gt;;
+&#125;</code></pre>
+
+<h3 id="自定义工具的模板"><a href="#自定义工具的模板" class="headerlink" title="自定义工具的模板"></a>自定义工具的模板</h3><p>如果你要实现自己的工具，可以参考以下模板：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> rig::&#123;completion::ToolDefinition, tool::Tool&#125;;
+<span class="keyword">use</span> serde::&#123;Deserialize, Serialize&#125;;
+
+<span class="comment">// 1. 工具结构体</span>
+<span class="meta">#[derive(Deserialize, Serialize)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">MyTool</span>;
+
+<span class="comment">// 2. 参数类型</span>
+<span class="meta">#[derive(Debug, Deserialize, Serialize)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">MyToolArgs</span> &#123;
+    <span class="comment">// 定义你的参数字段</span>
+    <span class="keyword">pub</span> query: <span class="type">String</span>,
+&#125;
+
+<span class="comment">// 3. 输出类型</span>
+<span class="meta">#[derive(Debug, Serialize)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">MyToolOutput</span> &#123;
+    <span class="keyword">pub</span> result: <span class="type">String</span>,
+&#125;
+
+<span class="comment">// 4. 错误类型</span>
+<span class="meta">#[derive(Debug, thiserror::Error)]</span>
+<span class="meta">#[error(<span class="string">&quot;工具执行失败&quot;</span>)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">MyToolError</span>;
+
+<span class="comment">// 5. 实现 Tool trait</span>
+<span class="keyword">impl</span> <span class="title class_">Tool</span> <span class="keyword">for</span> <span class="title class_">MyTool</span> &#123;
+    <span class="keyword">const</span> NAME: &amp;<span class="symbol">&#x27;static</span> <span class="type">str</span> = <span class="string">&quot;my_tool&quot;</span>;
+    <span class="keyword">type</span> <span class="title class_">Args</span> = MyToolArgs;
+    <span class="keyword">type</span> <span class="title class_">Error</span> = MyToolError;
+    <span class="keyword">type</span> <span class="title class_">Output</span> = MyToolOutput;
+
+    <span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">definition</span>(&amp;<span class="keyword">self</span>, _prompt: <span class="type">String</span>) <span class="punctuation">-&gt;</span> ToolDefinition &#123;
+        ToolDefinition &#123;
+            name: <span class="keyword">Self</span>::NAME.<span class="title function_ invoke__">to_string</span>(),
+            description: <span class="string">&quot;描述你的工具功能&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+            parameters: serde_json::<span class="title function_ invoke__">to_value</span>(MyToolArgs &#123;
+                query: <span class="string">&quot;参数说明&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+            &#125;).<span class="title function_ invoke__">unwrap</span>(),
+        &#125;
+    &#125;
+
+    <span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">call</span>(&amp;<span class="keyword">self</span>, args: <span class="keyword">Self</span>::Args) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="keyword">Self</span>::Output, <span class="keyword">Self</span>::Error&gt; &#123;
+        <span class="comment">// 实现你的业务逻辑</span>
+        <span class="title function_ invoke__">Ok</span>(MyToolOutput &#123;
+            result: <span class="built_in">format!</span>(<span class="string">&quot;处理结果: &#123;&#125;&quot;</span>, args.query),
+        &#125;)
+    &#125;
+&#125;</code></pre>
+
+<hr>
+<h2 id="与前两篇文章的关系"><a href="#与前两篇文章的关系" class="headerlink" title="与前两篇文章的关系"></a>与前两篇文章的关系</h2><p>回顾我们的系列文章，三者串联起了 Rust AI 应用开发的完整能力谱：</p>
+<pre><code class="highlight plaintext">Rust Agent 入门（基础对话）
+    ↓ 加入知识库检索
+Rust RAG 入门（检索增强生成）
+    ↓ 加入工具调用
+Rust Tool Call 入门（工具调用）← 你在这里
+    ↓ 三者组合
+全能 AI Agent = 对话 + 知识检索 + 工具执行</code></pre>
+
+<table>
+<thead>
+<tr>
+<th>能力</th>
+<th>实现方式</th>
+<th>解决的问题</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>基础对话</td>
+<td>Agent + preamble</td>
+<td>LLM 按角色设定回答</td>
+</tr>
+<tr>
+<td>知识增强</td>
+<td>RAG + 向量检索</td>
+<td>让 LLM 基于私有文档回答</td>
+</tr>
+<tr>
+<td>工具调用</td>
+<td>Tool Call</td>
+<td>让 LLM 执行实际操作</td>
+</tr>
+</tbody></table>
+<p>在实际项目中，这三种能力经常组合使用。比如一个客服 Agent 可以同时：</p>
+<ul>
+<li>用 <strong>RAG</strong> 检索产品文档回答用户问题</li>
+<li>用 <strong>Tool Call</strong> 查询订单状态、提交工单</li>
+<li>用 <strong>对话能力</strong> 进行自然流畅的交互</li>
+</ul>
+<hr>
+<h2 id="总结"><a href="#总结" class="headerlink" title="总结"></a>总结</h2><p>本文我们深入介绍了 Tool Call 的核心原理，并用 Rust + rig-core + Ollama 实现了一个支持多工具调用的 AI Agent。</p>
+<p><strong>核心要点回顾：</strong></p>
+<ul>
+<li><strong>Tool Call</strong> 让 LLM 从”纯文本生成”进化为”能调用外部函数”的智能体，极大扩展了 AI 的应用边界。</li>
+<li><strong>工作流程</strong>：工具注册 → LLM 意图识别 → 工具执行 → 结果整合，rig-core 框架封装了整个流程，开发者只需实现 <code>Tool</code> trait。</li>
+<li><strong>模型选择很重要</strong>：不是所有模型都支持 Tool Call，推理模型（如 deepseek-r1）不支持，需要选择 qwen2.5、llama3.1 等支持 function calling 的模型。</li>
+<li><strong>rig-core 的 Tool trait</strong> 设计简洁强大：通过 Rust 的类型系统，参数和返回值都有编译期检查，比动态语言的实现更安全可靠。</li>
+</ul>
+<p>至此，我们的 Rust AI 三部曲——<strong>Agent 对话、RAG 检索、Tool Call 调用</strong>——已经全部完成。掌握了这三大核心能力，你就拥有了用 Rust 构建生产级 AI 应用的完整工具箱。接下来，尝试将它们组合起来，打造属于你自己的全能 AI Agent 吧！</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
