@@ -1,0 +1,767 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust 实现一个自己的编码助手</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust 实现一个自己的编码助手</h1><div class="time">2026-03-17</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><h3 id="用-Rust-手搓一个-AI-编码助手：从原理到实现，300-行代码打造你的终端-Copilot"><a href="#用-Rust-手搓一个-AI-编码助手：从原理到实现，300-行代码打造你的终端-Copilot" class="headerlink" title="用 Rust 手搓一个 AI 编码助手：从原理到实现，300 行代码打造你的终端 Copilot"></a>用 Rust 手搓一个 AI 编码助手：从原理到实现，300 行代码打造你的终端 Copilot</h3><p>在之前的系列文章中，我们分别用 Rust + rig-core 实现了 <a href="./Rust-Agent-%E5%85%A5%E9%97%A8.md">AI Agent 对话</a>、<a href="./Rust-RAG%E5%AE%9E%E6%88%98.md">RAG 检索增强生成</a>和 <a href="./Rust-Tool-Call%E5%85%A5%E9%97%A8.md">Tool Call 工具调用</a>。今天，我们要把这些能力<strong>融合</strong>起来，做一件更酷的事——<strong>用 Rust 从零构建一个像 Claude Code &#x2F; Cursor 一样的终端编码助手</strong>。</p>
+<p>它能读文件、写文件、执行 Shell 命令，还能流式输出、多轮对话、自动处理超时。最关键的是，<strong>整个项目只有 300 行 Rust 代码</strong>。</p>
+<p>如果你跟着本文走完，你会深刻理解：</p>
+<ul>
+<li>编码助手的核心架构是什么</li>
+<li><code>tokio::process::Command</code> 异步执行命令的底层原理</li>
+<li><code>tokio::time::timeout</code> 超时控制机制</li>
+<li>流式输出（Streaming）+ 多轮对话（Multi-turn）的实现</li>
+<li>输出截断、错误处理等工程细节</li>
+</ul>
+<hr>
+<h2 id="为什么要自己造一个？"><a href="#为什么要自己造一个？" class="headerlink" title="为什么要自己造一个？"></a>为什么要自己造一个？</h2><p>市面上的 AI 编码助手（Cursor、Claude Code、GitHub Copilot）功能确实强大，但你有没有想过：</p>
+<ul>
+<li>它们的核心原理是什么？</li>
+<li>为什么 AI 能帮你执行命令、读写文件？</li>
+<li>背后的 Tool Call 机制到底怎么工作的？</li>
+</ul>
+<p><strong>理解原理、不是使用工具，才是工程师的核心竞争力。</strong> 自己动手实现一遍，比读十篇科普文章更有用。</p>
+<p>更何况，我们用的是 Rust——内存安全、零成本抽象、编译期检查——天然适合构建这种需要高可靠性的工具。</p>
+<hr>
+<h2 id="回顾：从对话到工具调用的进化之路"><a href="#回顾：从对话到工具调用的进化之路" class="headerlink" title="回顾：从对话到工具调用的进化之路"></a>回顾：从对话到工具调用的进化之路</h2><p>在正式开始之前，先回顾下我们系列文章的知识脉络，理解为什么一个编码助手需要这些能力：</p>
+<pre><code class="highlight plaintext">① Agent 基础对话        → LLM 能听懂你说话、按角色回答问题
+      ↓
+② RAG 检索增强          → LLM 能读你的文档、基于私有知识回答
+      ↓
+③ Tool Call 工具调用     → LLM 能主动调用函数、执行具体操作
+      ↓
+④ 编码助手（本文）       → 组合以上能力 + 流式输出 + 多轮对话 + 命令执行</code></pre>
+
+<table>
+<thead>
+<tr>
+<th>能力</th>
+<th>作用</th>
+<th>对应文章</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>基础对话</td>
+<td>理解用户意图，生成自然语言回答</td>
+<td>Rust Agent 入门</td>
+</tr>
+<tr>
+<td>RAG</td>
+<td>让 LLM 基于你的代码库&#x2F;文档回答问题</td>
+<td>Rust RAG 入门</td>
+</tr>
+<tr>
+<td>Tool Call</td>
+<td>让 LLM 动手执行操作（读写文件、跑命令）</td>
+<td>Rust Tool Call 入门</td>
+</tr>
+<tr>
+<td>流式输出</td>
+<td>像打字机一样实时显示回答，而非等全部生成完</td>
+<td><strong>本文</strong></td>
+</tr>
+<tr>
+<td>多轮对话</td>
+<td>记住上下文，支持连续交互</td>
+<td><strong>本文</strong></td>
+</tr>
+<tr>
+<td>命令超时</td>
+<td>防止命令卡死，给出友好提示</td>
+<td><strong>本文</strong></td>
+</tr>
+</tbody></table>
+<p>一句话概括：<strong>编码助手 &#x3D; Agent + Tool Call + 流式输出 + 多轮对话 + 工程化处理</strong>。</p>
+<hr>
+<h2 id="整体架构设计"><a href="#整体架构设计" class="headerlink" title="整体架构设计"></a>整体架构设计</h2><p>我们的编码助手叫 <code>rcode</code>，它的架构非常清晰：</p>
+<pre><code class="highlight plaintext">┌──────────────────────────────────────────┐
+│              用户终端 (REPL)              │
+│  &gt; 帮我看看 src/main.rs 有什么问题       │
+└───────────────┬──────────────────────────┘
+                │ 用户输入
+                ▼
+┌──────────────────────────────────────────┐
+│            rig-core Agent                │
+│  ┌─────────────────────────────────────┐ │
+│  │  System Prompt（角色设定）           │ │
+│  │  对话历史（多轮上下文）              │ │
+│  │  工具列表（bash/read/write）         │ │
+│  └─────────────────────────────────────┘ │
+└───────────────┬──────────────────────────┘
+                │ 发送给 LLM
+                ▼
+┌──────────────────────────────────────────┐
+│          LLM (qwen2.5:7b via Ollama)     │
+│                                          │
+│  分析意图 → 决定是否调用工具              │
+│  ├── 直接回答 → 流式输出文本              │
+│  └── 需要工具 → 返回工具调用请求          │
+│       ├── bash: 执行 Shell 命令           │
+│       ├── read_file: 读取文件内容         │
+│       └── write_file: 创建/修改文件       │
+└───────────────┬──────────────────────────┘
+                │ 工具结果 / 流式文本
+                ▼
+┌──────────────────────────────────────────┐
+│         流式输出到终端 + 更新对话历史      │
+└──────────────────────────────────────────┘</code></pre>
+
+<p>整个系统只有一个文件 <code>src/main.rs</code>，大约 300 行，包含：</p>
+<ul>
+<li>3 个工具定义（<code>ReadFile</code>、<code>WriteFile</code>、<code>Bash</code>）</li>
+<li>1 个主循环（REPL 交互 + 流式输出 + 多轮对话管理）</li>
+</ul>
+<hr>
+<h2 id="技术栈"><a href="#技术栈" class="headerlink" title="技术栈"></a>技术栈</h2><table>
+<thead>
+<tr>
+<th>组件</th>
+<th>选择</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>语言</td>
+<td>Rust</td>
+<td>高性能、内存安全、类型强</td>
+</tr>
+<tr>
+<td>LLM 框架</td>
+<td>rig-core 0.32</td>
+<td>Rust 生态 Agent 框架，支持 Tool Call + Streaming</td>
+</tr>
+<tr>
+<td>LLM 模型</td>
+<td>qwen2.5:7b</td>
+<td>支持 Tool Call，中文友好</td>
+</tr>
+<tr>
+<td>运行时</td>
+<td>Ollama</td>
+<td>本地模型推理，兼容 OpenAI API</td>
+</tr>
+<tr>
+<td>异步运行时</td>
+<td>tokio</td>
+<td>Rust 异步生态的事实标准</td>
+</tr>
+<tr>
+<td>流式处理</td>
+<td>futures</td>
+<td>提供 <code>StreamExt</code> 用于处理异步流</td>
+</tr>
+</tbody></table>
+<h3 id="项目依赖"><a href="#项目依赖" class="headerlink" title="项目依赖"></a>项目依赖</h3><pre><code class="highlight toml"><span class="section">[package]</span>
+<span class="attr">name</span> = <span class="string">&quot;rcode&quot;</span>
+<span class="attr">version</span> = <span class="string">&quot;0.1.0&quot;</span>
+<span class="attr">edition</span> = <span class="string">&quot;2024&quot;</span>
+
+<span class="section">[dependencies]</span>
+<span class="attr">anyhow</span> = <span class="string">&quot;1.0.102&quot;</span>
+<span class="attr">futures</span> = <span class="string">&quot;0.3.32&quot;</span>
+<span class="attr">rig-core</span> = <span class="string">&quot;0.32.0&quot;</span>
+<span class="attr">serde</span> = &#123; version = <span class="string">&quot;1.0.228&quot;</span>, features = [<span class="string">&quot;derive&quot;</span>] &#125;
+<span class="attr">serde_json</span> = <span class="string">&quot;1.0.149&quot;</span>
+<span class="attr">tokio</span> = &#123; version = <span class="string">&quot;1.50.0&quot;</span>, features = [<span class="string">&quot;process&quot;</span>, <span class="string">&quot;rt&quot;</span>, <span class="string">&quot;macros&quot;</span>, <span class="string">&quot;rt-multi-thread&quot;</span>] &#125;</code></pre>
+
+<p>注意 tokio 的 features：</p>
+<ul>
+<li><strong><code>process</code></strong>：启用 <code>tokio::process::Command</code>，用于异步执行子进程</li>
+<li><strong><code>rt</code></strong>：tokio 运行时核心</li>
+<li><strong><code>macros</code></strong>：启用 <code>#[tokio::main]</code> 宏</li>
+<li><strong><code>rt-multi-thread</code></strong>：多线程运行时，充分利用多核</li>
+</ul>
+<hr>
+<h2 id="深入解析：三大核心工具的实现"><a href="#深入解析：三大核心工具的实现" class="headerlink" title="深入解析：三大核心工具的实现"></a>深入解析：三大核心工具的实现</h2><p>编码助手的”手”和”眼”就是它的工具。我们为 rcode 定义了三个工具：</p>
+<h3 id="工具一：ReadFile-——-读取文件内容"><a href="#工具一：ReadFile-——-读取文件内容" class="headerlink" title="工具一：ReadFile —— 读取文件内容"></a>工具一：ReadFile —— 读取文件内容</h3><pre><code class="highlight rust"><span class="meta">#[derive(Deserialize, Serialize)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">ReadFile</span>;
+
+<span class="meta">#[derive(Deserialize, Serialize)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">ReadFileArgs</span> &#123;
+    path: <span class="type">String</span>,
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">Tool</span> <span class="keyword">for</span> <span class="title class_">ReadFile</span> &#123;
+    <span class="keyword">const</span> NAME: &amp;<span class="symbol">&#x27;static</span> <span class="type">str</span> = <span class="string">&quot;read_file&quot;</span>;
+    <span class="keyword">type</span> <span class="title class_">Error</span> = ToolError;
+    <span class="keyword">type</span> <span class="title class_">Args</span> = ReadFileArgs;
+    <span class="keyword">type</span> <span class="title class_">Output</span> = <span class="type">String</span>;
+
+    <span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">definition</span>(&amp;<span class="keyword">self</span>, _prompt: <span class="type">String</span>) <span class="punctuation">-&gt;</span> ToolDefinition &#123;
+        ToolDefinition &#123;
+            name: <span class="keyword">Self</span>::NAME.<span class="title function_ invoke__">to_string</span>(),
+            description: <span class="string">&quot;读取文件内容&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+            parameters: json!(&#123;
+                <span class="string">&quot;type&quot;</span>: <span class="string">&quot;object&quot;</span>,
+                <span class="string">&quot;properties&quot;</span>: &#123;
+                    <span class="string">&quot;path&quot;</span>: &#123;
+                        <span class="string">&quot;type&quot;</span>: <span class="string">&quot;string&quot;</span>,
+                        <span class="string">&quot;description&quot;</span>: <span class="string">&quot;The path to the file to read&quot;</span>
+                    &#125;
+                &#125;,
+                <span class="string">&quot;required&quot;</span>: [<span class="string">&quot;path&quot;</span>]
+            &#125;),
+        &#125;
+    &#125;
+
+    <span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">call</span>(&amp;<span class="keyword">self</span>, args: <span class="keyword">Self</span>::Args) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="keyword">Self</span>::Output, <span class="keyword">Self</span>::Error&gt; &#123;
+        std::fs::<span class="title function_ invoke__">read_to_string</span>(&amp;args.path)
+            .<span class="title function_ invoke__">map_err</span>(|e| ToolError::<span class="title function_ invoke__">ToolCallError</span>(
+                <span class="built_in">format!</span>(<span class="string">&quot;Failed to read file: &#123;&#125;&quot;</span>, e).<span class="title function_ invoke__">into</span>()
+            ))
+    &#125;
+&#125;</code></pre>
+
+<p>这是最简单的工具实现。几个关键点：</p>
+<ol>
+<li><p><strong><code>parameters</code> 用 JSON Schema 描述</strong>：和之前 Tool Call 文章中用 <code>serde_json::to_value</code> 不同，这里直接用 <code>json!</code> 宏手写 JSON Schema。好处是 LLM 能更准确地理解参数含义，因为 schema 里有 <code>description</code> 字段。</p>
+</li>
+<li><p><strong>错误处理用 <code>ToolError</code></strong>：rig-core 内置的错误类型，比自定义错误类型更方便，它能把错误信息自动回传给 LLM，让 AI 知道”工具调用失败了”，进而调整策略。</p>
+</li>
+<li><p><strong>同步 I&#x2F;O 在异步上下文中</strong>：<code>std::fs::read_to_string</code> 是阻塞操作。在这里用它没问题，因为文件读取通常很快。如果是读取大文件或网络文件系统，应该换用 <code>tokio::fs::read_to_string</code>。</p>
+</li>
+</ol>
+<h3 id="工具二：WriteFile-——-创建-修改文件"><a href="#工具二：WriteFile-——-创建-修改文件" class="headerlink" title="工具二：WriteFile —— 创建&#x2F;修改文件"></a>工具二：WriteFile —— 创建&#x2F;修改文件</h3><pre><code class="highlight rust"><span class="keyword">impl</span> <span class="title class_">Tool</span> <span class="keyword">for</span> <span class="title class_">WriteFile</span> &#123;
+    <span class="keyword">const</span> NAME: &amp;<span class="symbol">&#x27;static</span> <span class="type">str</span> = <span class="string">&quot;write_file&quot;</span>;
+    <span class="keyword">type</span> <span class="title class_">Error</span> = ToolError;
+    <span class="keyword">type</span> <span class="title class_">Args</span> = WriteFileArgs;
+    <span class="keyword">type</span> <span class="title class_">Output</span> = <span class="type">String</span>;
+
+    <span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">call</span>(&amp;<span class="keyword">self</span>, args: <span class="keyword">Self</span>::Args) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="keyword">Self</span>::Output, <span class="keyword">Self</span>::Error&gt; &#123;
+        <span class="comment">// 自动创建父目录</span>
+        <span class="keyword">if</span> <span class="keyword">let</span> <span class="variable">Some</span>(parent) = std::path::Path::<span class="title function_ invoke__">new</span>(&amp;args.path).<span class="title function_ invoke__">parent</span>()
+            &amp;&amp; !parent.<span class="title function_ invoke__">as_os_str</span>().<span class="title function_ invoke__">is_empty</span>()
+        &#123;
+            std::fs::<span class="title function_ invoke__">create_dir_all</span>(parent).<span class="title function_ invoke__">map_err</span>(|e| &#123;
+                ToolError::<span class="title function_ invoke__">ToolCallError</span>(
+                    <span class="built_in">format!</span>(<span class="string">&quot;Failed to create directories: &#123;&#125;&quot;</span>, e).<span class="title function_ invoke__">into</span>()
+                )
+            &#125;)?;
+        &#125;
+
+        std::fs::<span class="title function_ invoke__">write</span>(&amp;args.path, &amp;args.content)
+            .<span class="title function_ invoke__">map_err</span>(|e| ToolError::<span class="title function_ invoke__">ToolCallError</span>(
+                <span class="built_in">format!</span>(<span class="string">&quot;Failed to write file: &#123;&#125;&quot;</span>, e).<span class="title function_ invoke__">into</span>()
+            ))?;
+        <span class="title function_ invoke__">Ok</span>(<span class="string">&quot;File written successfully&quot;</span>.<span class="title function_ invoke__">to_string</span>())
+    &#125;
+&#125;</code></pre>
+
+<p>亮点是 <strong>自动创建父目录</strong>。当 LLM 决定创建 <code>src/utils/helper.rs</code> 时，即使 <code>src/utils/</code> 目录不存在，工具也会自动创建。这种细节决定了编码助手的可用性。</p>
+<p>注意这里用了 Rust 2024 edition 的 <code>let-else</code> 链式语法：</p>
+<pre><code class="highlight rust"><span class="keyword">if</span> <span class="keyword">let</span> <span class="variable">Some</span>(parent) = path.<span class="title function_ invoke__">parent</span>() &amp;&amp; !parent.<span class="title function_ invoke__">as_os_str</span>().<span class="title function_ invoke__">is_empty</span>() &#123;</code></pre>
+
+<p>这是 Rust 语言持续进化的一个缩影——语法越来越简洁，但安全性丝毫不减。</p>
+<h3 id="工具三：Bash-——-这才是重头戏"><a href="#工具三：Bash-——-这才是重头戏" class="headerlink" title="工具三：Bash —— 这才是重头戏"></a>工具三：Bash —— 这才是重头戏</h3><p>这是整个项目最复杂也最精华的部分。一个编码助手 90% 的能力来自于”能执行命令”，而正确地、安全地执行命令，涉及到异步进程管理、超时控制、输出处理等多个核心知识点。</p>
+<hr>
+<h2 id="深入原理：tokio-process-Command-异步命令执行"><a href="#深入原理：tokio-process-Command-异步命令执行" class="headerlink" title="深入原理：tokio::process::Command 异步命令执行"></a>深入原理：tokio::process::Command 异步命令执行</h2><h3 id="为什么不能用-std-process-Command？"><a href="#为什么不能用-std-process-Command？" class="headerlink" title="为什么不能用 std::process::Command？"></a>为什么不能用 std::process::Command？</h3><p>Rust 标准库提供了 <code>std::process::Command</code>，可以执行子进程。但它有一个致命问题：<strong>阻塞</strong>。</p>
+<pre><code class="highlight rust"><span class="comment">// ❌ 标准库方式 —— 阻塞当前线程</span>
+<span class="keyword">let</span> <span class="variable">output</span> = std::process::Command::<span class="title function_ invoke__">new</span>(<span class="string">&quot;bash&quot;</span>)
+    .<span class="title function_ invoke__">arg</span>(<span class="string">&quot;-c&quot;</span>)
+    .<span class="title function_ invoke__">arg</span>(<span class="string">&quot;sleep 10 &amp;&amp; echo done&quot;</span>)
+    .<span class="title function_ invoke__">output</span>()  <span class="comment">// 这里会阻塞 10 秒！</span>
+    .<span class="title function_ invoke__">unwrap</span>();</code></pre>
+
+<p>在一个异步应用中，阻塞线程意味着：</p>
+<ul>
+<li>整个 tokio 运行时的线程池被占用</li>
+<li>其他异步任务无法被调度</li>
+<li>如果所有线程都被阻塞，整个应用就”卡死”了</li>
+</ul>
+<h3 id="tokio-process-Command-的原理"><a href="#tokio-process-Command-的原理" class="headerlink" title="tokio::process::Command 的原理"></a>tokio::process::Command 的原理</h3><p><code>tokio::process::Command</code> 是标准库 <code>Command</code> 的异步封装。它的核心原理：</p>
+<pre><code class="highlight plaintext">                       ┌──────────────────────┐
+tokio::process::Command │                      │
+       spawn()  ──────► │   操作系统子进程      │
+                       │  (bash -c &quot;...&quot;)      │
+                       └──────────┬───────────┘
+                                  │
+                       ┌──────────▼───────────┐
+                       │  tokio 事件循环监听    │
+                       │  子进程的 fd/信号      │
+                       │  (epoll/kqueue)       │
+                       └──────────┬───────────┘
+                                  │
+                    子进程结束时触发事件
+                                  │
+                       ┌──────────▼───────────┐
+                       │  唤醒对应的 Future     │
+                       │  child.wait().await   │
+                       │  返回 ExitStatus      │
+                       └──────────────────────┘</code></pre>
+
+<p>关键区别：</p>
+<table>
+<thead>
+<tr>
+<th>特性</th>
+<th>std::process::Command</th>
+<th>tokio::process::Command</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>等待方式</td>
+<td>阻塞线程（<code>wait()</code>）</td>
+<td>异步等待（<code>wait().await</code>）</td>
+</tr>
+<tr>
+<td>线程占用</td>
+<td>占用一个 OS 线程</td>
+<td>不占用线程，内核事件驱动</td>
+</tr>
+<tr>
+<td>并发能力</td>
+<td>每个命令需要一个线程</td>
+<td>可以同时等待成千上万个子进程</td>
+</tr>
+<tr>
+<td>底层机制</td>
+<td><code>waitpid()</code> 系统调用（阻塞）</td>
+<td>epoll&#x2F;kqueue 事件通知 + SIGCHLD 信号</td>
+</tr>
+</tbody></table>
+<p>简单来说，<code>tokio::process::Command</code> 利用操作系统的事件通知机制（macOS 上是 kqueue，Linux 上是 epoll），<strong>在子进程运行期间不占用任何线程</strong>，只在子进程结束时通过事件回调来唤醒等待的 Future。</p>
+<h3 id="rcode-中的命令执行实现"><a href="#rcode-中的命令执行实现" class="headerlink" title="rcode 中的命令执行实现"></a>rcode 中的命令执行实现</h3><pre><code class="highlight rust"><span class="keyword">impl</span> <span class="title class_">Bash</span> &#123;
+    <span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">run</span>(&amp;<span class="keyword">self</span>, args: BashArgs) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="type">String</span>, ToolError&gt; &#123;
+        <span class="comment">// 1. 异步启动子进程</span>
+        <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">child</span> = Command::<span class="title function_ invoke__">new</span>(<span class="string">&quot;bash&quot;</span>)
+            .<span class="title function_ invoke__">arg</span>(<span class="string">&quot;-c&quot;</span>)
+            .<span class="title function_ invoke__">arg</span>(&amp;args.command)
+            .<span class="title function_ invoke__">stdout</span>(std::process::Stdio::<span class="title function_ invoke__">piped</span>())  <span class="comment">// 捕获标准输出</span>
+            .<span class="title function_ invoke__">stderr</span>(std::process::Stdio::<span class="title function_ invoke__">piped</span>())  <span class="comment">// 捕获标准错误</span>
+            .<span class="title function_ invoke__">spawn</span>()
+            .<span class="title function_ invoke__">map_err</span>(|e| ToolError::<span class="title function_ invoke__">ToolCallError</span>(
+                <span class="built_in">format!</span>(<span class="string">&quot;Failed to spawn command: &#123;&#125;&quot;</span>, e).<span class="title function_ invoke__">into</span>()
+            ))?;
+        <span class="comment">// ...</span>
+    &#125;
+&#125;</code></pre>
+
+<p>逐行解析：</p>
+<ol>
+<li><p><strong><code>Command::new(&quot;bash&quot;).arg(&quot;-c&quot;).arg(&amp;args.command)</code></strong>：用 bash 执行命令。<code>-c</code> 参数表示后面跟的是要执行的命令字符串。这意味着用户（通过 LLM）可以执行任何合法的 shell 命令，包括管道、重定向等。</p>
+</li>
+<li><p><strong><code>.stdout(Stdio::piped()).stderr(Stdio::piped())</code></strong>：将子进程的标准输出和标准错误<strong>管道化</strong>，这样我们就能在 Rust 代码中读取命令的输出，而不是让它直接打印到终端。</p>
+</li>
+<li><p><strong><code>.spawn()</code></strong>：启动子进程。注意这里是 <code>spawn()</code> 而不是 <code>output()</code>。<code>spawn()</code> 立即返回一个 <code>Child</code> 句柄，子进程在后台运行。这是异步模式的关键——我们拿到句柄后，可以对子进程做更精细的控制（比如超时）。</p>
+</li>
+</ol>
+<hr>
+<h2 id="深入原理：tokio-time-timeout-超时控制"><a href="#深入原理：tokio-time-timeout-超时控制" class="headerlink" title="深入原理：tokio::time::timeout 超时控制"></a>深入原理：tokio::time::timeout 超时控制</h2><h3 id="为什么需要超时？"><a href="#为什么需要超时？" class="headerlink" title="为什么需要超时？"></a>为什么需要超时？</h3><p>想象一下这个场景：用户让 AI 执行 <code>cargo build</code>，编译一个大项目，可能需要几分钟。又或者用户不小心触发了一个死循环脚本。如果没有超时机制，整个程序就会”挂”在那里，无法响应。</p>
+<h3 id="tokio-time-timeout-的原理"><a href="#tokio-time-timeout-的原理" class="headerlink" title="tokio::time::timeout 的原理"></a>tokio::time::timeout 的原理</h3><p><code>tokio::time::timeout</code> 是 tokio 提供的超时控制原语。它的工作原理：</p>
+<pre><code class="highlight rust"><span class="comment">// 伪代码：timeout 的内部实现逻辑</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">timeout</span>&lt;F: Future&gt;(duration: Duration, future: F) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;F::Output, Elapsed&gt; &#123;
+    tokio::<span class="built_in">select!</span> &#123;
+        result = future =&gt; <span class="title function_ invoke__">Ok</span>(result),      <span class="comment">// Future 先完成 → 返回结果</span>
+        _ = tokio::time::<span class="title function_ invoke__">sleep</span>(duration) =&gt; <span class="title function_ invoke__">Err</span>(Elapsed),  <span class="comment">// 定时器先到 → 返回超时</span>
+    &#125;
+&#125;</code></pre>
+
+<p>本质上是一个<strong>竞赛（Race）</strong>：</p>
+<pre><code class="highlight plaintext">                  ┌── future 完成 ──→ Ok(result)
+                  │
+tokio::select! ──┤
+                  │
+                  └── sleep 到期 ──→ Err(Elapsed)</code></pre>
+
+<p>两个 Future 同时被 poll，谁先完成就返回谁的结果。这里没有线程被阻塞，不需要额外创建线程，一切都在 tokio 事件循环中完成。</p>
+<h3 id="rcode-中的超时实现——优雅的”警告式超时”"><a href="#rcode-中的超时实现——优雅的”警告式超时”" class="headerlink" title="rcode 中的超时实现——优雅的”警告式超时”"></a>rcode 中的超时实现——优雅的”警告式超时”</h3><p>rcode 的超时策略很有意思：<strong>不是超时就杀进程，而是先给用户一个警告，然后继续等</strong>。</p>
+<pre><code class="highlight rust"><span class="keyword">const</span> WARNING_TIMEOUT_SECS: <span class="type">u64</span> = <span class="number">60</span>;
+
+<span class="keyword">let</span> <span class="variable">warning_duration</span> = Duration::<span class="title function_ invoke__">from_secs</span>(WARNING_TIMEOUT_SECS);
+<span class="keyword">let</span> <span class="variable">status</span> = <span class="keyword">match</span> tokio::time::<span class="title function_ invoke__">timeout</span>(warning_duration, child.<span class="title function_ invoke__">wait</span>()).<span class="keyword">await</span> &#123;
+    <span class="comment">// 情况一：60 秒内命令正常完成</span>
+    <span class="title function_ invoke__">Ok</span>(result) =&gt; result.<span class="title function_ invoke__">map_err</span>(|e| &#123;
+        ToolError::<span class="title function_ invoke__">ToolCallError</span>(<span class="built_in">format!</span>(<span class="string">&quot;Command failed: &#123;&#125;&quot;</span>, e).<span class="title function_ invoke__">into</span>())
+    &#125;)?,
+
+    <span class="comment">// 情况二：超过 60 秒，命令仍在运行</span>
+    <span class="title function_ invoke__">Err</span>(_) =&gt; &#123;
+        <span class="comment">// 不是杀掉进程！而是打印一条警告</span>
+        <span class="built_in">eprintln!</span>(
+            <span class="string">&quot;\n[Command running for &gt;&#123;&#125;s. Press Ctrl+C to interrupt]&quot;</span>,
+            WARNING_TIMEOUT_SECS
+        );
+        io::<span class="title function_ invoke__">stderr</span>().<span class="title function_ invoke__">flush</span>().<span class="title function_ invoke__">ok</span>();
+
+        <span class="comment">// 然后继续等待命令完成（无超时限制）</span>
+        child.<span class="title function_ invoke__">wait</span>().<span class="keyword">await</span>.<span class="title function_ invoke__">map_err</span>(|e| &#123;
+            ToolError::<span class="title function_ invoke__">ToolCallError</span>(<span class="built_in">format!</span>(<span class="string">&quot;Command failed: &#123;&#125;&quot;</span>, e).<span class="title function_ invoke__">into</span>())
+        &#125;)?
+    &#125;
+&#125;;</code></pre>
+
+<p>为什么这样设计？</p>
+<ol>
+<li><strong>编译命令可能就是慢</strong>：<code>cargo build</code> 大项目可能需要几分钟，直接杀掉不合理。</li>
+<li><strong>用户需要知情权</strong>：如果命令运行超过 60 秒，用户应该知道”还在跑”，而不是以为程序卡了。</li>
+<li><strong>保留中断权</strong>：用户看到提示后，可以自己按 <code>Ctrl+C</code> 来中断。</li>
+</ol>
+<p>这是一个非常实用的工程模式：</p>
+<pre><code class="highlight plaintext">┌────────────┐     ┌────────────────┐     ┌──────────────┐
+│ 0~60 秒    │ ──→ │ 安静等待       │ ──→ │ 正常返回结果  │
+│ 命令完成    │     │ 不打扰用户     │     │              │
+└────────────┘     └────────────────┘     └──────────────┘
+
+┌────────────┐     ┌────────────────┐     ┌──────────────┐
+│ 超过 60 秒  │ ──→ │ 打印警告提示   │ ──→ │ 继续等待     │
+│ 命令未完成  │     │ 用户可 Ctrl+C  │     │ 直到命令完成  │
+└────────────┘     └────────────────┘     └──────────────┘</code></pre>
+
+<h3 id="如果真要”硬超时”怎么办？"><a href="#如果真要”硬超时”怎么办？" class="headerlink" title="如果真要”硬超时”怎么办？"></a>如果真要”硬超时”怎么办？</h3><p>如果你的场景要求必须在某个时间内结束（比如 API 服务），可以改成：</p>
+<pre><code class="highlight rust"><span class="comment">// 硬超时：超时直接杀进程</span>
+<span class="keyword">match</span> tokio::time::<span class="title function_ invoke__">timeout</span>(Duration::<span class="title function_ invoke__">from_secs</span>(<span class="number">300</span>), child.<span class="title function_ invoke__">wait</span>()).<span class="keyword">await</span> &#123;
+    <span class="title function_ invoke__">Ok</span>(result) =&gt; &#123; <span class="comment">/* 正常完成 */</span> &#125;,
+    <span class="title function_ invoke__">Err</span>(_) =&gt; &#123;
+        child.<span class="title function_ invoke__">kill</span>().<span class="keyword">await</span>.<span class="title function_ invoke__">ok</span>();  <span class="comment">// 杀掉子进程</span>
+        <span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(<span class="string">&quot;Command timed out after 300s&quot;</span>.<span class="title function_ invoke__">into</span>());
+    &#125;
+&#125;</code></pre>
+
+<p><code>child.kill()</code> 会向子进程发送 SIGKILL 信号，强制终止。注意这是不可恢复的——子进程没有机会做清理工作。更温和的方式是先发 SIGTERM，等几秒后再 SIGKILL。</p>
+<hr>
+<h2 id="输出处理：大输出截断"><a href="#输出处理：大输出截断" class="headerlink" title="输出处理：大输出截断"></a>输出处理：大输出截断</h2><p>命令执行后，我们需要读取输出。但有些命令的输出可能非常大（比如 <code>cat</code> 一个大文件），直接传给 LLM 会导致 token 超限或响应变慢。</p>
+<pre><code class="highlight rust"><span class="keyword">const</span> MAX_OUTPUT_BYTES: <span class="type">usize</span> = <span class="number">50</span> * <span class="number">1024</span>;  <span class="comment">// 50KB 上限</span>
+
+<span class="comment">// 读取 stdout 和 stderr（异步读取）</span>
+<span class="keyword">if</span> <span class="keyword">let</span> <span class="variable">Some</span>(<span class="keyword">mut</span> stdout) = stdout &#123;
+    <span class="keyword">use</span> tokio::io::AsyncReadExt;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">buf</span> = <span class="type">Vec</span>::<span class="title function_ invoke__">new</span>();
+    stdout.<span class="title function_ invoke__">read_to_end</span>(&amp;<span class="keyword">mut</span> buf).<span class="keyword">await</span>.<span class="title function_ invoke__">ok</span>();
+    stdout_content = <span class="type">String</span>::<span class="title function_ invoke__">from_utf8_lossy</span>(&amp;buf).<span class="title function_ invoke__">to_string</span>();
+&#125;
+
+<span class="comment">// ... 拼接输出 ...</span>
+
+<span class="comment">// 截断过大的输出</span>
+<span class="keyword">let</span> <span class="variable">total_bytes</span> = output.<span class="title function_ invoke__">len</span>();
+<span class="keyword">if</span> total_bytes &gt; MAX_OUTPUT_BYTES &#123;
+    output.<span class="title function_ invoke__">truncate</span>(MAX_OUTPUT_BYTES);
+    <span class="comment">// 确保不会截断在 UTF-8 多字节字符的中间</span>
+    <span class="keyword">while</span> !output.<span class="title function_ invoke__">is_char_boundary</span>(output.<span class="title function_ invoke__">len</span>()) &#123;
+        output.<span class="title function_ invoke__">pop</span>();
+    &#125;
+    output.<span class="title function_ invoke__">push_str</span>(&amp;<span class="built_in">format!</span>(
+        <span class="string">&quot;\n... [output truncated, &#123;&#125; bytes total]&quot;</span>,
+        total_bytes
+    ));
+&#125;</code></pre>
+
+<p>这里有一个容易被忽视的细节：<strong>UTF-8 安全截断</strong>。</p>
+<p>UTF-8 编码中，中文字符占 3 个字节，如果你在第 2 个字节处截断，就会产生一个不合法的 UTF-8 序列。<code>is_char_boundary()</code> 方法检查某个位置是否是合法的字符边界：</p>
+<pre><code class="highlight plaintext">&quot;你好&quot; 的 UTF-8 编码：[0xE4, 0xBD, 0xA0, 0xE5, 0xA5, 0xBD]
+                     ↑         ↑         ↑
+                   边界       不是边界    边界</code></pre>
+
+<p><code>while !output.is_char_boundary(output.len())</code> 会一直回退，直到找到一个合法的字符边界。这种细节在 Python 等语言中不需要关心（因为字符串是 Unicode 的），但在 Rust 中，字节级别的操作让你必须显式处理。</p>
+<h3 id="退出码处理与输出组装"><a href="#退出码处理与输出组装" class="headerlink" title="退出码处理与输出组装"></a>退出码处理与输出组装</h3><pre><code class="highlight rust"><span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">output</span> = <span class="keyword">if</span> status.<span class="title function_ invoke__">success</span>() &#123;
+    <span class="comment">// 命令成功：输出 stdout，如果有 stderr 也附上</span>
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">out</span> = stdout_content;
+    <span class="keyword">if</span> !stderr_content.<span class="title function_ invoke__">is_empty</span>() &#123;
+        <span class="keyword">if</span> !out.<span class="title function_ invoke__">is_empty</span>() &#123; out.<span class="title function_ invoke__">push</span>(<span class="string">&#x27;<span class="char escape_">\n</span>&#x27;</span>); &#125;
+        out.<span class="title function_ invoke__">push_str</span>(<span class="string">&quot;stderr:\n&quot;</span>);
+        out.<span class="title function_ invoke__">push_str</span>(&amp;stderr_content);
+    &#125;
+    out
+&#125; <span class="keyword">else</span> &#123;
+    <span class="comment">// 命令失败：输出退出码 + stdout + stderr</span>
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">out</span> = <span class="built_in">format!</span>(<span class="string">&quot;Exit code: &#123;&#125;\n&quot;</span>, status.<span class="title function_ invoke__">code</span>().<span class="title function_ invoke__">unwrap_or</span>(-<span class="number">1</span>));
+    <span class="keyword">if</span> !stdout_content.<span class="title function_ invoke__">is_empty</span>() &#123;
+        out.<span class="title function_ invoke__">push_str</span>(<span class="string">&quot;stdout:\n&quot;</span>);
+        out.<span class="title function_ invoke__">push_str</span>(&amp;stdout_content);
+        out.<span class="title function_ invoke__">push</span>(<span class="string">&#x27;<span class="char escape_">\n</span>&#x27;</span>);
+    &#125;
+    <span class="keyword">if</span> !stderr_content.<span class="title function_ invoke__">is_empty</span>() &#123;
+        out.<span class="title function_ invoke__">push_str</span>(<span class="string">&quot;stderr:\n&quot;</span>);
+        out.<span class="title function_ invoke__">push_str</span>(&amp;stderr_content);
+    &#125;
+    out
+&#125;;</code></pre>
+
+<p>这段代码的设计意图：</p>
+<ul>
+<li><strong>命令成功</strong>时，LLM 主要关心 stdout（命令输出），stderr 作为补充信息。</li>
+<li><strong>命令失败</strong>时，LLM 需要知道退出码和错误信息（stderr），才能帮用户排查问题。</li>
+<li><strong><code>status.code().unwrap_or(-1)</code></strong>：如果进程被信号杀死（如 SIGKILL），<code>code()</code> 返回 <code>None</code>，这时用 -1 作为兜底值。</li>
+</ul>
+<hr>
+<h2 id="流式输出：StreamExt-Multi-Turn"><a href="#流式输出：StreamExt-Multi-Turn" class="headerlink" title="流式输出：StreamExt + Multi-Turn"></a>流式输出：StreamExt + Multi-Turn</h2><h3 id="为什么需要流式输出？"><a href="#为什么需要流式输出？" class="headerlink" title="为什么需要流式输出？"></a>为什么需要流式输出？</h3><p>普通的 <code>prompt().await</code> 是”一次性返回”——LLM 生成完所有内容后才返回结果。对于长回答，用户要等十几秒甚至更久才能看到第一个字。</p>
+<p>流式输出让 LLM 生成一个 token 就立即返回一个 token，像打字机一样逐字显示，大幅提升用户体验。</p>
+<h3 id="流式输出的实现"><a href="#流式输出的实现" class="headerlink" title="流式输出的实现"></a>流式输出的实现</h3><pre><code class="highlight rust"><span class="keyword">use</span> futures::StreamExt;
+<span class="keyword">use</span> rig::agent::MultiTurnStreamItem;
+<span class="keyword">use</span> rig::streaming::&#123;StreamedAssistantContent, StreamingPrompt&#125;;
+
+<span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">stream</span> = agent
+    .<span class="title function_ invoke__">stream_prompt</span>(input)           <span class="comment">// 流式发送 prompt</span>
+    .<span class="title function_ invoke__">with_history</span>(history.<span class="title function_ invoke__">clone</span>())  <span class="comment">// 附带对话历史</span>
+    .<span class="title function_ invoke__">multi_turn</span>(<span class="number">100</span>)                <span class="comment">// 最多 100 轮工具调用</span>
+    .<span class="keyword">await</span>;
+
+<span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">response_text</span> = <span class="type">String</span>::<span class="title function_ invoke__">new</span>();
+
+<span class="keyword">while</span> <span class="keyword">let</span> <span class="variable">Some</span>(chunk) = stream.<span class="title function_ invoke__">next</span>().<span class="keyword">await</span> &#123;
+    <span class="keyword">match</span> chunk &#123;
+        <span class="comment">// 文本片段——逐字打印</span>
+        <span class="title function_ invoke__">Ok</span>(MultiTurnStreamItem::<span class="title function_ invoke__">StreamAssistantItem</span>(
+            StreamedAssistantContent::<span class="title function_ invoke__">Text</span>(text),
+        )) =&gt; &#123;
+            <span class="built_in">print!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, text.text);
+            stdout.<span class="title function_ invoke__">flush</span>()?;
+            response_text.<span class="title function_ invoke__">push_str</span>(&amp;text.text);
+        &#125;
+
+        <span class="comment">// 工具调用——打印调用信息</span>
+        <span class="title function_ invoke__">Ok</span>(MultiTurnStreamItem::<span class="title function_ invoke__">StreamAssistantItem</span>(
+            StreamedAssistantContent::ToolCall &#123; tool_call, .. &#125;,
+        )) =&gt; &#123;
+            <span class="built_in">println!</span>(<span class="string">&quot;\n[Calling tool: &#123;&#125;]&quot;</span>, tool_call.function.name);
+        &#125;
+
+        <span class="comment">// 工具结果返回</span>
+        <span class="title function_ invoke__">Ok</span>(MultiTurnStreamItem::<span class="title function_ invoke__">StreamUserItem</span>(
+            rig::streaming::StreamedUserContent::ToolResult &#123; tool_result, .. &#125;,
+        )) =&gt; &#123;
+            <span class="built_in">println!</span>(<span class="string">&quot;[Tool result received for: &#123;&#125;]&quot;</span>, tool_result.id);
+        &#125;
+
+        <span class="comment">// 最终响应（包含 token 使用统计）</span>
+        <span class="title function_ invoke__">Ok</span>(MultiTurnStreamItem::<span class="title function_ invoke__">FinalResponse</span>(final_response)) =&gt; &#123;
+            <span class="keyword">let</span> <span class="variable">usage</span> = final_response.<span class="title function_ invoke__">usage</span>();
+            input_tokens = usage.input_tokens;
+            output_tokens = usage.output_tokens;
+        &#125;
+
+        <span class="title function_ invoke__">Err</span>(e) =&gt; &#123;
+            <span class="built_in">eprintln!</span>(<span class="string">&quot;\nError: &#123;&#125;&quot;</span>, e);
+            <span class="keyword">break</span>;
+        &#125;
+        _ =&gt; &#123;&#125;
+    &#125;
+&#125;</code></pre>
+
+<p>逐一讲解：</p>
+<h4 id="1-stream-prompt-vs-prompt"><a href="#1-stream-prompt-vs-prompt" class="headerlink" title="1. stream_prompt vs prompt"></a>1. <code>stream_prompt</code> vs <code>prompt</code></h4><pre><code class="highlight rust"><span class="comment">// 非流式：等所有内容生成完才返回</span>
+<span class="keyword">let</span> <span class="variable">response</span> = agent.<span class="title function_ invoke__">prompt</span>(<span class="string">&quot;问题&quot;</span>).<span class="keyword">await</span>?;
+
+<span class="comment">// 流式：返回一个 Stream，每生成一个片段就 yield 一次</span>
+<span class="keyword">let</span> <span class="variable">stream</span> = agent.<span class="title function_ invoke__">stream_prompt</span>(<span class="string">&quot;问题&quot;</span>).<span class="title function_ invoke__">with_history</span>(history).<span class="title function_ invoke__">multi_turn</span>(<span class="number">100</span>).<span class="keyword">await</span>;</code></pre>
+
+<h4 id="2-multi-turn-100-是什么？"><a href="#2-multi-turn-100-是什么？" class="headerlink" title="2. multi_turn(100) 是什么？"></a>2. <code>multi_turn(100)</code> 是什么？</h4><p>这是 rig-core 的一个重要特性。在一次交互中，LLM 可能需要<strong>多次工具调用</strong>：</p>
+<pre><code class="highlight plaintext">用户: &quot;帮我看看 src/main.rs 有什么问题，然后修复它&quot;
+
+LLM 第 1 轮: 调用 read_file(&quot;src/main.rs&quot;) → 读取文件内容
+LLM 第 2 轮: 分析后调用 write_file(&quot;src/main.rs&quot;, 修复后的内容) → 写入修复
+LLM 第 3 轮: 调用 bash(&quot;cargo build&quot;) → 验证修复是否成功
+LLM 第 4 轮: 生成总结文本 → 告诉用户修复完成</code></pre>
+
+<p><code>multi_turn(100)</code> 表示允许在一次 prompt 中最多进行 100 轮工具调用。这使得 LLM 可以自主完成复杂的多步骤任务。</p>
+<h4 id="3-StreamExt-next"><a href="#3-StreamExt-next" class="headerlink" title="3. StreamExt::next()"></a>3. <code>StreamExt::next()</code></h4><p><code>futures::StreamExt</code> 为 <code>Stream</code> trait 提供了 <code>next()</code> 方法，它返回一个 <code>Option</code>：</p>
+<ul>
+<li><code>Some(item)</code>：流中还有数据</li>
+<li><code>None</code>：流结束</li>
+</ul>
+<p><code>while let Some(chunk) = stream.next().await</code> 是标准的异步流消费模式。</p>
+<hr>
+<h2 id="多轮对话：上下文管理"><a href="#多轮对话：上下文管理" class="headerlink" title="多轮对话：上下文管理"></a>多轮对话：上下文管理</h2><p>编码助手的另一个关键能力是<strong>记住上下文</strong>。用户可能连续问几个相关的问题：</p>
+<pre><code class="highlight plaintext">&gt; 帮我创建一个新文件 utils.rs
+&gt; 把刚才那个文件加上错误处理
+&gt; 跑一下测试看看</code></pre>
+
+<p>每一轮都依赖前面的上下文。实现方式其实很简单：</p>
+<pre><code class="highlight rust"><span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">history</span>: <span class="type">Vec</span>&lt;Message&gt; = <span class="type">Vec</span>::<span class="title function_ invoke__">new</span>();
+
+<span class="keyword">loop</span> &#123;
+    <span class="comment">// ... 读取用户输入 ...</span>
+
+    <span class="comment">// 发送时附带历史记录</span>
+    <span class="keyword">let</span> <span class="variable">stream</span> = agent
+        .<span class="title function_ invoke__">stream_prompt</span>(input)
+        .<span class="title function_ invoke__">with_history</span>(history.<span class="title function_ invoke__">clone</span>())
+        .<span class="title function_ invoke__">multi_turn</span>(<span class="number">100</span>)
+        .<span class="keyword">await</span>;
+
+    <span class="comment">// ... 处理流式输出 ...</span>
+
+    <span class="comment">// 将这一轮对话存入历史</span>
+    history.<span class="title function_ invoke__">push</span>(Message::<span class="title function_ invoke__">user</span>(input));
+    <span class="keyword">if</span> !response_text.<span class="title function_ invoke__">is_empty</span>() &#123;
+        history.<span class="title function_ invoke__">push</span>(Message::<span class="title function_ invoke__">assistant</span>(response_text));
+    &#125;
+&#125;</code></pre>
+
+<p>每轮对话结束后，将用户消息和助手回复都存入 <code>history</code>。下次对话时，整个历史记录会一起发送给 LLM，这样 LLM 就能”记住”之前的对话内容。</p>
+<h3 id="历史记录的代价"><a href="#历史记录的代价" class="headerlink" title="历史记录的代价"></a>历史记录的代价</h3><p>需要注意的是，历史记录越长，每次请求的 token 数就越大：</p>
+<pre><code class="highlight plaintext">第 1 轮: [系统提示 + 用户消息 1]                    → ~500 tokens
+第 5 轮: [系统提示 + 5 轮对话历史]                   → ~3000 tokens
+第 20 轮: [系统提示 + 20 轮对话历史]                  → ~15000 tokens ⚠️</code></pre>
+
+<p>当历史记录超过模型的上下文窗口时，要么截断早期对话，要么进行摘要压缩。这是进阶优化的方向。</p>
+<hr>
+<h2 id="System-Prompt：塑造助手的”人格”"><a href="#System-Prompt：塑造助手的”人格”" class="headerlink" title="System Prompt：塑造助手的”人格”"></a>System Prompt：塑造助手的”人格”</h2><p>System Prompt（系统提示词）决定了 AI 助手的行为模式。rcode 的 System Prompt 简洁但信息量足够：</p>
+<pre><code class="highlight rust"><span class="keyword">const</span> SYSTEM_PROMPT: &amp;<span class="type">str</span> = <span class="string">r#&quot;You are rcode, an interactive AI coding tool running in the terminal.</span>
+<span class="string"></span>
+<span class="string">You have access to these tools:</span>
+<span class="string">- bash: Execute shell commands (runs in current working directory)</span>
+<span class="string">- read_file: Read file contents</span>
+<span class="string">- write_file: Create or modify files</span>
+<span class="string"></span>
+<span class="string">Guidelines:</span>
+<span class="string">- Use bash to explore projects, run tests, git operations, etc.</span>
+<span class="string">- Read files before modifying them to understand context</span>
+<span class="string">- Be concise and focused on solving the user&#x27;s problem</span>
+<span class="string">- When making changes, explain what you&#x27;re doing briefly</span>
+<span class="string">&quot;#</span>;</code></pre>
+
+<p>设计原则：</p>
+<ol>
+<li><strong>明确身份</strong>：告诉 LLM 自己是谁（终端编码助手）</li>
+<li><strong>列出工具</strong>：明确说明有哪些工具可用，以及每个工具能做什么</li>
+<li><strong>行为准则</strong>：引导 LLM 先读再改、简洁回答等好习惯</li>
+</ol>
+<p>好的 System Prompt 可以显著提升助手的表现。你可以根据自己的需求定制，比如加上”优先使用中文回答”或”修改文件前必须备份”等规则。</p>
+<hr>
+<h2 id="REPL-主循环：把一切串起来"><a href="#REPL-主循环：把一切串起来" class="headerlink" title="REPL 主循环：把一切串起来"></a>REPL 主循环：把一切串起来</h2><pre><code class="highlight rust"><span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;()&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">client</span> = ollama::Client::<span class="title function_ invoke__">new</span>(Nothing)?;
+
+    <span class="keyword">let</span> <span class="variable">agent</span> = client
+        .<span class="title function_ invoke__">agent</span>(<span class="string">&quot;qwen2.5:7b&quot;</span>)
+        .<span class="title function_ invoke__">preamble</span>(SYSTEM_PROMPT)
+        .<span class="title function_ invoke__">tool</span>(ReadFile)
+        .<span class="title function_ invoke__">tool</span>(WriteFile)
+        .<span class="title function_ invoke__">tool</span>(Bash)
+        .<span class="title function_ invoke__">max_tokens</span>(<span class="number">8192</span>)
+        .<span class="title function_ invoke__">build</span>();
+
+    <span class="built_in">println!</span>(<span class="string">&quot;Rig Code v0.1.0&quot;</span>);
+    <span class="built_in">println!</span>(<span class="string">&quot;Type &#x27;exit&#x27; or &#x27;quit&#x27; to exit.\n&quot;</span>);
+
+    <span class="keyword">let</span> <span class="variable">stdin</span> = io::<span class="title function_ invoke__">stdin</span>();
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">stdout</span> = io::<span class="title function_ invoke__">stdout</span>();
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">history</span>: <span class="type">Vec</span>&lt;Message&gt; = <span class="type">Vec</span>::<span class="title function_ invoke__">new</span>();
+
+    <span class="keyword">loop</span> &#123;
+        <span class="built_in">print!</span>(<span class="string">&quot;&gt; &quot;</span>);
+        stdout.<span class="title function_ invoke__">flush</span>()?;
+
+        <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">input</span> = <span class="type">String</span>::<span class="title function_ invoke__">new</span>();
+        <span class="keyword">match</span> stdin.<span class="title function_ invoke__">read_line</span>(&amp;<span class="keyword">mut</span> input) &#123;
+            <span class="title function_ invoke__">Ok</span>(<span class="number">0</span>) =&gt; &#123; <span class="built_in">println!</span>(<span class="string">&quot;\nGoodbye!&quot;</span>); <span class="keyword">break</span>; &#125;     <span class="comment">// EOF (Ctrl+D)</span>
+            <span class="title function_ invoke__">Err</span>(e) =&gt; &#123; <span class="built_in">eprintln!</span>(<span class="string">&quot;Error: &#123;&#125;&quot;</span>, e); &#125;
+            <span class="title function_ invoke__">Ok</span>(_) =&gt; &#123;
+                <span class="keyword">let</span> <span class="variable">input</span> = input.<span class="title function_ invoke__">trim</span>();
+                <span class="keyword">if</span> input.<span class="title function_ invoke__">eq_ignore_ascii_case</span>(<span class="string">&quot;exit&quot;</span>) || input.<span class="title function_ invoke__">eq_ignore_ascii_case</span>(<span class="string">&quot;quit&quot;</span>) &#123;
+                    <span class="keyword">break</span>;
+                &#125;
+                <span class="keyword">if</span> input.<span class="title function_ invoke__">is_empty</span>() &#123; <span class="keyword">continue</span>; &#125;
+
+                <span class="comment">// ... 流式对话处理 ...</span>
+            &#125;
+        &#125;
+    &#125;
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;</code></pre>
+
+<p>这就是 REPL（Read-Eval-Print Loop）模式：</p>
+<ol>
+<li><strong>Read</strong>：读取用户输入</li>
+<li><strong>Eval</strong>：发送给 LLM，执行工具调用</li>
+<li><strong>Print</strong>：流式输出结果</li>
+<li><strong>Loop</strong>：循环往复</li>
+</ol>
+<p>EOF 处理（<code>Ok(0)</code>）是个细节——当用户按 <code>Ctrl+D</code> 时，<code>read_line</code> 返回 0 个字节，表示输入流结束，程序应该优雅退出。</p>
+<hr>
+<h2 id="Token-统计：一个实用的小功能"><a href="#Token-统计：一个实用的小功能" class="headerlink" title="Token 统计：一个实用的小功能"></a>Token 统计：一个实用的小功能</h2><p>每轮对话结束后，rcode 会显示 token 使用量：</p>
+<pre><code class="highlight rust"><span class="built_in">println!</span>(
+    <span class="string">&quot;[Tokens: &#123;&#125; in / &#123;&#125; out]&quot;</span>,
+    format_number(input_tokens),
+    format_number(output_tokens)
+);</code></pre>
+
+<p><code>format_number</code> 函数将数字格式化为千分位表示（如 <code>1,234</code>），方便阅读：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">format_number</span>(n: <span class="type">u64</span>) <span class="punctuation">-&gt;</span> <span class="type">String</span> &#123;
+    <span class="keyword">let</span> <span class="variable">s</span> = n.<span class="title function_ invoke__">to_string</span>();
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">result</span> = <span class="type">String</span>::<span class="title function_ invoke__">new</span>();
+    <span class="keyword">for</span> (i, c) <span class="keyword">in</span> s.<span class="title function_ invoke__">chars</span>().<span class="title function_ invoke__">rev</span>().<span class="title function_ invoke__">enumerate</span>() &#123;
+        <span class="keyword">if</span> i &gt; <span class="number">0</span> &amp;&amp; i % <span class="number">3</span> == <span class="number">0</span> &#123;
+            result.<span class="title function_ invoke__">push</span>(<span class="string">&#x27;,&#x27;</span>);
+        &#125;
+        result.<span class="title function_ invoke__">push</span>(c);
+    &#125;
+    result.<span class="title function_ invoke__">chars</span>().<span class="title function_ invoke__">rev</span>().<span class="title function_ invoke__">collect</span>()
+&#125;</code></pre>
+
+<p>算法很巧妙：从数字末尾开始遍历，每 3 位插入一个逗号，最后再翻转回来。</p>
+<hr>
+<h2 id="运行效果"><a href="#运行效果" class="headerlink" title="运行效果"></a>运行效果</h2><pre><code class="highlight bash">cargo run</code></pre>
+
+<p>启动后进入交互模式：</p>
+<pre><code class="highlight plaintext">Rig Code v0.1.0
+Type &#x27;exit&#x27; or &#x27;quit&#x27; to exit.
+
+&gt; 帮我看看当前目录有什么文件
+
+[Calling tool: bash]
+[Tool result received for: call_1]
+
+当前目录包含以下文件：
+- Cargo.toml    # 项目配置
+- src/main.rs   # 主源文件
+
+[Tokens: 1,245 in / 89 out]
+
+&gt; 读一下 src/main.rs 然后帮我加上注释
+
+[Calling tool: read_file]
+[Tool result received for: call_2]
+[Calling tool: write_file]
+[Tool result received for: call_3]
+
+已经为 src/main.rs 添加了详细的中文注释，主要包括：
+1. 函数功能说明
+2. 关键逻辑解释
+3. 参数含义标注
+
+[Tokens: 3,456 in / 234 out]</code></pre>
+
+<hr>
+<h2 id="总结：一张图看清全貌"><a href="#总结：一张图看清全貌" class="headerlink" title="总结：一张图看清全貌"></a>总结：一张图看清全貌</h2><pre><code class="highlight plaintext">┌─────────────────────────── rcode 编码助手 ───────────────────────────┐
+│                                                                      │
+│  ┌──────────┐  ┌───────────┐  ┌───────────┐  ┌────────────────────┐ │
+│  │ ReadFile │  │ WriteFile │  │   Bash    │  │  System Prompt     │ │
+│  │ 读取文件  │  │ 写入文件   │  │ 执行命令  │  │  角色设定 + 规则   │ │
+│  └─────┬────┘  └─────┬─────┘  └─────┬─────┘  └────────┬───────────┘ │
+│        │             │              │                  │             │
+│        └─────────────┼──────────────┘                  │             │
+│                      │  Tool Call 机制                  │             │
+│                      ▼                                 │             │
+│  ┌───────────────────────────────────┐                 │             │
+│  │         rig-core Agent            │◄────────────────┘             │
+│  │  · 流式输出 (StreamExt)           │                               │
+│  │  · 多轮对话 (history)             │                               │
+│  │  · 多轮工具调用 (multi_turn)      │                               │
+│  └───────────────┬───────────────────┘                               │
+│                  │                                                    │
+│                  ▼                                                    │
+│  ┌───────────────────────────────────┐                               │
+│  │     LLM (qwen2.5:7b / Ollama)    │                               │
+│  └───────────────────────────────────┘                               │
+│                                                                      │
+│  核心技术点：                                                         │
+│  · tokio::process::Command  → 异步命令执行，不阻塞线程                │
+│  · tokio::time::timeout     → 60s 警告式超时，优雅处理长时间命令       │
+│  · futures::StreamExt       → 流式输出，逐字显示                      │
+│  · UTF-8 安全截断           → 50KB 输出上限，处理多字节字符边界        │
+│  · Message 历史数组          → 多轮对话上下文记忆                      │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘</code></pre>
+
+<p>回顾整个系列：</p>
+<ol>
+<li><strong><a href="../rust-agent-demo/Rust%20Agent%E5%85%A5%E9%97%A8.md">Rust Agent 入门</a></strong>：用 20 行代码搭建了第一个 AI 对话应用</li>
+<li><strong><a href="../my-rag/Rust%20RAG%E5%85%A5%E9%97%A8.md">Rust RAG 入门</a></strong>：让 AI 能读懂你的 PDF 文档，”开卷考试”</li>
+<li><strong><a href="../tool/Rust%20Tool%20Call%E5%85%A5%E9%97%A8.md">Rust Tool Call 入门</a></strong>：让 AI 会调函数、能动手干活</li>
+<li><strong>本文</strong>：把所有能力融合，300 行代码构建一个真正可用的编码助手</li>
+</ol>
+<p>从简单对话到能读能写能执行命令的编码助手，Rust + rig-core 让我们用极少的代码实现了惊人的功能。而 Rust 带来的内存安全、类型检查和高性能，让这个工具从”玩具”变成了可以真正日常使用的”利器”。</p>
+<p><strong>代码就是最好的教程，动手跑一遍吧。</strong></p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
