@@ -1,0 +1,1005 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust-闭包深入理解</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust-闭包深入理解</h1><div class="time">2026-03-29</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><h2 id="引言"><a href="#引言" class="headerlink" title="引言"></a>引言</h2><p>闭包是 Rust 中最常用的特性之一。迭代器链、异步回调、线程启动、错误处理——几乎所有场景都离不开闭包。</p>
+<p>很多人初学闭包时，写个 <code>|x| x + 1</code> 觉得”不就是匿名函数吗”，但真到了下面这些场景就会卡住：</p>
+<ul>
+<li>为什么这个闭包能传给 <code>map</code>，那个却不行？</li>
+<li><code>FnOnce</code>、<code>FnMut</code>、<code>Fn</code> 到底有什么区别？</li>
+<li>闭包到底是怎么捕获变量的？为什么有时候编译器报”value moved”？</li>
+<li><code>move</code> 关键字到底做了什么？什么时候必须加？</li>
+</ul>
+<p>这些问题的本质是：<strong>闭包不是简单的匿名函数，它是一个捕获了上下文环境的匿名结构体</strong>。</p>
+<p>这篇文章会从浅到深讲清楚：</p>
+<ol>
+<li>闭包的基本语法</li>
+<li>闭包如何捕获变量（不可变借用、可变借用、所有权转移）</li>
+<li><code>Fn</code>、<code>FnMut</code>、<code>FnOnce</code> 三个 trait 的定义与关系</li>
+<li>编译器如何推断闭包类型</li>
+<li><code>move</code> 闭包</li>
+<li>闭包作为参数和返回值</li>
+<li>闭包的底层实现原理</li>
+<li>实战场景与最佳实践</li>
+</ol>
+<hr>
+<h2 id="一、闭包的基本语法"><a href="#一、闭包的基本语法" class="headerlink" title="一、闭包的基本语法"></a>一、闭包的基本语法</h2><h3 id="1-1-最简形式"><a href="#1-1-最简形式" class="headerlink" title="1.1 最简形式"></a>1.1 最简形式</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// 普通函数</span>
+    <span class="keyword">fn</span> <span class="title function_">add_one</span>(x: <span class="type">i32</span>) <span class="punctuation">-&gt;</span> <span class="type">i32</span> &#123; x + <span class="number">1</span> &#125;
+
+    <span class="comment">// 闭包：用 |参数| 表达式 的形式定义</span>
+    <span class="keyword">let</span> <span class="variable">add_one</span> = |x: <span class="type">i32</span>| <span class="punctuation">-&gt;</span> <span class="type">i32</span> &#123; x + <span class="number">1</span> &#125;;
+
+    <span class="comment">// 闭包可以省略类型标注（编译器自动推断）</span>
+    <span class="keyword">let</span> <span class="variable">add_one</span> = |x| x + <span class="number">1</span>;
+
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, <span class="title function_ invoke__">add_one</span>(<span class="number">5</span>)); <span class="comment">// 6</span>
+&#125;</code></pre>
+
+<p>闭包的语法非常灵活，以下写法都合法：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">f1</span> = |x: <span class="type">i32</span>, y: <span class="type">i32</span>| <span class="punctuation">-&gt;</span> <span class="type">i32</span> &#123; x + y &#125;;  <span class="comment">// 完整标注</span>
+    <span class="keyword">let</span> <span class="variable">f2</span> = |x, y| x + y;                         <span class="comment">// 省略类型和花括号</span>
+    <span class="keyword">let</span> <span class="variable">f3</span> = || <span class="number">42</span>;                                 <span class="comment">// 无参数</span>
+    <span class="keyword">let</span> <span class="variable">f4</span> = || &#123; <span class="built_in">println!</span>(<span class="string">&quot;hello&quot;</span>); &#125;;             <span class="comment">// 无返回值</span>
+    <span class="keyword">let</span> <span class="variable">f5</span> = |x: &amp;<span class="type">str</span>| x.<span class="title function_ invoke__">len</span>();                    <span class="comment">// 引用参数</span>
+
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, <span class="title function_ invoke__">f1</span>(<span class="number">1</span>, <span class="number">2</span>)); <span class="comment">// 3</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, <span class="title function_ invoke__">f2</span>(<span class="number">3</span>, <span class="number">4</span>)); <span class="comment">// 7</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, <span class="title function_ invoke__">f3</span>());     <span class="comment">// 42</span>
+    <span class="title function_ invoke__">f4</span>();                     <span class="comment">// hello</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, <span class="title function_ invoke__">f5</span>(<span class="string">&quot;rust&quot;</span>)); <span class="comment">// 4</span>
+&#125;</code></pre>
+
+<h3 id="1-2-闭包-vs-函数的核心区别"><a href="#1-2-闭包-vs-函数的核心区别" class="headerlink" title="1.2 闭包 vs 函数的核心区别"></a>1.2 闭包 vs 函数的核心区别</h3><p>闭包和函数最大的不同在于：<strong>闭包可以捕获定义时所在环境中的变量</strong>。</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">name</span> = <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;Rust&quot;</span>);
+
+    <span class="comment">// 闭包捕获了外部变量 name</span>
+    <span class="keyword">let</span> <span class="variable">greet</span> = || <span class="built_in">println!</span>(<span class="string">&quot;Hello, &#123;&#125;!&quot;</span>, name);
+
+    <span class="title function_ invoke__">greet</span>(); <span class="comment">// Hello, Rust!</span>
+
+    <span class="comment">// 普通函数做不到这一点</span>
+    <span class="comment">// fn greet_fn() &#123; println!(&quot;Hello, &#123;&#125;!&quot;, name); &#125; // 编译错误</span>
+&#125;</code></pre>
+
+<p>这就是”闭包”名字的由来——它”封闭”了自己定义时的环境。</p>
+<hr>
+<h2 id="二、闭包如何捕获变量"><a href="#二、闭包如何捕获变量" class="headerlink" title="二、闭包如何捕获变量"></a>二、闭包如何捕获变量</h2><p>这是理解闭包的关键。Rust 编译器会为每个闭包生成一个匿名结构体，并根据闭包体中对变量的使用方式，自动选择最”轻量”的捕获方式：</p>
+<table>
+<thead>
+<tr>
+<th>优先级</th>
+<th>捕获方式</th>
+<th>对应操作</th>
+<th>类似于</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1（最优先）</td>
+<td>不可变借用</td>
+<td>只读取变量</td>
+<td><code>&amp;T</code></td>
+</tr>
+<tr>
+<td>2</td>
+<td>可变借用</td>
+<td>修改变量</td>
+<td><code>&amp;mut T</code></td>
+</tr>
+<tr>
+<td>3（最后手段）</td>
+<td>所有权转移</td>
+<td>消耗变量</td>
+<td><code>T</code></td>
+</tr>
+</tbody></table>
+<h3 id="2-1-不可变借用捕获"><a href="#2-1-不可变借用捕获" class="headerlink" title="2.1 不可变借用捕获"></a>2.1 不可变借用捕获</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">message</span> = <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;hello&quot;</span>);
+
+    <span class="keyword">let</span> <span class="variable">print_msg</span> = || &#123;
+        <span class="comment">// 只读取 message，编译器选择不可变借用</span>
+        <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, message);
+    &#125;;
+
+    <span class="title function_ invoke__">print_msg</span>();
+    <span class="title function_ invoke__">print_msg</span>(); <span class="comment">// 可以多次调用</span>
+
+    <span class="comment">// message 仍然可用，因为只是被借用了</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;原始: &#123;&#125;&quot;</span>, message);
+&#125;</code></pre>
+
+<h3 id="2-2-可变借用捕获"><a href="#2-2-可变借用捕获" class="headerlink" title="2.2 可变借用捕获"></a>2.2 可变借用捕获</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">count</span> = <span class="number">0</span>;
+
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">increment</span> = || &#123;
+        <span class="comment">// 修改了 count，编译器选择可变借用</span>
+        count += <span class="number">1</span>;
+        <span class="built_in">println!</span>(<span class="string">&quot;count = &#123;&#125;&quot;</span>, count);
+    &#125;;
+
+    <span class="title function_ invoke__">increment</span>(); <span class="comment">// count = 1</span>
+    <span class="title function_ invoke__">increment</span>(); <span class="comment">// count = 2</span>
+    <span class="title function_ invoke__">increment</span>(); <span class="comment">// count = 3</span>
+
+    <span class="comment">// 闭包不再使用后，可变借用释放</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;最终: &#123;&#125;&quot;</span>, count); <span class="comment">// 最终: 3</span>
+&#125;</code></pre>
+
+<p>注意两个关键点：</p>
+<ol>
+<li>闭包绑定 <code>increment</code> 必须声明为 <code>mut</code>，因为调用它会改变捕获的状态</li>
+<li>在闭包存活期间，<code>count</code> 不能被其他地方访问（Rust 的可变借用独占规则）</li>
+</ol>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">count</span> = <span class="number">0</span>;
+
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">increment</span> = || &#123; count += <span class="number">1</span>; &#125;;
+
+    <span class="comment">// println!(&quot;&#123;&#125;&quot;, count); // 编译错误！increment 持有 count 的可变借用</span>
+    <span class="title function_ invoke__">increment</span>();
+    <span class="title function_ invoke__">increment</span>();
+
+    <span class="comment">// increment 不再使用，可变借用释放</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, count); <span class="comment">// 正常：2</span>
+&#125;</code></pre>
+
+<h3 id="2-3-所有权转移捕获"><a href="#2-3-所有权转移捕获" class="headerlink" title="2.3 所有权转移捕获"></a>2.3 所有权转移捕获</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">name</span> = <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;Rust&quot;</span>);
+
+    <span class="keyword">let</span> <span class="variable">consume</span> = || &#123;
+        <span class="comment">// drop 需要所有权，编译器选择转移所有权</span>
+        <span class="title function_ invoke__">drop</span>(name);
+        <span class="built_in">println!</span>(<span class="string">&quot;name 已被释放&quot;</span>);
+    &#125;;
+
+    <span class="title function_ invoke__">consume</span>();
+    <span class="comment">// consume(); // 编译错误！闭包只能调用一次，因为 name 已经被消耗</span>
+    <span class="comment">// println!(&quot;&#123;&#125;&quot;, name); // 编译错误！name 已被移走</span>
+&#125;</code></pre>
+
+<h3 id="2-4-编译器的自动推断示例"><a href="#2-4-编译器的自动推断示例" class="headerlink" title="2.4 编译器的自动推断示例"></a>2.4 编译器的自动推断示例</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">s</span> = <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;hello&quot;</span>);
+
+    <span class="comment">// 场景1：只读 -&gt; 不可变借用</span>
+    <span class="keyword">let</span> <span class="variable">f1</span> = || <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, s);
+
+    <span class="comment">// 场景2：push 需要 &amp;mut -&gt; 可变借用</span>
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">v</span> = <span class="built_in">vec!</span>[<span class="number">1</span>, <span class="number">2</span>, <span class="number">3</span>];
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">f2</span> = || v.<span class="title function_ invoke__">push</span>(<span class="number">4</span>);
+
+    <span class="comment">// 场景3：传入接受所有权的函数 -&gt; 所有权转移</span>
+    <span class="keyword">let</span> <span class="variable">s2</span> = <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;world&quot;</span>);
+    <span class="keyword">let</span> <span class="variable">f3</span> = || &#123; <span class="keyword">let</span> <span class="variable">_</span> = s2; &#125;; <span class="comment">// s2 被移入闭包</span>
+&#125;</code></pre>
+
+<hr>
+<h2 id="三、FnOnce、FnMut、Fn：三个闭包-Trait"><a href="#三、FnOnce、FnMut、Fn：三个闭包-Trait" class="headerlink" title="三、FnOnce、FnMut、Fn：三个闭包 Trait"></a>三、FnOnce、FnMut、Fn：三个闭包 Trait</h2><p>Rust 用三个 trait 来描述闭包的能力。理解它们是理解闭包的核心。</p>
+<h3 id="3-1-Trait-定义"><a href="#3-1-Trait-定义" class="headerlink" title="3.1 Trait 定义"></a>3.1 Trait 定义</h3><pre><code class="highlight rust"><span class="comment">// 只能调用一次（消耗 self）</span>
+<span class="keyword">pub</span> <span class="keyword">trait</span> <span class="title class_">FnOnce</span>&lt;Args&gt; &#123;
+    <span class="keyword">type</span> <span class="title class_">Output</span>;
+    <span class="keyword">fn</span> <span class="title function_">call_once</span>(<span class="keyword">self</span>, args: Args) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span>::Output;
+&#125;
+
+<span class="comment">// 可以多次调用，但可能修改状态（&amp;mut self）</span>
+<span class="keyword">pub</span> <span class="keyword">trait</span> <span class="title class_">FnMut</span>&lt;Args&gt;: <span class="built_in">FnOnce</span>&lt;Args&gt; &#123;
+    <span class="keyword">fn</span> <span class="title function_">call_mut</span>(&amp;<span class="keyword">mut</span> <span class="keyword">self</span>, args: Args) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span>::Output;
+&#125;
+
+<span class="comment">// 可以多次调用，不修改状态（&amp;self）</span>
+<span class="keyword">pub</span> <span class="keyword">trait</span> <span class="title class_">Fn</span>&lt;Args&gt;: <span class="built_in">FnMut</span>&lt;Args&gt; &#123;
+    <span class="keyword">fn</span> <span class="title function_">call</span>(&amp;<span class="keyword">self</span>, args: Args) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span>::Output;
+&#125;</code></pre>
+
+<h3 id="3-2-继承关系"><a href="#3-2-继承关系" class="headerlink" title="3.2 继承关系"></a>3.2 继承关系</h3><p>这三个 trait 存在继承关系：</p>
+<pre><code class="highlight plaintext">  Fn
+  │  （Fn 继承 FnMut）
+  ▼
+FnMut
+  │  （FnMut 继承 FnOnce）
+  ▼
+FnOnce</code></pre>
+
+<p>也就是说：</p>
+<ul>
+<li>实现了 <code>Fn</code> 的闭包，自动实现了 <code>FnMut</code> 和 <code>FnOnce</code></li>
+<li>实现了 <code>FnMut</code> 的闭包，自动实现了 <code>FnOnce</code></li>
+<li>实现了 <code>FnOnce</code> 的闭包，不一定实现 <code>FnMut</code> 或 <code>Fn</code></li>
+</ul>
+<p>这个继承关系非常合理：能只读访问的闭包，当然也能可变访问；能多次调用的闭包，当然也能调用一次。</p>
+<h3 id="3-3-用-self-参数理解三个-Trait"><a href="#3-3-用-self-参数理解三个-Trait" class="headerlink" title="3.3 用 self 参数理解三个 Trait"></a>3.3 用 self 参数理解三个 Trait</h3><table>
+<thead>
+<tr>
+<th>Trait</th>
+<th>self 类型</th>
+<th>含义</th>
+<th>可调用次数</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>FnOnce</code></td>
+<td><code>self</code></td>
+<td>消耗闭包自身</td>
+<td>最多一次</td>
+</tr>
+<tr>
+<td><code>FnMut</code></td>
+<td><code>&amp;mut self</code></td>
+<td>可变借用闭包</td>
+<td>多次</td>
+</tr>
+<tr>
+<td><code>Fn</code></td>
+<td><code>&amp;self</code></td>
+<td>不可变借用闭包</td>
+<td>多次</td>
+</tr>
+</tbody></table>
+<h3 id="3-4-FnOnce：只能调用一次"><a href="#3-4-FnOnce：只能调用一次" class="headerlink" title="3.4 FnOnce：只能调用一次"></a>3.4 FnOnce：只能调用一次</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">consume_closure</span>&lt;F: <span class="title function_ invoke__">FnOnce</span>() <span class="punctuation">-&gt;</span> <span class="type">String</span>&gt;(f: F) &#123;
+    <span class="keyword">let</span> <span class="variable">result</span> = <span class="title function_ invoke__">f</span>(); <span class="comment">// 调用时消耗了 f</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, result);
+    <span class="comment">// let result2 = f(); // 编译错误！f 已被消耗</span>
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">name</span> = <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;Rust&quot;</span>);
+
+    <span class="comment">// 这个闭包移走了 name 的所有权，只能调用一次</span>
+    <span class="keyword">let</span> <span class="variable">closure</span> = || &#123;
+        <span class="keyword">let</span> <span class="variable">s</span> = name; <span class="comment">// name 被移入闭包体</span>
+        <span class="built_in">format!</span>(<span class="string">&quot;Hello, &#123;&#125;&quot;</span>, s)
+    &#125;;
+
+    <span class="title function_ invoke__">consume_closure</span>(closure);
+    <span class="comment">// consume_closure(closure); // 编译错误！closure 已被消耗</span>
+&#125;</code></pre>
+
+<p><strong>什么时候闭包是 FnOnce？</strong></p>
+<p>当闭包体内将捕获的变量<strong>移出</strong>（转移所有权）时，这个闭包只能实现 <code>FnOnce</code>，因为第二次调用时变量已经不在了。</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">data</span> = <span class="built_in">vec!</span>[<span class="number">1</span>, <span class="number">2</span>, <span class="number">3</span>];
+
+    <span class="comment">// data 被移入闭包，然后传给了 drop</span>
+    <span class="keyword">let</span> <span class="variable">f</span> = || <span class="title function_ invoke__">drop</span>(data);
+
+    <span class="title function_ invoke__">f</span>();
+    <span class="comment">// f(); // 编译错误!</span>
+&#125;</code></pre>
+
+<h3 id="3-5-FnMut：可以修改捕获的变量"><a href="#3-5-FnMut：可以修改捕获的变量" class="headerlink" title="3.5 FnMut：可以修改捕获的变量"></a>3.5 FnMut：可以修改捕获的变量</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">call_twice</span>&lt;F: <span class="title function_ invoke__">FnMut</span>()&gt;(<span class="keyword">mut</span> f: F) &#123;
+    <span class="title function_ invoke__">f</span>();
+    <span class="title function_ invoke__">f</span>();
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">total</span> = <span class="number">0</span>;
+
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">adder</span> = || &#123;
+        total += <span class="number">10</span>; <span class="comment">// 修改了 total</span>
+    &#125;;
+
+    <span class="title function_ invoke__">call_twice</span>(&amp;<span class="keyword">mut</span> adder);
+    <span class="built_in">println!</span>(<span class="string">&quot;total = &#123;&#125;&quot;</span>, total); <span class="comment">// 20</span>
+&#125;</code></pre>
+
+<p><strong>什么时候闭包是 FnMut（但不是 Fn）？</strong></p>
+<p>当闭包体内<strong>修改</strong>了捕获的变量时：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">log</span> = <span class="type">Vec</span>::<span class="title function_ invoke__">new</span>();
+
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">logger</span> = || &#123;
+        log.<span class="title function_ invoke__">push</span>(<span class="string">&quot;event&quot;</span>); <span class="comment">// 修改了 log</span>
+    &#125;;
+
+    <span class="title function_ invoke__">logger</span>();
+    <span class="title function_ invoke__">logger</span>();
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;:?&#125;&quot;</span>, log); <span class="comment">// [&quot;event&quot;, &quot;event&quot;]</span>
+&#125;</code></pre>
+
+<h3 id="3-6-Fn：纯只读访问"><a href="#3-6-Fn：纯只读访问" class="headerlink" title="3.6 Fn：纯只读访问"></a>3.6 Fn：纯只读访问</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">call_many_times</span>&lt;F: <span class="title function_ invoke__">Fn</span>() <span class="punctuation">-&gt;</span> <span class="type">String</span>&gt;(f: F) &#123;
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, <span class="title function_ invoke__">f</span>());
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, <span class="title function_ invoke__">f</span>());
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, <span class="title function_ invoke__">f</span>());
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">prefix</span> = <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;Hello&quot;</span>);
+
+    <span class="keyword">let</span> <span class="variable">greeter</span> = || &#123;
+        <span class="comment">// 只读取 prefix，不修改、不移走</span>
+        <span class="built_in">format!</span>(<span class="string">&quot;&#123;&#125;, World!&quot;</span>, prefix)
+    &#125;;
+
+    <span class="title function_ invoke__">call_many_times</span>(greeter);
+    <span class="comment">// 闭包调用完后 prefix 仍然可用</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;prefix 还在: &#123;&#125;&quot;</span>, prefix);
+&#125;</code></pre>
+
+<h3 id="3-7-三者对比的完整示例"><a href="#3-7-三者对比的完整示例" class="headerlink" title="3.7 三者对比的完整示例"></a>3.7 三者对比的完整示例</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// === Fn: 只读捕获 ===</span>
+    <span class="keyword">let</span> <span class="variable">name</span> = <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;Alice&quot;</span>);
+    <span class="keyword">let</span> <span class="variable">fn_closure</span> = || <span class="built_in">println!</span>(<span class="string">&quot;Hi, &#123;&#125;&quot;</span>, name);
+    <span class="title function_ invoke__">fn_closure</span>();
+    <span class="title function_ invoke__">fn_closure</span>(); <span class="comment">// 可以多次调用</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;name 还在: &#123;&#125;&quot;</span>, name); <span class="comment">// name 仍然可用</span>
+
+    <span class="comment">// === FnMut: 可变借用捕获 ===</span>
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">count</span> = <span class="number">0</span>;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">fn_mut_closure</span> = || &#123;
+        count += <span class="number">1</span>;
+        <span class="built_in">println!</span>(<span class="string">&quot;count = &#123;&#125;&quot;</span>, count);
+    &#125;;
+    <span class="title function_ invoke__">fn_mut_closure</span>(); <span class="comment">// count = 1</span>
+    <span class="title function_ invoke__">fn_mut_closure</span>(); <span class="comment">// count = 2</span>
+
+    <span class="comment">// === FnOnce: 所有权转移捕获 ===</span>
+    <span class="keyword">let</span> <span class="variable">data</span> = <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;important data&quot;</span>);
+    <span class="keyword">let</span> <span class="variable">fn_once_closure</span> = || &#123;
+        <span class="keyword">let</span> <span class="variable">moved</span> = data; <span class="comment">// 所有权转移</span>
+        <span class="built_in">println!</span>(<span class="string">&quot;消耗了: &#123;&#125;&quot;</span>, moved);
+    &#125;;
+    <span class="title function_ invoke__">fn_once_closure</span>();
+    <span class="comment">// fn_once_closure(); // 编译错误！</span>
+&#125;</code></pre>
+
+<hr>
+<h2 id="四、move-关键字：强制转移所有权"><a href="#四、move-关键字：强制转移所有权" class="headerlink" title="四、move 关键字：强制转移所有权"></a>四、move 关键字：强制转移所有权</h2><h3 id="4-1-move-的作用"><a href="#4-1-move-的作用" class="headerlink" title="4.1 move 的作用"></a>4.1 move 的作用</h3><p>默认情况下，编译器会选择最轻量的捕获方式。<code>move</code> 关键字强制闭包对所有捕获的变量获取所有权，而不是借用。</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">name</span> = <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;Rust&quot;</span>);
+
+    <span class="comment">// 不加 move：编译器选择不可变借用</span>
+    <span class="keyword">let</span> <span class="variable">closure1</span> = || <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, name);
+    <span class="title function_ invoke__">closure1</span>();
+    <span class="built_in">println!</span>(<span class="string">&quot;name 还在: &#123;&#125;&quot;</span>, name); <span class="comment">// name 仍可用</span>
+
+    <span class="comment">// 加 move：强制转移所有权</span>
+    <span class="keyword">let</span> <span class="variable">closure2</span> = <span class="keyword">move</span> || <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, name);
+    <span class="title function_ invoke__">closure2</span>();
+    <span class="comment">// println!(&quot;&#123;&#125;&quot;, name); // 编译错误！name 已被移入闭包</span>
+&#125;</code></pre>
+
+<h3 id="4-2-move-不改变闭包的-Trait-类型"><a href="#4-2-move-不改变闭包的-Trait-类型" class="headerlink" title="4.2 move 不改变闭包的 Trait 类型"></a>4.2 move 不改变闭包的 Trait 类型</h3><p>这是一个常见的误解。很多人以为 <code>move</code> 闭包一定是 <code>FnOnce</code>，但实际上：</p>
+<p><strong><code>move</code> 只影响捕获方式，不影响闭包实现哪个 Trait。</strong></p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">name</span> = <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;Rust&quot;</span>);
+
+    <span class="comment">// 虽然用了 move（name 被移入闭包），</span>
+    <span class="comment">// 但闭包体内只是读取 name，所以这个闭包实现了 Fn</span>
+    <span class="keyword">let</span> <span class="variable">closure</span> = <span class="keyword">move</span> || <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, name);
+
+    <span class="comment">// 可以多次调用</span>
+    <span class="title function_ invoke__">closure</span>();
+    <span class="title function_ invoke__">closure</span>();
+    <span class="title function_ invoke__">closure</span>();
+
+    <span class="comment">// 可以传给要求 Fn 的函数</span>
+    <span class="keyword">fn</span> <span class="title function_">takes_fn</span>(f: <span class="keyword">impl</span> <span class="title class_">Fn</span>()) &#123;
+        <span class="title function_ invoke__">f</span>();
+        <span class="title function_ invoke__">f</span>();
+    &#125;
+    <span class="title function_ invoke__">takes_fn</span>(closure);
+&#125;</code></pre>
+
+<p>关键区分：</p>
+<table>
+<thead>
+<tr>
+<th>情况</th>
+<th>move</th>
+<th>闭包体操作</th>
+<th>实现的 Trait</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>无</td>
+<td>只读</td>
+<td>Fn</td>
+</tr>
+<tr>
+<td>2</td>
+<td>无</td>
+<td>修改</td>
+<td>FnMut</td>
+</tr>
+<tr>
+<td>3</td>
+<td>无</td>
+<td>转移出</td>
+<td>FnOnce</td>
+</tr>
+<tr>
+<td>4</td>
+<td>有</td>
+<td>只读</td>
+<td><strong>Fn</strong>（move 不影响）</td>
+</tr>
+<tr>
+<td>5</td>
+<td>有</td>
+<td>修改</td>
+<td><strong>FnMut</strong></td>
+</tr>
+<tr>
+<td>6</td>
+<td>有</td>
+<td>转移出</td>
+<td><strong>FnOnce</strong></td>
+</tr>
+</tbody></table>
+<h3 id="4-3-move-的典型使用场景：跨线程"><a href="#4-3-move-的典型使用场景：跨线程" class="headerlink" title="4.3 move 的典型使用场景：跨线程"></a>4.3 move 的典型使用场景：跨线程</h3><p>当闭包需要发送到另一个线程时，必须使用 <code>move</code>，因为当前线程中的变量可能在子线程还在运行时就被释放了：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> std::thread;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">message</span> = <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;hello from main&quot;</span>);
+
+    <span class="comment">// 不加 move 会编译错误</span>
+    <span class="comment">// 因为 message 的引用可能比当前作用域活得短</span>
+    <span class="keyword">let</span> <span class="variable">handle</span> = thread::<span class="title function_ invoke__">spawn</span>(<span class="keyword">move</span> || &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;线程说: &#123;&#125;&quot;</span>, message);
+    &#125;);
+
+    <span class="comment">// println!(&quot;&#123;&#125;&quot;, message); // 编译错误：message 已被移走</span>
+    handle.<span class="title function_ invoke__">join</span>().<span class="title function_ invoke__">unwrap</span>();
+&#125;</code></pre>
+
+<h3 id="4-4-move-对-Copy-类型的影响"><a href="#4-4-move-对-Copy-类型的影响" class="headerlink" title="4.4 move 对 Copy 类型的影响"></a>4.4 move 对 Copy 类型的影响</h3><p>对于实现了 <code>Copy</code> 的类型，<code>move</code> 做的是拷贝而不是转移：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">x</span> = <span class="number">42</span>; <span class="comment">// i32 实现了 Copy</span>
+
+    <span class="keyword">let</span> <span class="variable">closure</span> = <span class="keyword">move</span> || <span class="built_in">println!</span>(<span class="string">&quot;x = &#123;&#125;&quot;</span>, x);
+    <span class="title function_ invoke__">closure</span>();
+
+    <span class="comment">// x 仍然可用，因为 i32 是 Copy 类型，move 只是拷贝了一份</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;x 仍然是: &#123;&#125;&quot;</span>, x);
+&#125;</code></pre>
+
+<hr>
+<h2 id="五、闭包作为函数参数"><a href="#五、闭包作为函数参数" class="headerlink" title="五、闭包作为函数参数"></a>五、闭包作为函数参数</h2><h3 id="5-1-使用泛型约束（最常用）"><a href="#5-1-使用泛型约束（最常用）" class="headerlink" title="5.1 使用泛型约束（最常用）"></a>5.1 使用泛型约束（最常用）</h3><pre><code class="highlight rust"><span class="comment">// 接受 Fn 闭包</span>
+<span class="keyword">fn</span> <span class="title function_">apply</span>&lt;F: <span class="title function_ invoke__">Fn</span>(<span class="type">i32</span>) <span class="punctuation">-&gt;</span> <span class="type">i32</span>&gt;(f: F, x: <span class="type">i32</span>) <span class="punctuation">-&gt;</span> <span class="type">i32</span> &#123;
+    <span class="title function_ invoke__">f</span>(x)
+&#125;
+
+<span class="comment">// 接受 FnMut 闭包</span>
+<span class="keyword">fn</span> <span class="title function_">apply_mut</span>&lt;F: <span class="title function_ invoke__">FnMut</span>(<span class="type">i32</span>)&gt;(<span class="keyword">mut</span> f: F, items: &amp;[<span class="type">i32</span>]) &#123;
+    <span class="keyword">for</span> &amp;item <span class="keyword">in</span> items &#123;
+        <span class="title function_ invoke__">f</span>(item);
+    &#125;
+&#125;
+
+<span class="comment">// 接受 FnOnce 闭包</span>
+<span class="keyword">fn</span> <span class="title function_">apply_once</span>&lt;F: <span class="title function_ invoke__">FnOnce</span>() <span class="punctuation">-&gt;</span> <span class="type">String</span>&gt;(f: F) <span class="punctuation">-&gt;</span> <span class="type">String</span> &#123;
+    <span class="title function_ invoke__">f</span>()
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// Fn</span>
+    <span class="keyword">let</span> <span class="variable">double</span> = |x| x * <span class="number">2</span>;
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, <span class="title function_ invoke__">apply</span>(double, <span class="number">5</span>)); <span class="comment">// 10</span>
+
+    <span class="comment">// FnMut</span>
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">sum</span> = <span class="number">0</span>;
+    <span class="title function_ invoke__">apply_mut</span>(|x| sum += x, &amp;[<span class="number">1</span>, <span class="number">2</span>, <span class="number">3</span>, <span class="number">4</span>, <span class="number">5</span>]);
+    <span class="built_in">println!</span>(<span class="string">&quot;sum = &#123;&#125;&quot;</span>, sum); <span class="comment">// 15</span>
+
+    <span class="comment">// FnOnce</span>
+    <span class="keyword">let</span> <span class="variable">name</span> = <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;Rust&quot;</span>);
+    <span class="keyword">let</span> <span class="variable">result</span> = <span class="title function_ invoke__">apply_once</span>(|| <span class="built_in">format!</span>(<span class="string">&quot;Hello, &#123;&#125;&quot;</span>, name));
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, result); <span class="comment">// Hello, Rust</span>
+&#125;</code></pre>
+
+<h3 id="5-2-使用-impl-Trait-语法"><a href="#5-2-使用-impl-Trait-语法" class="headerlink" title="5.2 使用 impl Trait 语法"></a>5.2 使用 impl Trait 语法</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">apply</span>(f: <span class="keyword">impl</span> <span class="title class_">Fn</span>(<span class="type">i32</span>) <span class="punctuation">-&gt;</span> <span class="type">i32</span>, x: <span class="type">i32</span>) <span class="punctuation">-&gt;</span> <span class="type">i32</span> &#123;
+    <span class="title function_ invoke__">f</span>(x)
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, <span class="title function_ invoke__">apply</span>(|x| x * <span class="number">3</span>, <span class="number">10</span>)); <span class="comment">// 30</span>
+&#125;</code></pre>
+
+<h3 id="5-3-该选哪个-Trait？"><a href="#5-3-该选哪个-Trait？" class="headerlink" title="5.3 该选哪个 Trait？"></a>5.3 该选哪个 Trait？</h3><p>经验法则：</p>
+<ul>
+<li><strong>如果你只需要调用闭包一次</strong> → 用 <code>FnOnce</code>（最宽松，接受所有闭包）</li>
+<li><strong>如果你需要多次调用，且闭包可能修改状态</strong> → 用 <code>FnMut</code></li>
+<li><strong>如果你需要多次调用，且闭包不修改状态</strong> → 用 <code>Fn</code>（最严格）</li>
+</ul>
+<p>标准库的例子印证了这个原则：</p>
+<pre><code class="highlight rust"><span class="comment">// Iterator::map 需要对每个元素调用，但不需要修改：FnMut</span>
+<span class="keyword">fn</span> <span class="title function_">map</span>&lt;B, F: <span class="title function_ invoke__">FnMut</span>(<span class="keyword">Self</span>::Item) <span class="punctuation">-&gt;</span> B&gt;(<span class="keyword">self</span>, f: F) <span class="punctuation">-&gt;</span> Map&lt;<span class="keyword">Self</span>, F&gt;;
+
+<span class="comment">// Option::map 只调用一次：FnOnce</span>
+<span class="keyword">fn</span> <span class="title function_">map</span>&lt;U, F: <span class="title function_ invoke__">FnOnce</span>(T) <span class="punctuation">-&gt;</span> U&gt;(<span class="keyword">self</span>, f: F) <span class="punctuation">-&gt;</span> <span class="type">Option</span>&lt;U&gt;;
+
+<span class="comment">// thread::spawn 只执行一次：FnOnce</span>
+<span class="keyword">fn</span> <span class="title function_">spawn</span>&lt;F: <span class="title function_ invoke__">FnOnce</span>() + <span class="built_in">Send</span> + <span class="symbol">&#x27;static</span>&gt;(f: F) <span class="punctuation">-&gt;</span> JoinHandle&lt;()&gt;;
+
+<span class="comment">// Vec::retain 需要多次判断但不修改状态：FnMut</span>
+<span class="keyword">fn</span> <span class="title function_">retain</span>&lt;F: <span class="title function_ invoke__">FnMut</span>(&amp;T) <span class="punctuation">-&gt;</span> <span class="type">bool</span>&gt;(&amp;<span class="keyword">mut</span> <span class="keyword">self</span>, f: F);</code></pre>
+
+<blockquote>
+<p>注意：<code>Iterator::map</code> 用了 <code>FnMut</code> 而不是 <code>Fn</code>。这是因为将约束设为 <code>FnMut</code> 更宽容，既允许纯函数闭包，也允许带状态的闭包。实际使用中，绝大多数传给 <code>map</code> 的闭包都只是 <code>Fn</code>，但标准库选择了更灵活的约束。</p>
+</blockquote>
+<hr>
+<h2 id="六、闭包作为返回值"><a href="#六、闭包作为返回值" class="headerlink" title="六、闭包作为返回值"></a>六、闭包作为返回值</h2><h3 id="6-1-使用-impl-Trait-返回闭包"><a href="#6-1-使用-impl-Trait-返回闭包" class="headerlink" title="6.1 使用 impl Trait 返回闭包"></a>6.1 使用 impl Trait 返回闭包</h3><p>闭包的具体类型是编译器生成的匿名类型，无法直接写出来。需要用 <code>impl Trait</code>：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">make_adder</span>(x: <span class="type">i32</span>) <span class="punctuation">-&gt;</span> <span class="keyword">impl</span> <span class="title class_">Fn</span>(<span class="type">i32</span>) <span class="punctuation">-&gt;</span> <span class="type">i32</span> &#123;
+    <span class="keyword">move</span> |y| x + y
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">add5</span> = <span class="title function_ invoke__">make_adder</span>(<span class="number">5</span>);
+    <span class="keyword">let</span> <span class="variable">add10</span> = <span class="title function_ invoke__">make_adder</span>(<span class="number">10</span>);
+
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, <span class="title function_ invoke__">add5</span>(<span class="number">3</span>));  <span class="comment">// 8</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, <span class="title function_ invoke__">add10</span>(<span class="number">3</span>)); <span class="comment">// 13</span>
+&#125;</code></pre>
+
+<p>这里必须用 <code>move</code>，因为 <code>x</code> 是函数参数，函数结束后 <code>x</code> 就被释放了。闭包必须拥有 <code>x</code> 的所有权才能在函数返回后继续使用。</p>
+<h3 id="6-2-使用-Box-返回不同闭包"><a href="#6-2-使用-Box-返回不同闭包" class="headerlink" title="6.2 使用 Box&lt;dyn Fn&gt; 返回不同闭包"></a>6.2 使用 Box&lt;dyn Fn&gt; 返回不同闭包</h3><p>当需要根据条件返回不同的闭包时，<code>impl Trait</code> 不够用（因为每个闭包的具体类型不同），需要用 trait 对象：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">make_operation</span>(op: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">Box</span>&lt;<span class="keyword">dyn</span> <span class="title function_ invoke__">Fn</span>(<span class="type">f64</span>, <span class="type">f64</span>) <span class="punctuation">-&gt;</span> <span class="type">f64</span>&gt; &#123;
+    <span class="keyword">match</span> op &#123;
+        <span class="string">&quot;add&quot;</span> =&gt; <span class="type">Box</span>::<span class="title function_ invoke__">new</span>(|a, b| a + b),
+        <span class="string">&quot;mul&quot;</span> =&gt; <span class="type">Box</span>::<span class="title function_ invoke__">new</span>(|a, b| a * b),
+        <span class="string">&quot;max&quot;</span> =&gt; <span class="type">Box</span>::<span class="title function_ invoke__">new</span>(|a, b| a.<span class="title function_ invoke__">max</span>(b)),
+        _ =&gt; <span class="type">Box</span>::<span class="title function_ invoke__">new</span>(|_, _| <span class="number">0.0</span>),
+    &#125;
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">ops</span> = <span class="built_in">vec!</span>[<span class="string">&quot;add&quot;</span>, <span class="string">&quot;mul&quot;</span>, <span class="string">&quot;max&quot;</span>];
+    <span class="keyword">let</span> <span class="variable">a</span> = <span class="number">3.0</span>;
+    <span class="keyword">let</span> <span class="variable">b</span> = <span class="number">4.0</span>;
+
+    <span class="keyword">for</span> <span class="variable">op</span> <span class="keyword">in</span> ops &#123;
+        <span class="keyword">let</span> <span class="variable">f</span> = <span class="title function_ invoke__">make_operation</span>(op);
+        <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;: &#123;&#125;&quot;</span>, op, <span class="title function_ invoke__">f</span>(a, b));
+    &#125;
+&#125;
+<span class="comment">// 输出：</span>
+<span class="comment">// add: 7</span>
+<span class="comment">// mul: 12</span>
+<span class="comment">// max: 4</span></code></pre>
+
+<h3 id="6-3-返回闭包的工厂模式"><a href="#6-3-返回闭包的工厂模式" class="headerlink" title="6.3 返回闭包的工厂模式"></a>6.3 返回闭包的工厂模式</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">make_greeting</span>(lang: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">Box</span>&lt;<span class="keyword">dyn</span> <span class="title function_ invoke__">Fn</span>(&amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">String</span> + <span class="symbol">&#x27;_</span>&gt; &#123;
+    <span class="keyword">match</span> lang &#123;
+        <span class="string">&quot;en&quot;</span> =&gt; <span class="type">Box</span>::<span class="title function_ invoke__">new</span>(|name| <span class="built_in">format!</span>(<span class="string">&quot;Hello, &#123;&#125;!&quot;</span>, name)),
+        <span class="string">&quot;zh&quot;</span> =&gt; <span class="type">Box</span>::<span class="title function_ invoke__">new</span>(|name| <span class="built_in">format!</span>(<span class="string">&quot;你好，&#123;&#125;！&quot;</span>, name)),
+        <span class="string">&quot;ja&quot;</span> =&gt; <span class="type">Box</span>::<span class="title function_ invoke__">new</span>(|name| <span class="built_in">format!</span>(<span class="string">&quot;こんにちは、&#123;&#125;！&quot;</span>, name)),
+        _ =&gt; <span class="type">Box</span>::<span class="title function_ invoke__">new</span>(|name| <span class="built_in">format!</span>(<span class="string">&quot;Hi, &#123;&#125;!&quot;</span>, name)),
+    &#125;
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">greet_en</span> = <span class="title function_ invoke__">make_greeting</span>(<span class="string">&quot;en&quot;</span>);
+    <span class="keyword">let</span> <span class="variable">greet_zh</span> = <span class="title function_ invoke__">make_greeting</span>(<span class="string">&quot;zh&quot;</span>);
+
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, <span class="title function_ invoke__">greet_en</span>(<span class="string">&quot;Rust&quot;</span>));  <span class="comment">// Hello, Rust!</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, <span class="title function_ invoke__">greet_zh</span>(<span class="string">&quot;Rust&quot;</span>));  <span class="comment">// 你好，Rust！</span>
+&#125;</code></pre>
+
+<hr>
+<h2 id="七、闭包的底层实现原理"><a href="#七、闭包的底层实现原理" class="headerlink" title="七、闭包的底层实现原理"></a>七、闭包的底层实现原理</h2><h3 id="7-1-闭包就是匿名结构体"><a href="#7-1-闭包就是匿名结构体" class="headerlink" title="7.1 闭包就是匿名结构体"></a>7.1 闭包就是匿名结构体</h3><p>编译器为每个闭包生成一个匿名结构体，捕获的变量就是结构体的字段。我们可以手动模拟编译器的行为：</p>
+<pre><code class="highlight rust"><span class="comment">// 原始闭包代码</span>
+<span class="keyword">fn</span> <span class="title function_">closure_version</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">x</span> = <span class="number">10</span>;
+    <span class="keyword">let</span> <span class="variable">y</span> = <span class="number">20</span>;
+    <span class="keyword">let</span> <span class="variable">add</span> = |z| x + y + z;
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, <span class="title function_ invoke__">add</span>(<span class="number">30</span>)); <span class="comment">// 60</span>
+&#125;
+
+<span class="comment">// 编译器实际生成的等价代码（伪代码风格）</span>
+<span class="keyword">fn</span> <span class="title function_">desugared_version</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">x</span> = <span class="number">10</span>;
+    <span class="keyword">let</span> <span class="variable">y</span> = <span class="number">20</span>;
+
+    <span class="comment">// 编译器为闭包生成匿名结构体</span>
+    <span class="keyword">struct</span> <span class="title class_">ClosureAnonymous</span>&lt;<span class="symbol">&#x27;a</span>&gt; &#123;
+        x: &amp;<span class="symbol">&#x27;a</span> <span class="type">i32</span>, <span class="comment">// 不可变借用</span>
+        y: &amp;<span class="symbol">&#x27;a</span> <span class="type">i32</span>, <span class="comment">// 不可变借用</span>
+    &#125;
+
+    <span class="comment">// 实现 FnOnce</span>
+    <span class="keyword">impl</span>&lt;<span class="symbol">&#x27;a</span>&gt; <span class="built_in">FnOnce</span>&lt;(<span class="type">i32</span>,)&gt; <span class="keyword">for</span> <span class="title class_">ClosureAnonymous</span>&lt;<span class="symbol">&#x27;a</span>&gt; &#123;
+        <span class="keyword">type</span> <span class="title class_">Output</span> = <span class="type">i32</span>;
+        <span class="keyword">fn</span> <span class="title function_">call_once</span>(<span class="keyword">self</span>, (z,): (<span class="type">i32</span>,)) <span class="punctuation">-&gt;</span> <span class="type">i32</span> &#123;
+            <span class="keyword">self</span>.x + <span class="keyword">self</span>.y + z
+        &#125;
+    &#125;
+
+    <span class="comment">// 因为只是读取，还实现了 FnMut 和 Fn</span>
+    <span class="comment">// impl FnMut&lt;(i32,)&gt; for ClosureAnonymous&lt;&#x27;_&gt; &#123; ... &#125;</span>
+    <span class="comment">// impl Fn&lt;(i32,)&gt; for ClosureAnonymous&lt;&#x27;_&gt; &#123; ... &#125;</span>
+
+    <span class="keyword">let</span> <span class="variable">add</span> = ClosureAnonymous &#123; x: &amp;x, y: &amp;y &#125;;
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, add.<span class="title function_ invoke__">call_once</span>((<span class="number">30</span>,))); <span class="comment">// 60</span>
+&#125;</code></pre>
+
+<h3 id="7-2-不同捕获方式对应不同的字段类型"><a href="#7-2-不同捕获方式对应不同的字段类型" class="headerlink" title="7.2 不同捕获方式对应不同的字段类型"></a>7.2 不同捕获方式对应不同的字段类型</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">a</span> = <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;hello&quot;</span>);
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">b</span> = <span class="type">Vec</span>::<span class="title function_ invoke__">new</span>();
+    <span class="keyword">let</span> <span class="variable">c</span> = <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;world&quot;</span>);
+
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">closure</span> = || &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, a);  <span class="comment">// 只读 -&gt; 捕获 &amp;String</span>
+        b.<span class="title function_ invoke__">push</span>(<span class="number">1</span>);          <span class="comment">// 修改 -&gt; 捕获 &amp;mut Vec&lt;i32&gt;</span>
+        <span class="title function_ invoke__">drop</span>(c);            <span class="comment">// 消耗 -&gt; 捕获 String（所有权）</span>
+    &#125;;
+
+    <span class="title function_ invoke__">closure</span>();
+&#125;
+
+<span class="comment">// 编译器生成的匿名结构体等价于：</span>
+<span class="comment">// struct Closure&lt;&#x27;a&gt; &#123;</span>
+<span class="comment">//     a: &amp;&#x27;a String,         // 不可变借用</span>
+<span class="comment">//     b: &amp;&#x27;a mut Vec&lt;i32&gt;,   // 可变借用</span>
+<span class="comment">//     c: String,             // 所有权</span>
+<span class="comment">// &#125;</span>
+<span class="comment">// 因为 c 被 drop 了，这个闭包只能实现 FnOnce</span></code></pre>
+
+<h3 id="7-3-闭包的大小"><a href="#7-3-闭包的大小" class="headerlink" title="7.3 闭包的大小"></a>7.3 闭包的大小</h3><p>因为闭包是结构体，所以它是有大小的（zero-sized 除外）：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> std::mem::size_of_val;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// 不捕获任何变量：零大小</span>
+    <span class="keyword">let</span> <span class="variable">f1</span> = || <span class="number">42</span>;
+    <span class="built_in">println!</span>(<span class="string">&quot;f1 size: &#123;&#125;&quot;</span>, <span class="title function_ invoke__">size_of_val</span>(&amp;f1)); <span class="comment">// 0</span>
+
+    <span class="comment">// 捕获一个 i32 的引用</span>
+    <span class="keyword">let</span> <span class="variable">x</span> = <span class="number">10</span>;
+    <span class="keyword">let</span> <span class="variable">f2</span> = || x + <span class="number">1</span>;
+    <span class="built_in">println!</span>(<span class="string">&quot;f2 size: &#123;&#125;&quot;</span>, <span class="title function_ invoke__">size_of_val</span>(&amp;f2)); <span class="comment">// 8（一个引用的大小）</span>
+
+    <span class="comment">// 捕获一个 String 的所有权</span>
+    <span class="keyword">let</span> <span class="variable">s</span> = <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;hello&quot;</span>);
+    <span class="keyword">let</span> <span class="variable">f3</span> = <span class="keyword">move</span> || <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, s);
+    <span class="built_in">println!</span>(<span class="string">&quot;f3 size: &#123;&#125;&quot;</span>, <span class="title function_ invoke__">size_of_val</span>(&amp;f3)); <span class="comment">// 24（String 结构体大小）</span>
+
+    <span class="comment">// 捕获多个变量</span>
+    <span class="keyword">let</span> <span class="variable">a</span> = <span class="number">1i32</span>;
+    <span class="keyword">let</span> <span class="variable">b</span> = <span class="number">2i64</span>;
+    <span class="keyword">let</span> <span class="variable">c</span> = <span class="number">3u8</span>;
+    <span class="keyword">let</span> <span class="variable">f4</span> = <span class="keyword">move</span> || a <span class="keyword">as</span> <span class="type">i64</span> + b + c <span class="keyword">as</span> <span class="type">i64</span>;
+    <span class="built_in">println!</span>(<span class="string">&quot;f4 size: &#123;&#125;&quot;</span>, <span class="title function_ invoke__">size_of_val</span>(&amp;f4)); <span class="comment">// 16（对齐后）</span>
+&#125;</code></pre>
+
+<h3 id="7-4-每个闭包的类型都是唯一的"><a href="#7-4-每个闭包的类型都是唯一的" class="headerlink" title="7.4 每个闭包的类型都是唯一的"></a>7.4 每个闭包的类型都是唯一的</h3><p>即使两个闭包的签名完全相同，它们的类型也不同：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">f1</span> = |x: <span class="type">i32</span>| x + <span class="number">1</span>;
+    <span class="keyword">let</span> <span class="variable">f2</span> = |x: <span class="type">i32</span>| x + <span class="number">1</span>;
+
+    <span class="comment">// f1 和 f2 的类型不同！编译器为每个闭包生成了不同的匿名类型</span>
+    <span class="comment">// let f3: _ = if true &#123; f1 &#125; else &#123; f2 &#125;; // 编译错误！类型不匹配</span>
+
+    <span class="comment">// 如果需要统一类型，使用 trait 对象</span>
+    <span class="keyword">let</span> <span class="variable">f3</span>: <span class="type">Box</span>&lt;<span class="keyword">dyn</span> <span class="title function_ invoke__">Fn</span>(<span class="type">i32</span>) <span class="punctuation">-&gt;</span> <span class="type">i32</span>&gt; = <span class="keyword">if</span> <span class="literal">true</span> &#123;
+        <span class="type">Box</span>::<span class="title function_ invoke__">new</span>(f1)
+    &#125; <span class="keyword">else</span> &#123;
+        <span class="type">Box</span>::<span class="title function_ invoke__">new</span>(f2)
+    &#125;;
+
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, <span class="title function_ invoke__">f3</span>(<span class="number">10</span>)); <span class="comment">// 11</span>
+&#125;</code></pre>
+
+<hr>
+<h2 id="八、函数指针-fn-与闭包-Trait-的关系"><a href="#八、函数指针-fn-与闭包-Trait-的关系" class="headerlink" title="八、函数指针 fn 与闭包 Trait 的关系"></a>八、函数指针 fn 与闭包 Trait 的关系</h2><p>Rust 还有一个函数指针类型 <code>fn</code>（小写），它和闭包 trait <code>Fn</code>（大写）不同：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">add_one</span>(x: <span class="type">i32</span>) <span class="punctuation">-&gt;</span> <span class="type">i32</span> &#123;
+    x + <span class="number">1</span>
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// fn 是函数指针类型</span>
+    <span class="keyword">let</span> <span class="variable">f</span>: <span class="title function_ invoke__">fn</span>(<span class="type">i32</span>) <span class="punctuation">-&gt;</span> <span class="type">i32</span> = add_one;
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, <span class="title function_ invoke__">f</span>(<span class="number">5</span>)); <span class="comment">// 6</span>
+
+    <span class="comment">// 不捕获变量的闭包可以转为函数指针</span>
+    <span class="keyword">let</span> <span class="variable">g</span>: <span class="title function_ invoke__">fn</span>(<span class="type">i32</span>) <span class="punctuation">-&gt;</span> <span class="type">i32</span> = |x| x + <span class="number">1</span>;
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, <span class="title function_ invoke__">g</span>(<span class="number">5</span>)); <span class="comment">// 6</span>
+
+    <span class="comment">// 捕获了变量的闭包不能转为函数指针</span>
+    <span class="keyword">let</span> <span class="variable">y</span> = <span class="number">10</span>;
+    <span class="comment">// let h: fn(i32) -&gt; i32 = |x| x + y; // 编译错误！</span>
+&#125;</code></pre>
+
+<p>关系图：</p>
+<pre><code class="highlight plaintext">fn（函数指针）
+ │  实现了
+ ├── Fn
+ ├── FnMut
+ └── FnOnce</code></pre>
+
+<p>所有函数指针都自动实现了三个闭包 trait。所以你可以把普通函数传给接受闭包的地方：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">double</span>(x: <span class="type">i32</span>) <span class="punctuation">-&gt;</span> <span class="type">i32</span> &#123;
+    x * <span class="number">2</span>
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">v</span>: <span class="type">Vec</span>&lt;<span class="type">i32</span>&gt; = <span class="built_in">vec!</span>[<span class="number">1</span>, <span class="number">2</span>, <span class="number">3</span>, <span class="number">4</span>, <span class="number">5</span>];
+
+    <span class="comment">// 直接传函数名，等价于传闭包 |x| double(x)</span>
+    <span class="keyword">let</span> <span class="variable">doubled</span>: <span class="type">Vec</span>&lt;<span class="type">i32</span>&gt; = v.<span class="title function_ invoke__">iter</span>().<span class="title function_ invoke__">map</span>(|&amp;x| <span class="title function_ invoke__">double</span>(x)).<span class="title function_ invoke__">collect</span>();
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;:?&#125;&quot;</span>, doubled); <span class="comment">// [2, 4, 6, 8, 10]</span>
+
+    <span class="comment">// 也可以用函数指针</span>
+    <span class="keyword">let</span> <span class="variable">doubled2</span>: <span class="type">Vec</span>&lt;<span class="type">i32</span>&gt; = v.<span class="title function_ invoke__">into_iter</span>().<span class="title function_ invoke__">map</span>(double).<span class="title function_ invoke__">collect</span>();
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;:?&#125;&quot;</span>, doubled2); <span class="comment">// [2, 4, 6, 8, 10]</span>
+&#125;</code></pre>
+
+<hr>
+<h2 id="九、实战场景"><a href="#九、实战场景" class="headerlink" title="九、实战场景"></a>九、实战场景</h2><h3 id="9-1-迭代器链中的闭包"><a href="#9-1-迭代器链中的闭包" class="headerlink" title="9.1 迭代器链中的闭包"></a>9.1 迭代器链中的闭包</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">words</span> = <span class="built_in">vec!</span>[<span class="string">&quot;hello&quot;</span>, <span class="string">&quot;world&quot;</span>, <span class="string">&quot;rust&quot;</span>, <span class="string">&quot;is&quot;</span>, <span class="string">&quot;awesome&quot;</span>];
+
+    <span class="keyword">let</span> <span class="variable">result</span>: <span class="type">String</span> = words
+        .<span class="title function_ invoke__">iter</span>()
+        .<span class="title function_ invoke__">filter</span>(|w| w.<span class="title function_ invoke__">len</span>() &gt; <span class="number">3</span>)           <span class="comment">// Fn: 只读判断</span>
+        .<span class="title function_ invoke__">map</span>(|w| w.<span class="title function_ invoke__">to_uppercase</span>())          <span class="comment">// FnMut: 创建新值</span>
+        .collect::&lt;<span class="type">Vec</span>&lt;_&gt;&gt;()
+        .<span class="title function_ invoke__">join</span>(<span class="string">&quot;, &quot;</span>);
+
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, result); <span class="comment">// HELLO, WORLD, RUST, AWESOME</span>
+&#125;</code></pre>
+
+<h3 id="9-2-带状态的闭包"><a href="#9-2-带状态的闭包" class="headerlink" title="9.2 带状态的闭包"></a>9.2 带状态的闭包</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">counter</span> = <span class="number">0</span>;
+
+    <span class="comment">// 用闭包实现一个 ID 生成器</span>
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">next_id</span> = || &#123;
+        counter += <span class="number">1</span>;
+        counter
+    &#125;;
+
+    <span class="built_in">println!</span>(<span class="string">&quot;ID: &#123;&#125;&quot;</span>, <span class="title function_ invoke__">next_id</span>()); <span class="comment">// 1</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;ID: &#123;&#125;&quot;</span>, <span class="title function_ invoke__">next_id</span>()); <span class="comment">// 2</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;ID: &#123;&#125;&quot;</span>, <span class="title function_ invoke__">next_id</span>()); <span class="comment">// 3</span>
+&#125;</code></pre>
+
+<h3 id="9-3-回调模式"><a href="#9-3-回调模式" class="headerlink" title="9.3 回调模式"></a>9.3 回调模式</h3><pre><code class="highlight rust"><span class="keyword">struct</span> <span class="title class_">EventEmitter</span> &#123;
+    listeners: <span class="type">Vec</span>&lt;<span class="type">Box</span>&lt;<span class="keyword">dyn</span> <span class="title function_ invoke__">Fn</span>(&amp;<span class="type">str</span>)&gt;&gt;,
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">EventEmitter</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">new</span>() <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123;
+        EventEmitter &#123; listeners: <span class="type">Vec</span>::<span class="title function_ invoke__">new</span>() &#125;
+    &#125;
+
+    <span class="keyword">fn</span> <span class="title function_">on</span>(&amp;<span class="keyword">mut</span> <span class="keyword">self</span>, callback: <span class="keyword">impl</span> <span class="title class_">Fn</span>(&amp;<span class="type">str</span>) + <span class="symbol">&#x27;static</span>) &#123;
+        <span class="keyword">self</span>.listeners.<span class="title function_ invoke__">push</span>(<span class="type">Box</span>::<span class="title function_ invoke__">new</span>(callback));
+    &#125;
+
+    <span class="keyword">fn</span> <span class="title function_">emit</span>(&amp;<span class="keyword">self</span>, event: &amp;<span class="type">str</span>) &#123;
+        <span class="keyword">for</span> <span class="variable">listener</span> <span class="keyword">in</span> &amp;<span class="keyword">self</span>.listeners &#123;
+            <span class="title function_ invoke__">listener</span>(event);
+        &#125;
+    &#125;
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">emitter</span> = EventEmitter::<span class="title function_ invoke__">new</span>();
+
+    emitter.<span class="title function_ invoke__">on</span>(|event| <span class="built_in">println!</span>(<span class="string">&quot;[日志] 收到事件: &#123;&#125;&quot;</span>, event));
+    emitter.<span class="title function_ invoke__">on</span>(|event| <span class="built_in">println!</span>(<span class="string">&quot;[监控] 事件触发: &#123;&#125;&quot;</span>, event));
+
+    emitter.<span class="title function_ invoke__">emit</span>(<span class="string">&quot;用户登录&quot;</span>);
+    <span class="comment">// 输出：</span>
+    <span class="comment">// [日志] 收到事件: 用户登录</span>
+    <span class="comment">// [监控] 事件触发: 用户登录</span>
+&#125;</code></pre>
+
+<h3 id="9-4-惰性求值与缓存"><a href="#9-4-惰性求值与缓存" class="headerlink" title="9.4 惰性求值与缓存"></a>9.4 惰性求值与缓存</h3><pre><code class="highlight rust"><span class="keyword">struct</span> <span class="title class_">Lazy</span>&lt;T, F: <span class="title function_ invoke__">FnOnce</span>() <span class="punctuation">-&gt;</span> T&gt; &#123;
+    init: <span class="type">Option</span>&lt;F&gt;,
+    value: <span class="type">Option</span>&lt;T&gt;,
+&#125;
+
+<span class="keyword">impl</span>&lt;T, F: <span class="title function_ invoke__">FnOnce</span>() <span class="punctuation">-&gt;</span> T&gt; Lazy&lt;T, F&gt; &#123;
+    <span class="keyword">fn</span> <span class="title function_">new</span>(f: F) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123;
+        Lazy &#123;
+            init: <span class="title function_ invoke__">Some</span>(f),
+            value: <span class="literal">None</span>,
+        &#125;
+    &#125;
+
+    <span class="keyword">fn</span> <span class="title function_">get</span>(&amp;<span class="keyword">mut</span> <span class="keyword">self</span>) <span class="punctuation">-&gt;</span> &amp;T &#123;
+        <span class="keyword">if</span> <span class="keyword">self</span>.value.<span class="title function_ invoke__">is_none</span>() &#123;
+            <span class="keyword">let</span> <span class="variable">init</span> = <span class="keyword">self</span>.init.<span class="title function_ invoke__">take</span>().<span class="title function_ invoke__">expect</span>(<span class="string">&quot;Lazy already initialized&quot;</span>);
+            <span class="keyword">self</span>.value = <span class="title function_ invoke__">Some</span>(<span class="title function_ invoke__">init</span>()); <span class="comment">// FnOnce：只调用一次</span>
+        &#125;
+        <span class="keyword">self</span>.value.<span class="title function_ invoke__">as_ref</span>().<span class="title function_ invoke__">unwrap</span>()
+    &#125;
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">expensive</span> = Lazy::<span class="title function_ invoke__">new</span>(|| &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;执行昂贵的计算...&quot;</span>);
+        <span class="number">42</span>
+    &#125;);
+
+    <span class="built_in">println!</span>(<span class="string">&quot;Lazy 已创建，但计算未执行&quot;</span>);
+    <span class="built_in">println!</span>(<span class="string">&quot;第一次获取: &#123;&#125;&quot;</span>, expensive.<span class="title function_ invoke__">get</span>()); <span class="comment">// 触发计算</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;第二次获取: &#123;&#125;&quot;</span>, expensive.<span class="title function_ invoke__">get</span>()); <span class="comment">// 使用缓存</span>
+&#125;
+<span class="comment">// 输出：</span>
+<span class="comment">// Lazy 已创建，但计算未执行</span>
+<span class="comment">// 执行昂贵的计算...</span>
+<span class="comment">// 第一次获取: 42</span>
+<span class="comment">// 第二次获取: 42</span></code></pre>
+
+<h3 id="9-5-组合闭包"><a href="#9-5-组合闭包" class="headerlink" title="9.5 组合闭包"></a>9.5 组合闭包</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">compose</span>&lt;A, B, C&gt;(
+    f: <span class="keyword">impl</span> <span class="title class_">Fn</span>(A) <span class="punctuation">-&gt;</span> B,
+    g: <span class="keyword">impl</span> <span class="title class_">Fn</span>(B) <span class="punctuation">-&gt;</span> C,
+) <span class="punctuation">-&gt;</span> <span class="keyword">impl</span> <span class="title class_">Fn</span>(A) <span class="punctuation">-&gt;</span> C &#123;
+    <span class="keyword">move</span> |x| <span class="title function_ invoke__">g</span>(<span class="title function_ invoke__">f</span>(x))
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">double</span> = |x: <span class="type">i32</span>| x * <span class="number">2</span>;
+    <span class="keyword">let</span> <span class="variable">add_one</span> = |x: <span class="type">i32</span>| x + <span class="number">1</span>;
+    <span class="keyword">let</span> <span class="variable">to_string</span> = |x: <span class="type">i32</span>| <span class="built_in">format!</span>(<span class="string">&quot;结果: &#123;&#125;&quot;</span>, x);
+
+    <span class="keyword">let</span> <span class="variable">pipeline</span> = <span class="title function_ invoke__">compose</span>(<span class="title function_ invoke__">compose</span>(double, add_one), to_string);
+
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, <span class="title function_ invoke__">pipeline</span>(<span class="number">5</span>));  <span class="comment">// 结果: 11 （5*2+1=11）</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, <span class="title function_ invoke__">pipeline</span>(<span class="number">10</span>)); <span class="comment">// 结果: 21 （10*2+1=21）</span>
+&#125;</code></pre>
+
+<hr>
+<h2 id="十、闭包与生命周期"><a href="#十、闭包与生命周期" class="headerlink" title="十、闭包与生命周期"></a>十、闭包与生命周期</h2><h3 id="10-1-闭包捕获引用时的生命周期"><a href="#10-1-闭包捕获引用时的生命周期" class="headerlink" title="10.1 闭包捕获引用时的生命周期"></a>10.1 闭包捕获引用时的生命周期</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">make_printer</span>(prefix: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="keyword">impl</span> <span class="title class_">Fn</span>(&amp;<span class="type">str</span>) + <span class="symbol">&#x27;_</span> &#123;
+    <span class="keyword">move</span> |msg| <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;: &#123;&#125;&quot;</span>, prefix, msg)
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">prefix</span> = <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;[INFO]&quot;</span>);
+    <span class="keyword">let</span> <span class="variable">print</span> = <span class="title function_ invoke__">make_printer</span>(&amp;prefix);
+    <span class="title function_ invoke__">print</span>(<span class="string">&quot;程序启动&quot;</span>);   <span class="comment">// [INFO]: 程序启动</span>
+    <span class="title function_ invoke__">print</span>(<span class="string">&quot;加载完成&quot;</span>);   <span class="comment">// [INFO]: 加载完成</span>
+&#125;</code></pre>
+
+<p><code>&#39;_</code> 告诉编译器返回的闭包的生命周期和 <code>prefix</code> 参数的生命周期相同。</p>
+<h3 id="10-2-‘static-闭包"><a href="#10-2-‘static-闭包" class="headerlink" title="10.2 ‘static 闭包"></a>10.2 ‘static 闭包</h3><p>当闭包需要在任意长的生命周期中存活时（如 <code>thread::spawn</code>），需要满足 <code>&#39;static</code>：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> std::thread;
+
+<span class="keyword">fn</span> <span class="title function_">start_worker</span>(name: <span class="type">String</span>) <span class="punctuation">-&gt;</span> thread::JoinHandle&lt;()&gt; &#123;
+    <span class="comment">// move 确保闭包拥有 name 的所有权</span>
+    <span class="comment">// 自有数据满足 &#x27;static 约束</span>
+    thread::<span class="title function_ invoke__">spawn</span>(<span class="keyword">move</span> || &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;Worker &#123;&#125; 开始工作&quot;</span>, name);
+    &#125;)
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">handle</span> = <span class="title function_ invoke__">start_worker</span>(<span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;Alpha&quot;</span>));
+    handle.<span class="title function_ invoke__">join</span>().<span class="title function_ invoke__">unwrap</span>();
+&#125;</code></pre>
+
+<hr>
+<h2 id="十一、常见编译错误与解决方案"><a href="#十一、常见编译错误与解决方案" class="headerlink" title="十一、常见编译错误与解决方案"></a>十一、常见编译错误与解决方案</h2><h3 id="错误-1：闭包活得比捕获的引用长"><a href="#错误-1：闭包活得比捕获的引用长" class="headerlink" title="错误 1：闭包活得比捕获的引用长"></a>错误 1：闭包活得比捕获的引用长</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">bad_example</span>() <span class="punctuation">-&gt;</span> <span class="keyword">impl</span> <span class="title class_">Fn</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">s</span> = <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;hello&quot;</span>);
+    <span class="comment">// || println!(&quot;&#123;&#125;&quot;, s) // 错误：s 在函数结束时被释放</span>
+    <span class="keyword">move</span> || <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, s) <span class="comment">// 修复：用 move 转移所有权</span>
+&#125;</code></pre>
+
+<h3 id="错误-2：FnOnce-闭包被多次调用"><a href="#错误-2：FnOnce-闭包被多次调用" class="headerlink" title="错误 2：FnOnce 闭包被多次调用"></a>错误 2：FnOnce 闭包被多次调用</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">s</span> = <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;hello&quot;</span>);
+    <span class="keyword">let</span> <span class="variable">f</span> = || <span class="title function_ invoke__">drop</span>(s); <span class="comment">// FnOnce</span>
+    <span class="title function_ invoke__">f</span>();
+    <span class="comment">// f(); // 错误：cannot move out of closure because it is called more than once</span>
+
+    <span class="comment">// 如果确实需要多次调用，重构闭包避免转移所有权</span>
+    <span class="keyword">let</span> <span class="variable">s2</span> = <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;hello&quot;</span>);
+    <span class="keyword">let</span> <span class="variable">f2</span> = || <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, s2); <span class="comment">// Fn：只读，可以多次调用</span>
+    <span class="title function_ invoke__">f2</span>();
+    <span class="title function_ invoke__">f2</span>();
+&#125;</code></pre>
+
+<h3 id="错误-3：在不可变闭包中尝试修改"><a href="#错误-3：在不可变闭包中尝试修改" class="headerlink" title="错误 3：在不可变闭包中尝试修改"></a>错误 3：在不可变闭包中尝试修改</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">takes_fn</span>(f: <span class="keyword">impl</span> <span class="title class_">Fn</span>()) &#123;
+    <span class="title function_ invoke__">f</span>();
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">x</span> = <span class="number">0</span>;
+    <span class="comment">// takes_fn(|| x += 1); // 错误：要求 Fn 但闭包是 FnMut</span>
+
+    <span class="comment">// 修复1：改为 FnMut</span>
+    <span class="keyword">fn</span> <span class="title function_">takes_fn_mut</span>(<span class="keyword">mut</span> f: <span class="keyword">impl</span> <span class="title class_">FnMut</span>()) &#123;
+        <span class="title function_ invoke__">f</span>();
+    &#125;
+    <span class="title function_ invoke__">takes_fn_mut</span>(|| x += <span class="number">1</span>);
+
+    <span class="comment">// 修复2：使用 Cell 实现内部可变性</span>
+    <span class="keyword">use</span> std::cell::Cell;
+    <span class="keyword">let</span> <span class="variable">x</span> = Cell::<span class="title function_ invoke__">new</span>(<span class="number">0</span>);
+    <span class="title function_ invoke__">takes_fn</span>(|| x.<span class="title function_ invoke__">set</span>(x.<span class="title function_ invoke__">get</span>() + <span class="number">1</span>)); <span class="comment">// Cell 允许在 &amp;self 下修改</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;x = &#123;&#125;&quot;</span>, x.<span class="title function_ invoke__">get</span>());
+&#125;</code></pre>
+
+<hr>
+<h2 id="十二、闭包-Trait-速查表"><a href="#十二、闭包-Trait-速查表" class="headerlink" title="十二、闭包 Trait 速查表"></a>十二、闭包 Trait 速查表</h2><h3 id="判断闭包实现哪个-Trait"><a href="#判断闭包实现哪个-Trait" class="headerlink" title="判断闭包实现哪个 Trait"></a>判断闭包实现哪个 Trait</h3><pre><code class="highlight plaintext">闭包体内对捕获变量的使用：
+├── 没有捕获任何变量 ─────────────────&gt; Fn + FnMut + FnOnce
+├── 只读取（&amp;T）─────────────────────&gt; Fn + FnMut + FnOnce
+├── 修改（&amp;mut T）───────────────────&gt; FnMut + FnOnce（不是 Fn）
+└── 转移所有权（T 被移出）────────────&gt; 仅 FnOnce</code></pre>
+
+<h3 id="选择参数约束"><a href="#选择参数约束" class="headerlink" title="选择参数约束"></a>选择参数约束</h3><pre><code class="highlight plaintext">需要调用几次？
+├── 最多一次 ────────&gt; FnOnce（最宽松，接受所有闭包）
+├── 多次，可能改状态 ─&gt; FnMut
+└── 多次，不改状态 ──&gt; Fn（最严格）</code></pre>
+
+<h3 id="常用标准库方法的闭包约束"><a href="#常用标准库方法的闭包约束" class="headerlink" title="常用标准库方法的闭包约束"></a>常用标准库方法的闭包约束</h3><table>
+<thead>
+<tr>
+<th>方法</th>
+<th>约束</th>
+<th>原因</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Option::map</code></td>
+<td><code>FnOnce</code></td>
+<td>最多调用一次</td>
+</tr>
+<tr>
+<td><code>Option::unwrap_or_else</code></td>
+<td><code>FnOnce</code></td>
+<td>最多调用一次</td>
+</tr>
+<tr>
+<td><code>Result::map</code></td>
+<td><code>FnOnce</code></td>
+<td>最多调用一次</td>
+</tr>
+<tr>
+<td><code>Iterator::map</code></td>
+<td><code>FnMut</code></td>
+<td>每个元素调用一次，允许状态</td>
+</tr>
+<tr>
+<td><code>Iterator::filter</code></td>
+<td><code>FnMut</code></td>
+<td>每个元素调用一次</td>
+</tr>
+<tr>
+<td><code>Iterator::for_each</code></td>
+<td><code>FnMut</code></td>
+<td>每个元素调用一次</td>
+</tr>
+<tr>
+<td><code>Iterator::any</code></td>
+<td><code>FnMut</code></td>
+<td>可能调用多次</td>
+</tr>
+<tr>
+<td><code>Iterator::find</code></td>
+<td><code>FnMut</code></td>
+<td>可能调用多次</td>
+</tr>
+<tr>
+<td><code>Vec::sort_by</code></td>
+<td><code>FnMut</code></td>
+<td>多次比较</td>
+</tr>
+<tr>
+<td><code>thread::spawn</code></td>
+<td><code>FnOnce + Send + &#39;static</code></td>
+<td>执行一次，跨线程</td>
+</tr>
+</tbody></table>
+<hr>
+<h2 id="总结"><a href="#总结" class="headerlink" title="总结"></a>总结</h2><p>Rust 闭包的核心知识点可以浓缩为以下几条：</p>
+<ol>
+<li><p><strong>闭包是匿名结构体</strong>，捕获的变量就是字段。编译器根据使用方式自动选择借用或所有权。</p>
+</li>
+<li><p><strong>三个 Trait 对应三种能力</strong>：</p>
+<ul>
+<li><code>Fn</code>：只读访问，可多次调用</li>
+<li><code>FnMut</code>：可修改状态，可多次调用</li>
+<li><code>FnOnce</code>：可消耗捕获的值，最多调用一次</li>
+<li>继承关系：<code>Fn</code> ⊂ <code>FnMut</code> ⊂ <code>FnOnce</code></li>
+</ul>
+</li>
+<li><p><strong><code>move</code> 改变捕获方式，不改变 Trait 类型</strong>。<code>move</code> 强制获取所有权，但闭包实现哪个 Trait 取决于闭包体内的操作。</p>
+</li>
+<li><p><strong>选择约束时尽量宽松</strong>：如果只会调用一次，用 <code>FnOnce</code>；如果不确定，用 <code>FnMut</code>；只有确实需要并发只读调用时才用 <code>Fn</code>。</p>
+</li>
+<li><p><strong>每个闭包的类型都是唯一的</strong>。需要统一类型时使用 <code>Box&lt;dyn Fn(...)&gt;</code> 或 <code>impl Fn(...)</code>。</p>
+</li>
+</ol>
+<p>理解了这些，Rust 中绝大多数闭包相关的编译错误都能迎刃而解。</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
