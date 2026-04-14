@@ -1,0 +1,489 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust axum 请求生命周期与执行流程详解：一个 HTTP 请求到底经历了什么</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust axum 请求生命周期与执行流程详解：一个 HTTP 请求到底经历了什么</h1><div class="time">2026-04-14</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><h2 id="引言"><a href="#引言" class="headerlink" title="引言"></a>引言</h2><p>学 axum 的时候，很多知识点通常是分开学的：</p>
+<ul>
+<li>路由怎么匹配</li>
+<li>Extractor 怎么提取参数</li>
+<li>Middleware 怎么拦截请求</li>
+<li><code>State&lt;T&gt;</code> 怎么注入共享依赖</li>
+<li>handler 怎么返回响应</li>
+<li>错误为什么能自动变成 HTTP 响应</li>
+</ul>
+<p>单看每一块都不算难，但很多人学到后面会遇到一个更本质的问题：</p>
+<blockquote>
+<p>一个 HTTP 请求从进入 axum 到最终返回响应，中间到底经历了什么？</p>
+</blockquote>
+<p>这个问题如果不彻底搞清楚，前面那些知识点就很容易变成“分散的 API 记忆”，而不是一条完整链路。</p>
+<p>例如下面这些困惑，本质上都在问同一件事：</p>
+<ul>
+<li>路由匹配是在中间件前还是中间件后发生</li>
+<li><code>Path</code>、<code>Query</code>、<code>Json</code> 到底什么时候提取</li>
+<li>为什么 body 提取器不能随便写多个</li>
+<li><code>State</code> 是在哪一步拿到的</li>
+<li>handler 抛出的错误是在哪一层变成响应的</li>
+<li>中间件到底包的是 handler，还是整个路由树</li>
+</ul>
+<p>这些问题如果单个去答，当然都能答；但一旦放回“请求生命周期”这条主线里，理解会稳很多。</p>
+<p>所以这篇文章的目标很明确：</p>
+<blockquote>
+<p>不再只讲单个功能点，而是从一个请求的完整生命周期出发，把 axum 里最核心的执行链路串起来。</p>
+</blockquote>
+<p>这篇会重点回答下面这些问题：</p>
+<ol>
+<li>一个请求进入 axum 后，先发生什么</li>
+<li>路由匹配在整个流程里的位置是什么</li>
+<li>Middleware 和 Extractor 各自处于哪一层</li>
+<li>handler 参数是什么时候被提取出来的</li>
+<li>handler 返回值和错误是怎么转换成响应的</li>
+<li>响应返回时又会经历哪些层</li>
+</ol>
+<p>如果你已经看过前面的中间件、提取器、状态管理、错误处理、认证、tower 和 sqlx 实战，这一篇基本就是把整套知识连成一条完整运行链路的收束篇。</p>
+<hr>
+<h2 id="一、先给结论：一次请求的主干流程长什么样？"><a href="#一、先给结论：一次请求的主干流程长什么样？" class="headerlink" title="一、先给结论：一次请求的主干流程长什么样？"></a>一、先给结论：一次请求的主干流程长什么样？</h2><p>先不陷入细节，先看整体形状。</p>
+<p>对于一个典型的 axum 应用，一次请求大致会经历下面这条链：</p>
+<pre><code class="highlight text">客户端请求
+  -&gt; 外层中间件
+  -&gt; Router 路由匹配
+  -&gt; 某条路由上的中间件
+  -&gt; Extractor 提取参数
+  -&gt; handler 执行业务逻辑
+  -&gt; 返回值 / 错误 转换成 Response
+  -&gt; 中间件后置处理
+  -&gt; 响应返回客户端</code></pre>
+
+<p>如果你更喜欢“洋葱模型”的视角，也可以理解成：</p>
+<ul>
+<li>请求进入时，一层层往里走</li>
+<li>响应返回时，再一层层往外走</li>
+</ul>
+<p>但这里有一个非常重要的补充：</p>
+<blockquote>
+<p>并不是所有事情都只是“包一层”。</p>
+</blockquote>
+<p>因为路由匹配、参数提取、handler 调用、错误转响应，这些都分别发生在不同节点上。</p>
+<p>所以更准确的理解方式不是一句“洋葱模型”就结束，而是：</p>
+<blockquote>
+<p>中间件负责包裹服务链，Extractor 负责在 handler 调用前准备输入，handler 负责业务逻辑，响应转换负责把结果收束成 HTTP Response。</p>
+</blockquote>
+<hr>
+<h2 id="二、请求进入应用的第一站：最外层服务链"><a href="#二、请求进入应用的第一站：最外层服务链" class="headerlink" title="二、请求进入应用的第一站：最外层服务链"></a>二、请求进入应用的第一站：最外层服务链</h2><p>如果你前面已经看过 tower 那篇，这里会非常自然。</p>
+<p>axum 应用最终会被组织成一棵 tower <code>Service</code> 树。也就是说，从底层视角看，请求进来之后，并不是“直接冲进某个 handler”，而是：</p>
+<blockquote>
+<p>先进入当前应用对应的服务链。</p>
+</blockquote>
+<p>如果你给整个 <code>Router</code> 挂过 <code>.layer(...)</code>，那么这些 layer 包出来的服务就是最外层入口。</p>
+<p>例如：</p>
+<pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">app</span> = Router::<span class="title function_ invoke__">new</span>()
+    .<span class="title function_ invoke__">route</span>(<span class="string">&quot;/users/&#123;id&#125;&quot;</span>, <span class="title function_ invoke__">get</span>(get_user))
+    .<span class="title function_ invoke__">layer</span>(log_layer)
+    .<span class="title function_ invoke__">layer</span>(trace_layer);</code></pre>
+
+<p>从执行链角度看，请求不是直接进 <code>get_user</code>，而是先进入：</p>
+<ul>
+<li>最外层 <code>trace_layer</code> 包出来的服务</li>
+<li>再进入 <code>log_layer</code> 包出来的服务</li>
+<li>再进入内部的路由服务</li>
+</ul>
+<p>所以第一步一定要建立这个意识：</p>
+<blockquote>
+<p>请求进入 axum 时，首先面对的不是 handler，而是整棵被 layer 包裹过的服务树。</p>
+</blockquote>
+<hr>
+<h2 id="三、路由匹配到底发生在什么时候？"><a href="#三、路由匹配到底发生在什么时候？" class="headerlink" title="三、路由匹配到底发生在什么时候？"></a>三、路由匹配到底发生在什么时候？</h2><p>这是很多人第一次系统思考生命周期时最关心的点。</p>
+<p>结论先说：</p>
+<blockquote>
+<p>在进入 Router 对应的内部服务后，axum 才会根据请求的方法和路径去做路由匹配。</p>
+</blockquote>
+<p>也就是说，路由匹配并不是一个“独立于服务链之外的神秘过程”，它本身就是 Router 这个服务内部要做的事。</p>
+<p>例如：</p>
+<pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">app</span> = Router::<span class="title function_ invoke__">new</span>()
+    .<span class="title function_ invoke__">route</span>(<span class="string">&quot;/users/&#123;id&#125;&quot;</span>, <span class="title function_ invoke__">get</span>(get_user))
+    .<span class="title function_ invoke__">route</span>(<span class="string">&quot;/articles/&#123;id&#125;&quot;</span>, <span class="title function_ invoke__">get</span>(get_article));</code></pre>
+
+<p>当请求进来时，Router 会根据：</p>
+<ul>
+<li>HTTP method</li>
+<li>路径模式</li>
+</ul>
+<p>去决定当前应该进入哪一个路由分支。</p>
+<p>所以从生命周期上看，可以先粗略理解成：</p>
+<ol>
+<li>请求进入外层服务链</li>
+<li>到达 Router</li>
+<li>Router 决定命中哪条路由</li>
+<li>再进入这条路由对应的内部处理逻辑</li>
+</ol>
+<h3 id="3-1-如果路由没匹配上会怎样？"><a href="#3-1-如果路由没匹配上会怎样？" class="headerlink" title="3.1 如果路由没匹配上会怎样？"></a>3.1 如果路由没匹配上会怎样？</h3><p>如果没有任何路由匹配成功，axum 就会直接生成对应的错误响应，例如常见的：</p>
+<ul>
+<li><code>404 Not Found</code></li>
+<li>某些情况下的方法不匹配也可能体现为路由层面的失败</li>
+</ul>
+<p>这意味着：</p>
+<blockquote>
+<p>请求并不一定会走到 handler；很多请求会在更前面的路由阶段就结束。</p>
+</blockquote>
+<hr>
+<h2 id="四、layer-和-route-layer-在生命周期里分别处于哪里？"><a href="#四、layer-和-route-layer-在生命周期里分别处于哪里？" class="headerlink" title="四、layer(...) 和 route_layer(...) 在生命周期里分别处于哪里？"></a>四、<code>layer(...)</code> 和 <code>route_layer(...)</code> 在生命周期里分别处于哪里？</h2><p>这一点如果放回请求链里看，会比单独背 API 名字清楚得多。</p>
+<h3 id="4-1-Router-layer"><a href="#4-1-Router-layer" class="headerlink" title="4.1 Router::layer(...)"></a>4.1 <code>Router::layer(...)</code></h3><p>这个 layer 包的是当前整个 Router 服务树。</p>
+<p>所以它的位置更靠外。</p>
+<p>它适合做的事情通常是：</p>
+<ul>
+<li>全局日志</li>
+<li>trace</li>
+<li>超时</li>
+<li>压缩</li>
+<li>跨域</li>
+</ul>
+<p>也就是说，请求往往会先经过这些“全局层”，再进入具体路由匹配。</p>
+<h3 id="4-2-route-layer"><a href="#4-2-route-layer" class="headerlink" title="4.2 route_layer(...)"></a>4.2 <code>route_layer(...)</code></h3><p>这个 layer 包的是某一条具体路由对应的服务。</p>
+<p>所以它的位置更靠内，往往是在：</p>
+<ul>
+<li>Router 已经匹配到这条路由之后</li>
+<li>handler 真正执行之前</li>
+</ul>
+<p>这就是为什么认证中间件特别适合写成：</p>
+<pre><code class="highlight rust"><span class="title function_ invoke__">get</span>(profile).<span class="title function_ invoke__">route_layer</span>(middleware::<span class="title function_ invoke__">from_fn</span>(auth_middleware))</code></pre>
+
+<p>因为它只作用于某条受保护路由，而不是整个应用。</p>
+<h3 id="4-3-把它们放回完整链路里"><a href="#4-3-把它们放回完整链路里" class="headerlink" title="4.3 把它们放回完整链路里"></a>4.3 把它们放回完整链路里</h3><p>如果有下面这个应用：</p>
+<pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">app</span> = Router::<span class="title function_ invoke__">new</span>()
+    .<span class="title function_ invoke__">route</span>(<span class="string">&quot;/public&quot;</span>, <span class="title function_ invoke__">get</span>(public_handler))
+    .<span class="title function_ invoke__">route</span>(
+        <span class="string">&quot;/profile&quot;</span>,
+        <span class="title function_ invoke__">get</span>(profile).<span class="title function_ invoke__">route_layer</span>(middleware::<span class="title function_ invoke__">from_fn</span>(auth_middleware)),
+    )
+    .<span class="title function_ invoke__">layer</span>(middleware::<span class="title function_ invoke__">from_fn</span>(log_middleware));</code></pre>
+
+<p>那么访问 <code>/profile</code> 的生命周期会更接近这样：</p>
+<pre><code class="highlight text">request
+ -&gt; log_middleware
+ -&gt; Router 路由匹配到 /profile
+ -&gt; auth_middleware
+ -&gt; Extractor
+ -&gt; profile handler
+ -&gt; 响应返回
+ -&gt; auth_middleware 后置逻辑
+ -&gt; log_middleware 后置逻辑</code></pre>
+
+<p>这个顺序一旦建立，很多问题就会清楚很多。</p>
+<hr>
+<h2 id="五、Extractor-是在什么时候执行的？"><a href="#五、Extractor-是在什么时候执行的？" class="headerlink" title="五、Extractor 是在什么时候执行的？"></a>五、Extractor 是在什么时候执行的？</h2><p>如果说路由匹配解决的是“去哪一个 handler”，那 Extractor 解决的就是：</p>
+<blockquote>
+<p>在调用这个 handler 之前，先把它需要的输入参数准备好。</p>
+</blockquote>
+<p>例如这个 handler：</p>
+<pre><code class="highlight rust"><span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">get_user</span>(
+    <span class="title function_ invoke__">Path</span>(id): Path&lt;<span class="type">u64</span>&gt;,
+    <span class="title function_ invoke__">Query</span>(query): Query&lt;UserQuery&gt;,
+    <span class="title function_ invoke__">State</span>(state): State&lt;AppState&gt;,
+    user: CurrentUser,
+) <span class="punctuation">-&gt;</span> Json&lt;UserResponse&gt; &#123;
+    <span class="comment">// ...</span>
+&#125;</code></pre>
+
+<p>这意味着在真正调用 <code>get_user(...)</code> 之前，axum 必须先做这些事：</p>
+<ul>
+<li>从路径里解析 <code>id</code></li>
+<li>从 query string 里解析 <code>query</code></li>
+<li>从应用状态里提取 <code>state</code></li>
+<li>从 request extensions 里提取 <code>CurrentUser</code></li>
+</ul>
+<p>所以 Extractor 的位置非常明确：</p>
+<blockquote>
+<p>它发生在路由已经匹配成功之后、handler 真正执行之前。</p>
+</blockquote>
+<h3 id="5-1-为什么说-Extractor-不是中间件？"><a href="#5-1-为什么说-Extractor-不是中间件？" class="headerlink" title="5.1 为什么说 Extractor 不是中间件？"></a>5.1 为什么说 Extractor 不是中间件？</h3><p>因为它们的职责完全不同。</p>
+<p>中间件是在包裹整个服务处理链：</p>
+<ul>
+<li>可以决定是否放行</li>
+<li>可以在请求前后都做事情</li>
+</ul>
+<p>Extractor 是在为当前 handler 准备参数：</p>
+<ul>
+<li>更像输入装配</li>
+<li>不负责包裹整条请求链</li>
+</ul>
+<p>所以它们虽然都发生在 handler 之前，但处在不同抽象层。</p>
+<hr>
+<h2 id="六、Path、Query、State、Json-的提取顺序该怎么理解？"><a href="#六、Path、Query、State、Json-的提取顺序该怎么理解？" class="headerlink" title="六、Path、Query、State、Json 的提取顺序该怎么理解？"></a>六、<code>Path</code>、<code>Query</code>、<code>State</code>、<code>Json</code> 的提取顺序该怎么理解？</h2><p>很多人会问：</p>
+<blockquote>
+<p>这些参数到底谁先执行？</p>
+</blockquote>
+<p>如果从使用者视角看，最重要的不是死记某个“源码层面的精确顺序”，而是理解两件事：</p>
+<ol>
+<li>它们都发生在 handler 调用前</li>
+<li>body 提取器和非 body 提取器在语义上必须区分开</li>
+</ol>
+<p>例如：</p>
+<ul>
+<li><code>Path</code>、<code>Query</code>、<code>State</code>、请求头、extensions 这类提取通常不消费 body</li>
+<li><code>Json</code>、<code>Form</code>、<code>Bytes</code>、<code>String</code> 这类提取通常会消费 body</li>
+</ul>
+<p>这就解释了一个非常重要的限制：</p>
+<blockquote>
+<p>请求体通常只能被消费一次。</p>
+</blockquote>
+<p>所以像下面这种写法就很危险：</p>
+<pre><code class="highlight rust"><span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">wrong_handler</span>(
+    <span class="title function_ invoke__">Json</span>(a): Json&lt;A&gt;,
+    body: <span class="type">String</span>,
+) &#123;
+    <span class="comment">// 两者都要读 body</span>
+&#125;</code></pre>
+
+<p>并不是因为“参数太多”，而是因为：</p>
+<ul>
+<li><code>Json&lt;A&gt;</code> 需要读 body</li>
+<li><code>String</code> 也需要读 body</li>
+</ul>
+<p>而 body 不是可以随便重复读的普通值。</p>
+<p>所以在请求生命周期里，body 提取器之所以特殊，不是因为它更高级，而是因为它有资源消费约束。</p>
+<hr>
+<h2 id="七、State-是在哪一步拿到的？"><a href="#七、State-是在哪一步拿到的？" class="headerlink" title="七、State&lt;T&gt; 是在哪一步拿到的？"></a>七、<code>State&lt;T&gt;</code> 是在哪一步拿到的？</h2><p><code>State&lt;T&gt;</code> 很容易被误解成某种“全局变量读取”。</p>
+<p>其实从生命周期看，它只是 handler 参数准备阶段的一部分。</p>
+<p>也就是说，在路由匹配完成之后、handler 真正执行之前，axum 会把 Router 上挂着的状态按类型提取出来，交给参数列表中的 <code>State&lt;T&gt;</code>。</p>
+<p>这说明两点：</p>
+<ol>
+<li><code>State&lt;T&gt;</code> 本质上也是 Extractor</li>
+<li>它属于应用级共享依赖注入，而不是请求级上下文注入</li>
+</ol>
+<p>这也是为什么：</p>
+<ul>
+<li>数据库连接池适合放在 <code>State</code></li>
+<li>当前登录用户不适合放在 <code>State</code></li>
+</ul>
+<p>因为它们分别属于两种完全不同的生命周期。</p>
+<hr>
+<h2 id="八、认证用户上下文是在流程里的哪一站进入-handler-的？"><a href="#八、认证用户上下文是在流程里的哪一站进入-handler-的？" class="headerlink" title="八、认证用户上下文是在流程里的哪一站进入 handler 的？"></a>八、认证用户上下文是在流程里的哪一站进入 handler 的？</h2><p>这个问题很适合把前面的认证和 Extractor 内容串起来。</p>
+<p>典型流程通常是这样的：</p>
+<ol>
+<li>请求进入认证中间件</li>
+<li>中间件校验 token 或 JWT</li>
+<li>中间件解析出 <code>CurrentUser</code></li>
+<li>中间件把 <code>CurrentUser</code> 写入 request extensions</li>
+<li>请求继续往下走</li>
+<li>当前路由的 handler 参数里声明了 <code>user: CurrentUser</code></li>
+<li>自定义 Extractor 从 extensions 里把它取出来</li>
+</ol>
+<p>也就是说：</p>
+<ul>
+<li>用户身份确认发生在中间件阶段</li>
+<li>用户参数提取发生在 Extractor 阶段</li>
+</ul>
+<p>这两个步骤不是重复，而是分工：</p>
+<ul>
+<li>Middleware 负责“把用户上下文准备好”</li>
+<li>Extractor 负责“把准备好的上下文变成 handler 参数”</li>
+</ul>
+<p>这就是为什么前面一直强调：</p>
+<blockquote>
+<p>中间件做认证，Extractor 做参数注入，handler &#x2F; service 做授权。</p>
+</blockquote>
+<p>把这三层拆开以后，请求链就非常清楚了。</p>
+<hr>
+<h2 id="九、handler-是什么时候真正被调用的？"><a href="#九、handler-是什么时候真正被调用的？" class="headerlink" title="九、handler 是什么时候真正被调用的？"></a>九、handler 是什么时候真正被调用的？</h2><p>只有当下面这些条件都满足后，handler 才会真正执行：</p>
+<ol>
+<li>请求成功通过外层中间件</li>
+<li>Router 成功匹配到具体路由</li>
+<li>路由级中间件没有提前拦截</li>
+<li>handler 所需 Extractor 全部提取成功</li>
+</ol>
+<p>这意味着：</p>
+<blockquote>
+<p>handler 从来不是“请求一进来就立刻执行”的。</p>
+</blockquote>
+<p>而是整个请求链路经过多轮检查、提取、包装之后，最终才真正进入业务函数。</p>
+<p>这也是为什么很多错误根本不是在 handler 里出现的。</p>
+<p>例如：</p>
+<ul>
+<li>路由不匹配</li>
+<li>JSON 解析失败</li>
+<li>缺少认证上下文</li>
+<li>中间件直接返回 401</li>
+</ul>
+<p>这些情况都可能让请求在到达 handler 之前就结束。</p>
+<hr>
+<h2 id="十、handler-返回值是怎么变成响应的？"><a href="#十、handler-返回值是怎么变成响应的？" class="headerlink" title="十、handler 返回值是怎么变成响应的？"></a>十、handler 返回值是怎么变成响应的？</h2><p>一旦 handler 真的执行了，接下来就进入“结果收束”阶段。</p>
+<p>例如 handler 可能返回：</p>
+<ul>
+<li><code>String</code></li>
+<li><code>Json&lt;T&gt;</code></li>
+<li><code>(StatusCode, Json&lt;T&gt;)</code></li>
+<li><code>Result&lt;T, AppError&gt;</code></li>
+</ul>
+<p>这时候 axum 会做的事情可以概括成一句话：</p>
+<blockquote>
+<p>把 handler 返回值转换成标准 HTTP Response。</p>
+</blockquote>
+<p>这背后的核心机制就是前面讲过的 <code>IntoResponse</code>。</p>
+<p>也就是说，无论 handler 返回的是成功值还是错误值，最后都要落到同一个终点：</p>
+<blockquote>
+<p>变成一个 <code>Response</code>。</p>
+</blockquote>
+<h3 id="10-1-为什么-Result-能工作？"><a href="#10-1-为什么-Result-能工作？" class="headerlink" title="10.1 为什么 Result&lt;T, E&gt; 能工作？"></a>10.1 为什么 <code>Result&lt;T, E&gt;</code> 能工作？</h3><p>因为对 axum 来说：</p>
+<ul>
+<li><code>Ok(T)</code>：把 <code>T</code> 转成响应</li>
+<li><code>Err(E)</code>：把 <code>E</code> 转成响应</li>
+</ul>
+<p>前提只是：</p>
+<ul>
+<li><code>T: IntoResponse</code></li>
+<li><code>E: IntoResponse</code></li>
+</ul>
+<p>所以错误并不是某种“脱离响应系统的特殊东西”，它本质上也是另一种响应路径。</p>
+<p>这对理解请求生命周期非常重要，因为它说明：</p>
+<blockquote>
+<p>失败路径和成功路径，在收束阶段会重新汇合到 Response 上。</p>
+</blockquote>
+<hr>
+<h2 id="十一、错误到底是在哪一层变成-HTTP-响应的？"><a href="#十一、错误到底是在哪一层变成-HTTP-响应的？" class="headerlink" title="十一、错误到底是在哪一层变成 HTTP 响应的？"></a>十一、错误到底是在哪一层变成 HTTP 响应的？</h2><p>这个问题值得单独讲，因为它经常被模糊化。</p>
+<p>如果说得足够精炼，答案其实是：</p>
+<blockquote>
+<p>在某个阶段一旦拿到了一个实现了 <code>IntoResponse</code> 的错误值，它就已经可以被收束为 HTTP 响应。</p>
+</blockquote>
+<p>这件事可能发生在多个位置：</p>
+<h3 id="11-1-中间件阶段"><a href="#11-1-中间件阶段" class="headerlink" title="11.1 中间件阶段"></a>11.1 中间件阶段</h3><p>例如认证失败：</p>
+<pre><code class="highlight rust"><span class="title function_ invoke__">return</span> (StatusCode::UNAUTHORIZED, <span class="string">&quot;unauthorized&quot;</span>).<span class="title function_ invoke__">into_response</span>();</code></pre>
+
+<p>这时请求根本不会继续走向 handler。</p>
+<h3 id="11-2-Extractor-阶段"><a href="#11-2-Extractor-阶段" class="headerlink" title="11.2 Extractor 阶段"></a>11.2 Extractor 阶段</h3><p>例如：</p>
+<ul>
+<li><code>Json&lt;T&gt;</code> 反序列化失败</li>
+<li>自定义 <code>CurrentUser</code> Extractor 没拿到用户上下文</li>
+</ul>
+<p>这时 handler 也不会执行，而错误会被直接转换成响应。</p>
+<h3 id="11-3-handler-service-阶段"><a href="#11-3-handler-service-阶段" class="headerlink" title="11.3 handler &#x2F; service 阶段"></a>11.3 handler &#x2F; service 阶段</h3><p>例如：</p>
+<ul>
+<li>用户不存在</li>
+<li>参数业务校验失败</li>
+<li>数据库出错后映射为 <code>AppError</code></li>
+</ul>
+<p>这时错误会在 handler 返回 <code>Result&lt;_, AppError&gt;</code> 时被收束成响应。</p>
+<p>所以更完整的理解应该是：</p>
+<blockquote>
+<p>“错误变成 HTTP 响应”不是只发生在某一层，而是任何一层只要产出了可转响应的错误，都可能在那里结束本次请求。</p>
+</blockquote>
+<hr>
+<h2 id="十二、响应返回时，中间件后置逻辑是怎么执行的？"><a href="#十二、响应返回时，中间件后置逻辑是怎么执行的？" class="headerlink" title="十二、响应返回时，中间件后置逻辑是怎么执行的？"></a>十二、响应返回时，中间件后置逻辑是怎么执行的？</h2><p>这是“洋葱模型”真正直观的地方。</p>
+<p>以一个典型中间件为例：</p>
+<pre><code class="highlight rust"><span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">log_middleware</span>(request: Request, next: Next) <span class="punctuation">-&gt;</span> Response &#123;
+    <span class="built_in">println!</span>(<span class="string">&quot;before&quot;</span>);
+
+    <span class="keyword">let</span> <span class="variable">response</span> = next.<span class="title function_ invoke__">run</span>(request).<span class="keyword">await</span>;
+
+    <span class="built_in">println!</span>(<span class="string">&quot;after&quot;</span>);
+    response
+&#125;</code></pre>
+
+<p>这里的流程其实很清楚：</p>
+<ol>
+<li>请求进入当前中间件</li>
+<li>执行前置逻辑 <code>before</code></li>
+<li>调用 <code>next.run(request).await</code> 进入下一层</li>
+<li>下一层返回响应</li>
+<li>当前中间件继续执行后置逻辑 <code>after</code></li>
+<li>把响应返回给更外层</li>
+</ol>
+<p>所以响应返回并不是“一步跳回客户端”，而是沿着请求进入时的反方向一层层退出来。</p>
+<p>这也是为什么：</p>
+<ul>
+<li>日志统计能拿到耗时</li>
+<li>trace 中间件能补充响应信息</li>
+<li>一些统一 header 注入可以放在返回路径上做</li>
+</ul>
+<hr>
+<h2 id="十三、把所有环节串成一个完整例子"><a href="#十三、把所有环节串成一个完整例子" class="headerlink" title="十三、把所有环节串成一个完整例子"></a>十三、把所有环节串成一个完整例子</h2><p>下面给一个简化后的完整链路示意，把前面几篇内容放到同一条请求路径里。</p>
+<p>假设应用大致长这样：</p>
+<pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">app</span> = Router::<span class="title function_ invoke__">new</span>()
+    .<span class="title function_ invoke__">route</span>(
+        <span class="string">&quot;/users/&#123;id&#125;&quot;</span>,
+        <span class="title function_ invoke__">get</span>(get_user).<span class="title function_ invoke__">route_layer</span>(middleware::<span class="title function_ invoke__">from_fn</span>(auth_middleware)),
+    )
+    .<span class="title function_ invoke__">layer</span>(middleware::<span class="title function_ invoke__">from_fn</span>(log_middleware))
+    .<span class="title function_ invoke__">with_state</span>(app_state);</code></pre>
+
+<p>handler 长这样：</p>
+<pre><code class="highlight rust"><span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">get_user</span>(
+    <span class="title function_ invoke__">State</span>(state): State&lt;AppState&gt;,
+    user: CurrentUser,
+    <span class="title function_ invoke__">Path</span>(id): Path&lt;<span class="type">i64</span>&gt;,
+) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;Json&lt;ApiResponse&lt;UserDto&gt;&gt;, AppError&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">user_dto</span> = state.user_service.<span class="title function_ invoke__">get_user</span>(id, user.user_id).<span class="keyword">await</span>?;
+    <span class="title function_ invoke__">Ok</span>(<span class="title function_ invoke__">Json</span>(ApiResponse::<span class="title function_ invoke__">success</span>(user_dto)))
+&#125;</code></pre>
+
+<p>那么一次 <code>GET /users/42</code> 的流程可以近似理解成：</p>
+<pre><code class="highlight text">1. 请求进入最外层 log_middleware
+2. log_middleware 前置逻辑开始计时
+3. 请求进入 Router
+4. Router 匹配到 /users/&#123;id&#125;
+5. 请求进入该路由上的 auth_middleware
+6. auth_middleware 校验 token
+7. auth_middleware 把 CurrentUser 写入 request extensions
+8. auth_middleware 调用 next
+9. axum 开始为 get_user 准备参数
+10. 提取 State&lt;AppState&gt;
+11. 提取 CurrentUser
+12. 提取 Path(id)
+13. 调用 get_user handler
+14. handler 调用 service
+15. service 调用 repository / 数据库
+16. 成功返回 UserDto，或返回 AppError
+17. handler 返回 Json(...) 或 Err(AppError)
+18. axum 把返回值转成 HTTP Response
+19. 回到 auth_middleware 后置路径
+20. 回到 log_middleware 后置路径，记录耗时
+21. 响应返回客户端</code></pre>
+
+<p>这条链路一旦建立，前面那些零散知识点就都能挂到正确位置上了。</p>
+<hr>
+<h2 id="十四、理解请求生命周期后，哪些常见困惑会自动消失？"><a href="#十四、理解请求生命周期后，哪些常见困惑会自动消失？" class="headerlink" title="十四、理解请求生命周期后，哪些常见困惑会自动消失？"></a>十四、理解请求生命周期后，哪些常见困惑会自动消失？</h2><h3 id="14-1-为什么-body-提取器不能乱写多个？"><a href="#14-1-为什么-body-提取器不能乱写多个？" class="headerlink" title="14.1 为什么 body 提取器不能乱写多个？"></a>14.1 为什么 body 提取器不能乱写多个？</h3><p>因为参数提取发生在 handler 调用前，而 body 是一次性资源。</p>
+<h3 id="14-2-为什么中间件顺序会影响结果？"><a href="#14-2-为什么中间件顺序会影响结果？" class="headerlink" title="14.2 为什么中间件顺序会影响结果？"></a>14.2 为什么中间件顺序会影响结果？</h3><p>因为它们本质上是在一层层包装服务，顺序不同，进入和返回路径都不同。</p>
+<h3 id="14-3-为什么认证失败时-handler-根本不会执行？"><a href="#14-3-为什么认证失败时-handler-根本不会执行？" class="headerlink" title="14.3 为什么认证失败时 handler 根本不会执行？"></a>14.3 为什么认证失败时 handler 根本不会执行？</h3><p>因为请求在中间件阶段就已经被提前终止了。</p>
+<h3 id="14-4-为什么-CurrentUser-更适合放-extensions，而不是-State？"><a href="#14-4-为什么-CurrentUser-更适合放-extensions，而不是-State？" class="headerlink" title="14.4 为什么 CurrentUser 更适合放 extensions，而不是 State？"></a>14.4 为什么 <code>CurrentUser</code> 更适合放 extensions，而不是 <code>State</code>？</h3><p>因为它属于请求级上下文，不属于应用级共享依赖。</p>
+<h3 id="14-5-为什么错误不一定是在-handler-里产生的？"><a href="#14-5-为什么错误不一定是在-handler-里产生的？" class="headerlink" title="14.5 为什么错误不一定是在 handler 里产生的？"></a>14.5 为什么错误不一定是在 handler 里产生的？</h3><p>因为路由匹配、Extractor、中间件本身都可能提前结束请求并生成响应。</p>
+<hr>
+<h2 id="十五、最容易踩的几个生命周期理解误区"><a href="#十五、最容易踩的几个生命周期理解误区" class="headerlink" title="十五、最容易踩的几个生命周期理解误区"></a>十五、最容易踩的几个生命周期理解误区</h2><h3 id="15-1-以为请求一进来就会先执行-handler"><a href="#15-1-以为请求一进来就会先执行-handler" class="headerlink" title="15.1 以为请求一进来就会先执行 handler"></a>15.1 以为请求一进来就会先执行 handler</h3><p>实际上在 handler 前面还有：</p>
+<ul>
+<li>外层服务链</li>
+<li>路由匹配</li>
+<li>路由级中间件</li>
+<li>参数提取</li>
+</ul>
+<h3 id="15-2-把中间件和-Extractor-看成同一类东西"><a href="#15-2-把中间件和-Extractor-看成同一类东西" class="headerlink" title="15.2 把中间件和 Extractor 看成同一类东西"></a>15.2 把中间件和 Extractor 看成同一类东西</h3><p>它们都发生在 handler 前，但职责不同：</p>
+<ul>
+<li>Middleware 包裹服务链</li>
+<li>Extractor 准备参数输入</li>
+</ul>
+<h3 id="15-3-以为错误只会在-handler-里出现"><a href="#15-3-以为错误只会在-handler-里出现" class="headerlink" title="15.3 以为错误只会在 handler 里出现"></a>15.3 以为错误只会在 handler 里出现</h3><p>实际上很多失败都发生在 handler 之前。</p>
+<h3 id="15-4-只记-API，不记链路位置"><a href="#15-4-只记-API，不记链路位置" class="headerlink" title="15.4 只记 API，不记链路位置"></a>15.4 只记 API，不记链路位置</h3><p>如果只会背：</p>
+<ul>
+<li><code>Path</code></li>
+<li><code>Json</code></li>
+<li><code>layer</code></li>
+<li><code>route_layer</code></li>
+<li><code>IntoResponse</code></li>
+</ul>
+<p>但不知道它们分别处在哪一站，后面一旦项目复杂，就很容易混乱。</p>
+<hr>
+<h2 id="十六、总结"><a href="#十六、总结" class="headerlink" title="十六、总结"></a>十六、总结</h2><p>如果把 axum 的请求生命周期压缩成一句最核心的话，其实就是：</p>
+<blockquote>
+<p>请求先穿过服务链和路由系统，再由 Extractor 为 handler 准备输入，handler 执行业务逻辑后，结果再被统一收束成 Response 并沿中间件链返回。</p>
+</blockquote>
+<p>如果把这篇文章压缩成几个最重要的结论，大概就是这些：</p>
+<ol>
+<li>请求进入 axum 后，首先面对的是被 layer 包裹过的服务链，而不是直接进入 handler</li>
+<li>Router 在服务链内部负责路由匹配，只有匹配成功才会进入对应路由分支</li>
+<li><code>Router::layer(...)</code> 和 <code>route_layer(...)</code> 的区别，本质上是谁在包装哪一层服务</li>
+<li>Extractor 发生在路由匹配成功之后、handler 调用之前</li>
+<li><code>State</code> 属于应用级依赖注入，<code>CurrentUser</code> 这类上下文更属于请求级注入</li>
+<li>body 提取器之所以特殊，是因为 body 通常只能被消费一次</li>
+<li>错误可以在中间件、Extractor、handler 等多个阶段产生，并在当场被收束成响应</li>
+<li>响应返回时，会沿着中间件链反向退回，所以后置逻辑总是在 <code>next.run(...).await</code> 之后执行</li>
+</ol>
+<p>如果你已经把前面的中间件、提取器、状态管理、错误处理、认证、tower、sqlx 实战都看完，那么这一篇其实就是整套 axum 系列的“总流程图”。</p>
+<p>因为到这里，你已经不只是知道某个 API 怎么写，而是已经能把一个请求在 axum 里的整条路径从头讲到尾了。这种理解方式，比单独记住十几个 API 要稳得多，也更接近真正做项目时需要的心智模型。</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
