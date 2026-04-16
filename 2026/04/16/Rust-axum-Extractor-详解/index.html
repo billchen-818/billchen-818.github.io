@@ -1,0 +1,702 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust axum Extractor 详解</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust axum Extractor 详解</h1><div class="time">2026-04-16</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><h2 id="引言"><a href="#引言" class="headerlink" title="引言"></a>引言</h2><p>学 axum 的时候，很多人第一次看到 handler 都会有一个共同疑问：</p>
+<p>为什么函数参数里直接写 <code>Path</code>、<code>Query</code>、<code>Json</code>、<code>State</code>，框架就能自动把请求里的数据解析出来？</p>
+<p>比如下面这个 handler：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+	extract::&#123;Path, Query, State&#125;,
+	Json,
+&#125;;
+<span class="keyword">use</span> serde::&#123;Deserialize, Serialize&#125;;
+
+<span class="meta">#[derive(Deserialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">UserQuery</span> &#123;
+	verbose: <span class="type">Option</span>&lt;<span class="type">bool</span>&gt;,
+&#125;
+
+<span class="meta">#[derive(Serialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">UserResponse</span> &#123;
+	id: <span class="type">u64</span>,
+	name: <span class="type">String</span>,
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">get_user</span>(
+	<span class="title function_ invoke__">Path</span>(id): Path&lt;<span class="type">u64</span>&gt;,
+	<span class="title function_ invoke__">Query</span>(query): Query&lt;UserQuery&gt;,
+	<span class="title function_ invoke__">State</span>(state): State&lt;AppState&gt;,
+) <span class="punctuation">-&gt;</span> Json&lt;UserResponse&gt; &#123;
+	<span class="keyword">let</span> <span class="variable">name</span> = <span class="keyword">if</span> query.verbose.<span class="title function_ invoke__">unwrap_or</span>(<span class="literal">false</span>) &#123;
+		<span class="built_in">format!</span>(<span class="string">&quot;&#123;&#125;-detail&quot;</span>, state.default_name)
+	&#125; <span class="keyword">else</span> &#123;
+		state.default_name
+	&#125;;
+
+	<span class="title function_ invoke__">Json</span>(UserResponse &#123; id, name &#125;)
+&#125;
+
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+	default_name: <span class="type">String</span>,
+&#125;</code></pre>
+
+<p>这段代码读起来非常自然，但它背后其实藏着 axum 很重要的一套设计：<code>Extractor</code>。</p>
+<p>如果你理解了 Extractor，很多之前看起来像“魔法”的东西就会变得非常清晰：</p>
+<ol>
+<li>handler 参数为什么能自动解析</li>
+<li>路由参数、查询参数、请求体、共享状态到底是怎么进入 handler 的</li>
+<li>为什么有些参数可以随便写多个，有些却会冲突</li>
+<li>什么场景该用 Extractor，什么场景该用 Middleware</li>
+<li>如何自己实现一个业务可复用的自定义提取器</li>
+</ol>
+<p>这篇文章我会从浅到深把这些问题串起来，尽量做到“能写、能懂、能判断边界”。</p>
+<hr>
+<h2 id="一、什么是-Extractor？"><a href="#一、什么是-Extractor？" class="headerlink" title="一、什么是 Extractor？"></a>一、什么是 Extractor？</h2><p>先用一句最直接的话来定义：</p>
+<blockquote>
+<p>Extractor 就是把 HTTP 请求里的某部分数据提取出来，并转换成 handler 参数的机制。</p>
+</blockquote>
+<p>一个 HTTP 请求里通常包含很多信息：</p>
+<ul>
+<li>路径参数，例如 <code>/users/42</code></li>
+<li>查询参数，例如 <code>?page=1&amp;page_size=20</code></li>
+<li>请求头，例如 <code>Authorization</code></li>
+<li>请求体，例如 JSON</li>
+<li>应用共享状态，例如数据库连接池、配置</li>
+<li>请求扩展上下文，例如认证后的用户信息</li>
+</ul>
+<p>如果没有 Extractor，handler 往往要自己处理这些细节：</p>
+<ul>
+<li>自己拆路径参数</li>
+<li>自己解析 query string</li>
+<li>自己反序列化 JSON</li>
+<li>自己从共享状态里拿对象</li>
+</ul>
+<p>这样写当然也不是不行，但会带来明显问题：</p>
+<ul>
+<li>业务代码混进了大量 HTTP 解析细节</li>
+<li>相同的解析逻辑在多个 handler 里反复出现</li>
+<li>参数校验和错误处理难以复用</li>
+<li>handler 变得越来越臃肿</li>
+</ul>
+<p>而 Extractor 的核心价值就是：</p>
+<blockquote>
+<p>把“从请求里取数据”的逻辑，从 handler 的业务逻辑里拆出去。</p>
+</blockquote>
+<p>所以一个写得好的 handler，看起来通常更像“直接拿到了已经准备好的参数”，而不是“从底层请求对象里一层层自己抠数据”。</p>
+<hr>
+<h2 id="二、为什么-handler-参数可以自动解析？"><a href="#二、为什么-handler-参数可以自动解析？" class="headerlink" title="二、为什么 handler 参数可以自动解析？"></a>二、为什么 handler 参数可以自动解析？</h2><p>很多人第一次学 axum，会把注意力停留在“这个类型能不能拿到值”。</p>
+<p>但更关键的问题其实是：</p>
+<blockquote>
+<p>axum 凭什么知道，应该如何把请求变成这些参数？</p>
+</blockquote>
+<p>答案是：这些参数类型实现了特定的提取 trait。</p>
+<p>在 axum 里，Extractor 主要围绕两类能力展开：</p>
+<ol>
+<li>从请求头、路径、方法、URI、extensions 这类“请求元信息”里提取</li>
+<li>从请求体里提取</li>
+</ol>
+<p>这两类场景看起来很像，但在设计上必须分开，因为请求体有一个重要限制：</p>
+<blockquote>
+<p>body 通常只能被消费一次。</p>
+</blockquote>
+<p>这就直接决定了 axum 会区分两类提取行为：</p>
+<ul>
+<li><code>FromRequestParts</code>：只处理请求的“头部信息和元信息”，不消费 body</li>
+<li><code>FromRequest</code>：需要读取或消费 body</li>
+</ul>
+<p>你可以先把它们粗略理解为：</p>
+<ul>
+<li>前者适合 <code>Path</code>、<code>Query</code>、<code>State</code>、请求头、extensions</li>
+<li>后者适合 <code>Json</code>、<code>String</code>、<code>Bytes</code>、<code>Form</code></li>
+</ul>
+<p>这个区分非常重要，因为它解释了很多初学者常见困惑。</p>
+<p>例如下面这种写法为什么有问题：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+	extract::Request,
+	extract::Json,
+&#125;;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">wrong_handler</span>(
+	request: Request,
+	<span class="title function_ invoke__">Json</span>(payload): Json&lt;CreateUserRequest&gt;,
+) &#123;
+	<span class="comment">// ...</span>
+&#125;</code></pre>
+
+<p>原因不是语法问题，而是语义冲突：</p>
+<ul>
+<li><code>Request&lt;Body&gt;</code> 想拿到完整请求</li>
+<li><code>Json&lt;T&gt;</code> 也要消费 body</li>
+</ul>
+<p>而 body 不能被两个参数分别读两次。</p>
+<p>所以理解 Extractor，不只是会用几个类型而已，更重要的是理解：</p>
+<blockquote>
+<p>handler 参数本质上是在声明“我要从请求中拿哪些部分的数据”。</p>
+</blockquote>
+<hr>
+<h2 id="三、最常见的内置-Extractor"><a href="#三、最常见的内置-Extractor" class="headerlink" title="三、最常见的内置 Extractor"></a>三、最常见的内置 Extractor</h2><p>axum 内置的 Extractor 已经覆盖了绝大多数日常场景。对于初学者来说，先把最常用的几种吃透，已经足够写出很像样的 Web 服务。</p>
+<h3 id="3-1-Path：提取路由路径参数"><a href="#3-1-Path：提取路由路径参数" class="headerlink" title="3.1 Path：提取路由路径参数"></a>3.1 <code>Path</code>：提取路由路径参数</h3><p>如果你的路由里有动态段，例如：</p>
+<pre><code class="highlight rust">/users/&#123;id&#125;</code></pre>
+
+<p>那么就可以通过 <code>Path</code> 来拿到这个参数。</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;extract::Path, routing::get, Router&#125;;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">get_user</span>(<span class="title function_ invoke__">Path</span>(id): Path&lt;<span class="type">u64</span>&gt;) <span class="punctuation">-&gt;</span> <span class="type">String</span> &#123;
+	<span class="built_in">format!</span>(<span class="string">&quot;user id = &#123;&#125;&quot;</span>, id)
+&#125;
+
+<span class="keyword">let</span> <span class="variable">app</span> = Router::<span class="title function_ invoke__">new</span>().<span class="title function_ invoke__">route</span>(<span class="string">&quot;/users/&#123;id&#125;&quot;</span>, <span class="title function_ invoke__">get</span>(get_user));</code></pre>
+
+<p>这里要注意两个点：</p>
+<ul>
+<li>路由写法是 <code>/&#123;id&#125;</code></li>
+<li><code>Path(u64)</code> 会尝试把字符串参数解析为目标类型</li>
+</ul>
+<p>如果解析失败，例如访问 <code>/users/abc</code>，axum 会直接返回错误响应，而不会进入 handler。</p>
+<p>如果路径参数不止一个，也可以提取为元组或结构体。</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::extract::Path;
+<span class="keyword">use</span> serde::Deserialize;
+
+<span class="meta">#[derive(Deserialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">ArticlePath</span> &#123;
+	category: <span class="type">String</span>,
+	id: <span class="type">u64</span>,
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">get_article</span>(<span class="title function_ invoke__">Path</span>(path): Path&lt;ArticlePath&gt;) <span class="punctuation">-&gt;</span> <span class="type">String</span> &#123;
+	<span class="built_in">format!</span>(<span class="string">&quot;category=&#123;&#125;, id=&#123;&#125;&quot;</span>, path.category, path.id)
+&#125;</code></pre>
+
+<h3 id="3-2-Query：提取查询参数"><a href="#3-2-Query：提取查询参数" class="headerlink" title="3.2 Query：提取查询参数"></a>3.2 <code>Query</code>：提取查询参数</h3><p>对于 URL 后面的 query string，最常用的就是 <code>Query&lt;T&gt;</code>。</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::extract::Query;
+<span class="keyword">use</span> serde::Deserialize;
+
+<span class="meta">#[derive(Deserialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">Pagination</span> &#123;
+	page: <span class="type">Option</span>&lt;<span class="type">u64</span>&gt;,
+	page_size: <span class="type">Option</span>&lt;<span class="type">u64</span>&gt;,
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">list_users</span>(<span class="title function_ invoke__">Query</span>(params): Query&lt;Pagination&gt;) <span class="punctuation">-&gt;</span> <span class="type">String</span> &#123;
+	<span class="keyword">let</span> <span class="variable">page</span> = params.page.<span class="title function_ invoke__">unwrap_or</span>(<span class="number">1</span>);
+	<span class="keyword">let</span> <span class="variable">page_size</span> = params.page_size.<span class="title function_ invoke__">unwrap_or</span>(<span class="number">20</span>);
+	<span class="built_in">format!</span>(<span class="string">&quot;page=&#123;&#125;, page_size=&#123;&#125;&quot;</span>, page, page_size)
+&#125;</code></pre>
+
+<p>如果请求是：</p>
+<pre><code class="highlight text">GET /users?page=2&amp;page_size=50</code></pre>
+
+<p>那么 <code>params.page == Some(2)</code>，<code>params.page_size == Some(50)</code>。</p>
+<p>一般建议把 Query 参数定义成结构体，而不是在 handler 里手动读字符串，这样更清晰，也更利于后续扩展和校验。</p>
+<h3 id="3-3-Json：提取-JSON-请求体"><a href="#3-3-Json：提取-JSON-请求体" class="headerlink" title="3.3 Json：提取 JSON 请求体"></a>3.3 <code>Json</code>：提取 JSON 请求体</h3><p><code>Json&lt;T&gt;</code> 是 axum 里最常见的 body 提取器之一。</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::Json;
+<span class="keyword">use</span> serde::&#123;Deserialize, Serialize&#125;;
+
+<span class="meta">#[derive(Deserialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">CreateUserRequest</span> &#123;
+	name: <span class="type">String</span>,
+	email: <span class="type">String</span>,
+&#125;
+
+<span class="meta">#[derive(Serialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">CreateUserResponse</span> &#123;
+	id: <span class="type">u64</span>,
+	name: <span class="type">String</span>,
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">create_user</span>(<span class="title function_ invoke__">Json</span>(payload): Json&lt;CreateUserRequest&gt;) <span class="punctuation">-&gt;</span> Json&lt;CreateUserResponse&gt; &#123;
+	<span class="title function_ invoke__">Json</span>(CreateUserResponse &#123;
+		id: <span class="number">1</span>,
+		name: payload.name,
+	&#125;)
+&#125;</code></pre>
+
+<p>这里的动作本质上是：</p>
+<ul>
+<li>读取请求体</li>
+<li>按 JSON 反序列化为 <code>CreateUserRequest</code></li>
+<li>成功则把值交给 handler</li>
+<li>失败则直接返回错误响应</li>
+</ul>
+<p>这也是为什么 <code>Json&lt;T&gt;</code> 通常要放在参数列表里比较靠后的位置，因为它会消费 body。</p>
+<h3 id="3-4-State：提取共享应用状态"><a href="#3-4-State：提取共享应用状态" class="headerlink" title="3.4 State：提取共享应用状态"></a>3.4 <code>State</code>：提取共享应用状态</h3><p>在实际项目里，很多对象都需要跨 handler 共享，例如：</p>
+<ul>
+<li>数据库连接池</li>
+<li>配置对象</li>
+<li>缓存客户端</li>
+<li>外部服务 SDK</li>
+</ul>
+<p>这类数据最常用的注入方式就是 <code>State&lt;T&gt;</code>。</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;extract::State, routing::get, Router&#125;;
+
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+	app_name: <span class="type">String</span>,
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">health</span>(<span class="title function_ invoke__">State</span>(state): State&lt;AppState&gt;) <span class="punctuation">-&gt;</span> <span class="type">String</span> &#123;
+	<span class="built_in">format!</span>(<span class="string">&quot;&#123;&#125; is running&quot;</span>, state.app_name)
+&#125;
+
+<span class="keyword">let</span> <span class="variable">state</span> = AppState &#123;
+	app_name: <span class="string">&quot;demo-service&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+&#125;;
+
+<span class="keyword">let</span> <span class="variable">app</span> = Router::<span class="title function_ invoke__">new</span>()
+	.<span class="title function_ invoke__">route</span>(<span class="string">&quot;/health&quot;</span>, <span class="title function_ invoke__">get</span>(health))
+	.<span class="title function_ invoke__">with_state</span>(state);</code></pre>
+
+<p>这意味着 handler 不需要知道状态对象是怎么创建出来的，它只声明自己“需要这个状态”。</p>
+<p>这就是依赖注入在 axum 世界里的一个非常自然的落点。</p>
+<h3 id="3-5-请求元信息提取器"><a href="#3-5-请求元信息提取器" class="headerlink" title="3.5 请求元信息提取器"></a>3.5 请求元信息提取器</h3><p>除了上面几个高频类型，axum 也允许你直接提取一些请求元信息，例如：</p>
+<ul>
+<li><code>Method</code></li>
+<li><code>Uri</code></li>
+<li><code>HeaderMap</code></li>
+<li><code>Extension&lt;T&gt;</code></li>
+</ul>
+<p>例如：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::http::&#123;HeaderMap, Method, Uri&#125;;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">inspect_request</span>(method: Method, uri: Uri, headers: HeaderMap) <span class="punctuation">-&gt;</span> <span class="type">String</span> &#123;
+	<span class="built_in">format!</span>(
+		<span class="string">&quot;method=&#123;&#125;, path=&#123;&#125;, headers=&#123;&#125;&quot;</span>,
+		method,
+		uri.<span class="title function_ invoke__">path</span>(),
+		headers.<span class="title function_ invoke__">len</span>()
+	)
+&#125;</code></pre>
+
+<p>这些提取器通常不会消费 body，所以很适合拿来做请求分析、辅助判断、读取 header 等操作。</p>
+<hr>
+<h2 id="四、多个-Extractor-可以一起使用吗？"><a href="#四、多个-Extractor-可以一起使用吗？" class="headerlink" title="四、多个 Extractor 可以一起使用吗？"></a>四、多个 Extractor 可以一起使用吗？</h2><p>可以，而且这正是 axum handler 的强大之处。</p>
+<p>例如下面这个 handler：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+	extract::&#123;Path, Query, State&#125;,
+	Json,
+&#125;;
+<span class="keyword">use</span> serde::&#123;Deserialize, Serialize&#125;;
+
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+	default_nickname: <span class="type">String</span>,
+&#125;
+
+<span class="meta">#[derive(Deserialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">UserPath</span> &#123;
+	id: <span class="type">u64</span>,
+&#125;
+
+<span class="meta">#[derive(Deserialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">UpdateQuery</span> &#123;
+	notify: <span class="type">Option</span>&lt;<span class="type">bool</span>&gt;,
+&#125;
+
+<span class="meta">#[derive(Deserialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">UpdateUserRequest</span> &#123;
+	nickname: <span class="type">String</span>,
+&#125;
+
+<span class="meta">#[derive(Serialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">UpdateUserResponse</span> &#123;
+	id: <span class="type">u64</span>,
+	nickname: <span class="type">String</span>,
+	notify: <span class="type">bool</span>,
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">update_user</span>(
+	<span class="title function_ invoke__">State</span>(state): State&lt;AppState&gt;,
+	<span class="title function_ invoke__">Path</span>(path): Path&lt;UserPath&gt;,
+	<span class="title function_ invoke__">Query</span>(query): Query&lt;UpdateQuery&gt;,
+	<span class="title function_ invoke__">Json</span>(payload): Json&lt;UpdateUserRequest&gt;,
+) <span class="punctuation">-&gt;</span> Json&lt;UpdateUserResponse&gt; &#123;
+	<span class="keyword">let</span> <span class="variable">nickname</span> = <span class="keyword">if</span> payload.nickname.<span class="title function_ invoke__">is_empty</span>() &#123;
+		state.default_nickname
+	&#125; <span class="keyword">else</span> &#123;
+		payload.nickname
+	&#125;;
+
+	<span class="title function_ invoke__">Json</span>(UpdateUserResponse &#123;
+		id: path.id,
+		nickname,
+		notify: query.notify.<span class="title function_ invoke__">unwrap_or</span>(<span class="literal">false</span>),
+	&#125;)
+&#125;</code></pre>
+
+<p>这个函数一次性从请求里拿了四类信息：</p>
+<ul>
+<li><code>State</code>：共享状态</li>
+<li><code>Path</code>：路由参数</li>
+<li><code>Query</code>：查询参数</li>
+<li><code>Json</code>：请求体</li>
+</ul>
+<p>这就是 axum handler 非常舒服的地方：</p>
+<blockquote>
+<p>参数列表本身就在声明这个接口依赖哪些输入。</p>
+</blockquote>
+<p>但这里也有一个重要规则：</p>
+<blockquote>
+<p>消费 body 的提取器通常只能有一个。</p>
+</blockquote>
+<p>也就是说，下面这种写法通常就是错误方向：</p>
+<pre><code class="highlight rust"><span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">wrong</span>(<span class="title function_ invoke__">Json</span>(a): Json&lt;A&gt;, <span class="title function_ invoke__">Json</span>(b): Json&lt;B&gt;) &#123;
+	<span class="comment">// body 不可能被解析两次</span>
+&#125;</code></pre>
+
+<p>body 是一个流，不是可随便复制的值。所以一旦某个 Extractor 已经把 body 读走了，后面的 body Extractor 就没有可读内容了。</p>
+<hr>
+<h2 id="五、自定义-Extractor：把通用逻辑从-handler-里拿出来"><a href="#五、自定义-Extractor：把通用逻辑从-handler-里拿出来" class="headerlink" title="五、自定义 Extractor：把通用逻辑从 handler 里拿出来"></a>五、自定义 Extractor：把通用逻辑从 handler 里拿出来</h2><p>内置 Extractor 很强，但真正让 axum 变得有工程味道的，是你可以自己定义 Extractor。</p>
+<p>这通常适合做这些事情：</p>
+<ul>
+<li>从请求头里提取认证用户</li>
+<li>从 extensions 里提取已经注入的上下文</li>
+<li>对某个参数做统一校验和转换</li>
+<li>把多步重复解析逻辑封装成业务可复用组件</li>
+</ul>
+<h3 id="5-1-一个典型场景：提取当前登录用户"><a href="#5-1-一个典型场景：提取当前登录用户" class="headerlink" title="5.1 一个典型场景：提取当前登录用户"></a>5.1 一个典型场景：提取当前登录用户</h3><p>假设我们约定：</p>
+<ul>
+<li>客户端必须在请求头里带 <code>Authorization: Bearer secret-token</code></li>
+<li>服务端校验成功后，构造出一个 <code>CurrentUser</code></li>
+<li>handler 不再自己解析 header，而是直接拿 <code>CurrentUser</code></li>
+</ul>
+<p>先定义用户类型：</p>
+<pre><code class="highlight rust"><span class="meta">#[derive(Debug, Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">CurrentUser</span> &#123;
+	user_id: <span class="type">u64</span>,
+	username: <span class="type">String</span>,
+&#125;</code></pre>
+
+<p>然后给它实现 <code>FromRequestParts</code>：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+	extract::FromRequestParts,
+	http::&#123;header::AUTHORIZATION, request::Parts, StatusCode&#125;,
+&#125;;
+
+<span class="keyword">impl</span>&lt;S&gt; FromRequestParts&lt;S&gt; <span class="keyword">for</span> <span class="title class_">CurrentUser</span>
+<span class="keyword">where</span>
+	S: <span class="built_in">Send</span> + <span class="built_in">Sync</span>,
+&#123;
+	<span class="keyword">type</span> <span class="title class_">Rejection</span> = (StatusCode, <span class="type">String</span>);
+
+	<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">from_request_parts</span>(
+		parts: &amp;<span class="keyword">mut</span> Parts,
+		_state: &amp;S,
+	) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="keyword">Self</span>, <span class="keyword">Self</span>::Rejection&gt; &#123;
+		<span class="keyword">let</span> <span class="variable">auth_header</span> = parts
+			.headers
+			.<span class="title function_ invoke__">get</span>(AUTHORIZATION)
+			.<span class="title function_ invoke__">and_then</span>(|value| value.<span class="title function_ invoke__">to_str</span>().<span class="title function_ invoke__">ok</span>())
+			.<span class="title function_ invoke__">ok_or</span>((StatusCode::UNAUTHORIZED, <span class="string">&quot;missing authorization header&quot;</span>.<span class="title function_ invoke__">to_string</span>()))?;
+
+		<span class="keyword">let</span> <span class="variable">token</span> = auth_header
+			.<span class="title function_ invoke__">strip_prefix</span>(<span class="string">&quot;Bearer &quot;</span>)
+			.<span class="title function_ invoke__">ok_or</span>((StatusCode::UNAUTHORIZED, <span class="string">&quot;invalid authorization scheme&quot;</span>.<span class="title function_ invoke__">to_string</span>()))?;
+
+		<span class="keyword">if</span> token != <span class="string">&quot;secret-token&quot;</span> &#123;
+			<span class="keyword">return</span> <span class="title function_ invoke__">Err</span>((StatusCode::UNAUTHORIZED, <span class="string">&quot;invalid token&quot;</span>.<span class="title function_ invoke__">to_string</span>()));
+		&#125;
+
+		<span class="title function_ invoke__">Ok</span>(CurrentUser &#123;
+			user_id: <span class="number">1</span>,
+			username: <span class="string">&quot;chen&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+		&#125;)
+	&#125;
+&#125;</code></pre>
+
+<p>之后 handler 就可以直接这么写：</p>
+<pre><code class="highlight rust"><span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">profile</span>(user: CurrentUser) <span class="punctuation">-&gt;</span> <span class="type">String</span> &#123;
+	<span class="built_in">format!</span>(<span class="string">&quot;user_id=&#123;&#125;, username=&#123;&#125;&quot;</span>, user.user_id, user.username)
+&#125;</code></pre>
+
+<p>这比在每个 handler 里反复写下面这些逻辑明显更好：</p>
+<ul>
+<li>拿 header</li>
+<li>解析 Bearer token</li>
+<li>校验 token</li>
+<li>构造用户对象</li>
+</ul>
+<h3 id="5-2-为什么这里用-FromRequestParts，而不是-FromRequest？"><a href="#5-2-为什么这里用-FromRequestParts，而不是-FromRequest？" class="headerlink" title="5.2 为什么这里用 FromRequestParts，而不是 FromRequest？"></a>5.2 为什么这里用 <code>FromRequestParts</code>，而不是 <code>FromRequest</code>？</h3><p>因为这个提取过程只依赖请求头，不需要读 body。</p>
+<p>这时优先使用 <code>FromRequestParts</code> 的好处是：</p>
+<ul>
+<li>不会和 <code>Json&lt;T&gt;</code> 之类的 body 提取器冲突</li>
+<li>语义更清晰</li>
+<li>可以和其他 body 提取器一起使用</li>
+</ul>
+<p>例如：</p>
+<pre><code class="highlight rust"><span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">update_profile</span>(
+	user: CurrentUser,
+	<span class="title function_ invoke__">Json</span>(payload): Json&lt;UpdateProfileRequest&gt;,
+) &#123;
+	<span class="comment">// user 来自 header</span>
+	<span class="comment">// payload 来自 body</span>
+&#125;</code></pre>
+
+<p>如果 <code>CurrentUser</code> 也去消费 body，那这个组合就很容易出问题。</p>
+<h3 id="5-3-自定义-Extractor-的价值不只是“省代码”"><a href="#5-3-自定义-Extractor-的价值不只是“省代码”" class="headerlink" title="5.3 自定义 Extractor 的价值不只是“省代码”"></a>5.3 自定义 Extractor 的价值不只是“省代码”</h3><p>很多人刚接触自定义 Extractor，会觉得它只是“把重复代码包一下”。</p>
+<p>但更准确地说，它的价值在于：</p>
+<blockquote>
+<p>它把业务接口依赖的输入模型显式化了。</p>
+</blockquote>
+<p>当你看到下面这个 handler：</p>
+<pre><code class="highlight rust"><span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">get_order</span>(user: CurrentUser, <span class="title function_ invoke__">Path</span>(order_id): Path&lt;<span class="type">u64</span>&gt;) <span class="punctuation">-&gt;</span> <span class="type">String</span> &#123;
+	<span class="built_in">format!</span>(<span class="string">&quot;user &#123;&#125; requests order &#123;&#125;&quot;</span>, user.user_id, order_id)
+&#125;</code></pre>
+
+<p>你几乎不需要看函数体，就知道这个接口的输入前提：</p>
+<ul>
+<li>必须有认证用户</li>
+<li>必须有订单 ID</li>
+</ul>
+<p>这种可读性在接口越来越多时，价值会非常明显。</p>
+<hr>
+<h2 id="六、Extractor-和-Middleware-到底怎么分工？"><a href="#六、Extractor-和-Middleware-到底怎么分工？" class="headerlink" title="六、Extractor 和 Middleware 到底怎么分工？"></a>六、Extractor 和 Middleware 到底怎么分工？</h2><p>这是学习 axum 时最容易混淆的问题之一。</p>
+<p>因为很多场景看起来既能用 Extractor，也能用 Middleware。</p>
+<p>例如认证：</p>
+<ul>
+<li>中间件也能校验 token</li>
+<li>自定义 Extractor 也能校验 token</li>
+</ul>
+<p>那到底应该怎么选？</p>
+<p>一个非常实用的判断方式是：</p>
+<blockquote>
+<p>Middleware 更适合“作用于请求处理链”的横切逻辑。</p>
+<p>Extractor 更适合“给当前 handler 准备参数”的输入逻辑。</p>
+</blockquote>
+<h3 id="6-1-更适合放在-Middleware-的场景"><a href="#6-1-更适合放在-Middleware-的场景" class="headerlink" title="6.1 更适合放在 Middleware 的场景"></a>6.1 更适合放在 Middleware 的场景</h3><ul>
+<li>请求日志记录</li>
+<li>统一超时控制</li>
+<li>链路追踪与请求 ID 注入</li>
+<li>CORS、限流、压缩</li>
+<li>对整个路由组生效的鉴权前置拦截</li>
+</ul>
+<p>这些逻辑的共同特点是：</p>
+<ul>
+<li>通常不只是为某一个 handler 准备参数</li>
+<li>经常要在请求前后都参与</li>
+<li>更像“包在 handler 外面的一层处理”</li>
+</ul>
+<h3 id="6-2-更适合放在-Extractor-的场景"><a href="#6-2-更适合放在-Extractor-的场景" class="headerlink" title="6.2 更适合放在 Extractor 的场景"></a>6.2 更适合放在 Extractor 的场景</h3><ul>
+<li>提取当前用户</li>
+<li>提取并解析分页参数</li>
+<li>提取并校验业务请求模型</li>
+<li>从 request extensions 里拿上下文</li>
+<li>把若干 header 组合成一个明确的业务类型</li>
+</ul>
+<p>这些逻辑的共同特点是：</p>
+<ul>
+<li>直接服务于当前 handler 的输入参数</li>
+<li>更强调“拿到一个已经可用的值”</li>
+<li>不需要处理响应前后的完整生命周期</li>
+</ul>
+<h3 id="6-3-一个常见的组合方式"><a href="#6-3-一个常见的组合方式" class="headerlink" title="6.3 一个常见的组合方式"></a>6.3 一个常见的组合方式</h3><p>在真实项目里，Middleware 和 Extractor 往往是配合使用的，而不是二选一。</p>
+<p>比如这样一条链路：</p>
+<ol>
+<li>Middleware 负责做统一 token 粗校验、日志、链路信息注入</li>
+<li>Middleware 把解析后的用户 ID 写入 <code>request.extensions</code></li>
+<li>自定义 Extractor 再从 extensions 里提取 <code>CurrentUser</code></li>
+<li>handler 直接拿业务语义明确的参数</li>
+</ol>
+<p>这种分层通常比“所有认证逻辑都写在一个地方”更清晰。</p>
+<hr>
+<h2 id="七、一个完整一点的示例：Path-Query-State-自定义-Extractor"><a href="#七、一个完整一点的示例：Path-Query-State-自定义-Extractor" class="headerlink" title="七、一个完整一点的示例：Path + Query + State + 自定义 Extractor"></a>七、一个完整一点的示例：Path + Query + State + 自定义 Extractor</h2><p>下面给一个稍微完整一点的例子，把几类常见提取器放到一起，便于你建立整体感。</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+	extract::&#123;FromRequestParts, Path, Query, State&#125;,
+	http::&#123;header::AUTHORIZATION, request::Parts, StatusCode&#125;,
+	response::IntoResponse,
+	routing::get,
+	Json, Router,
+&#125;;
+<span class="keyword">use</span> serde::&#123;Deserialize, Serialize&#125;;
+
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+	service_name: <span class="type">String</span>,
+&#125;
+
+<span class="meta">#[derive(Debug, Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">CurrentUser</span> &#123;
+	user_id: <span class="type">u64</span>,
+&#125;
+
+<span class="keyword">impl</span>&lt;S&gt; FromRequestParts&lt;S&gt; <span class="keyword">for</span> <span class="title class_">CurrentUser</span>
+<span class="keyword">where</span>
+	S: <span class="built_in">Send</span> + <span class="built_in">Sync</span>,
+&#123;
+	<span class="keyword">type</span> <span class="title class_">Rejection</span> = (StatusCode, <span class="type">String</span>);
+
+	<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">from_request_parts</span>(
+		parts: &amp;<span class="keyword">mut</span> Parts,
+		_state: &amp;S,
+	) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="keyword">Self</span>, <span class="keyword">Self</span>::Rejection&gt; &#123;
+		<span class="keyword">let</span> <span class="variable">auth_header</span> = parts
+			.headers
+			.<span class="title function_ invoke__">get</span>(AUTHORIZATION)
+			.<span class="title function_ invoke__">and_then</span>(|value| value.<span class="title function_ invoke__">to_str</span>().<span class="title function_ invoke__">ok</span>())
+			.<span class="title function_ invoke__">ok_or</span>((StatusCode::UNAUTHORIZED, <span class="string">&quot;missing token&quot;</span>.<span class="title function_ invoke__">to_string</span>()))?;
+
+		<span class="keyword">if</span> auth_header != <span class="string">&quot;Bearer secret-token&quot;</span> &#123;
+			<span class="keyword">return</span> <span class="title function_ invoke__">Err</span>((StatusCode::UNAUTHORIZED, <span class="string">&quot;invalid token&quot;</span>.<span class="title function_ invoke__">to_string</span>()));
+		&#125;
+
+		<span class="title function_ invoke__">Ok</span>(CurrentUser &#123; user_id: <span class="number">1001</span> &#125;)
+	&#125;
+&#125;
+
+<span class="meta">#[derive(Deserialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">ArticleQuery</span> &#123;
+	preview: <span class="type">Option</span>&lt;<span class="type">bool</span>&gt;,
+&#125;
+
+<span class="meta">#[derive(Serialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">ArticleResponse</span> &#123;
+	article_id: <span class="type">u64</span>,
+	owner_id: <span class="type">u64</span>,
+	preview: <span class="type">bool</span>,
+	service: <span class="type">String</span>,
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">get_article</span>(
+	<span class="title function_ invoke__">State</span>(state): State&lt;AppState&gt;,
+	user: CurrentUser,
+	<span class="title function_ invoke__">Path</span>(article_id): Path&lt;<span class="type">u64</span>&gt;,
+	<span class="title function_ invoke__">Query</span>(query): Query&lt;ArticleQuery&gt;,
+) <span class="punctuation">-&gt;</span> <span class="keyword">impl</span> <span class="title class_">IntoResponse</span> &#123;
+	<span class="title function_ invoke__">Json</span>(ArticleResponse &#123;
+		article_id,
+		owner_id: user.user_id,
+		preview: query.preview.<span class="title function_ invoke__">unwrap_or</span>(<span class="literal">false</span>),
+		service: state.service_name,
+	&#125;)
+&#125;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+	<span class="keyword">let</span> <span class="variable">app</span> = Router::<span class="title function_ invoke__">new</span>()
+		.<span class="title function_ invoke__">route</span>(<span class="string">&quot;/articles/&#123;id&#125;&quot;</span>, <span class="title function_ invoke__">get</span>(get_article))
+		.<span class="title function_ invoke__">with_state</span>(AppState &#123;
+			service_name: <span class="string">&quot;content-service&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+		&#125;);
+
+	<span class="keyword">let</span> <span class="variable">listener</span> = tokio::net::TcpListener::<span class="title function_ invoke__">bind</span>(<span class="string">&quot;0.0.0.0:3000&quot;</span>)
+		.<span class="keyword">await</span>
+		.<span class="title function_ invoke__">unwrap</span>();
+
+	axum::<span class="title function_ invoke__">serve</span>(listener, app).<span class="keyword">await</span>.<span class="title function_ invoke__">unwrap</span>();
+&#125;</code></pre>
+
+<p>访问时：</p>
+<pre><code class="highlight text">GET /articles/42?preview=true
+Authorization: Bearer secret-token</code></pre>
+
+<p>handler 最终拿到的是：</p>
+<ul>
+<li><code>State</code> 提供的应用状态</li>
+<li><code>CurrentUser</code> 提供的认证用户</li>
+<li><code>Path</code> 提供的文章 ID</li>
+<li><code>Query</code> 提供的查询参数</li>
+</ul>
+<p>这已经非常接近真实项目里的接口写法了。</p>
+<hr>
+<h2 id="八、写-Extractor-时最容易踩的坑"><a href="#八、写-Extractor-时最容易踩的坑" class="headerlink" title="八、写 Extractor 时最容易踩的坑"></a>八、写 Extractor 时最容易踩的坑</h2><h3 id="8-1-把-body-提取器写了多个"><a href="#8-1-把-body-提取器写了多个" class="headerlink" title="8.1 把 body 提取器写了多个"></a>8.1 把 body 提取器写了多个</h3><p>这是最常见的坑之一。</p>
+<p>例如：</p>
+<pre><code class="highlight rust"><span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">wrong_handler</span>(
+	<span class="title function_ invoke__">Json</span>(a): Json&lt;A&gt;,
+	body: <span class="type">String</span>,
+) &#123;
+	<span class="comment">// 两者都想消费 body</span>
+&#125;</code></pre>
+
+<p>一旦某个参数已经把 body 读走，后面的 body 提取器就没有机会再读。</p>
+<p>记住这条就够了：</p>
+<blockquote>
+<p>请求体通常只能被一个提取器消费。</p>
+</blockquote>
+<h3 id="8-2-明明只读-header，却错误实现成-FromRequest"><a href="#8-2-明明只读-header，却错误实现成-FromRequest" class="headerlink" title="8.2 明明只读 header，却错误实现成 FromRequest"></a>8.2 明明只读 header，却错误实现成 <code>FromRequest</code></h3><p>如果你的逻辑只依赖：</p>
+<ul>
+<li>header</li>
+<li>method</li>
+<li>uri</li>
+<li>extensions</li>
+<li>state</li>
+</ul>
+<p>那通常应该优先实现 <code>FromRequestParts</code>。</p>
+<p>否则你会平白引入 body 冲突风险，也让语义变得不准确。</p>
+<h3 id="8-3-在-handler-里重复做参数解析"><a href="#8-3-在-handler-里重复做参数解析" class="headerlink" title="8.3 在 handler 里重复做参数解析"></a>8.3 在 handler 里重复做参数解析</h3><p>很多人虽然知道有 Extractor，但还是习惯在 handler 里自己拿 header、自己 parse、自己做基础校验。</p>
+<p>这样写短期看很直接，长期会带来两个问题：</p>
+<ul>
+<li>相同逻辑难以复用</li>
+<li>handler 语义越来越不清楚</li>
+</ul>
+<p>只要某段逻辑在多个接口里重复出现，并且它本质上是在“准备输入参数”，就应该考虑抽成自定义 Extractor。</p>
+<h3 id="8-4-把所有校验都塞进-Middleware"><a href="#8-4-把所有校验都塞进-Middleware" class="headerlink" title="8.4 把所有校验都塞进 Middleware"></a>8.4 把所有校验都塞进 Middleware</h3><p>Middleware 确实很强，但它不是所有输入问题的万能归宿。</p>
+<p>如果某段逻辑最终的目标是：</p>
+<ul>
+<li>给 handler 准备一个明确参数</li>
+<li>让参数列表表达接口依赖</li>
+</ul>
+<p>那 Extractor 通常是更自然的设计。</p>
+<h3 id="8-5-错误类型设计得过于随意"><a href="#8-5-错误类型设计得过于随意" class="headerlink" title="8.5 错误类型设计得过于随意"></a>8.5 错误类型设计得过于随意</h3><p>自定义 Extractor 往往需要定义 <code>Rejection</code>。</p>
+<p>初学时直接返回 <code>(StatusCode, String)</code> 没问题，但如果项目逐渐变大，更建议统一错误模型，例如：</p>
+<ul>
+<li><code>AppError</code></li>
+<li><code>ApiError</code></li>
+<li>自定义 <code>IntoResponse</code></li>
+</ul>
+<p>这样错误处理方式会更一致，也更利于接口规范化。</p>
+<hr>
+<h2 id="九、如何判断一个逻辑该不该抽成-Extractor？"><a href="#九、如何判断一个逻辑该不该抽成-Extractor？" class="headerlink" title="九、如何判断一个逻辑该不该抽成 Extractor？"></a>九、如何判断一个逻辑该不该抽成 Extractor？</h2><p>我自己会用一个很简单的判断方法：</p>
+<p>如果这段逻辑的目标是下面三件事之一，就优先考虑 Extractor：</p>
+<ol>
+<li>从请求中拿数据</li>
+<li>把原始数据转换成更明确的业务类型</li>
+<li>在进入 handler 前完成参数层面的基础校验</li>
+</ol>
+<p>例如这些都很适合：</p>
+<ul>
+<li><code>CurrentUser</code></li>
+<li><code>Pagination</code></li>
+<li><code>RequestId</code></li>
+<li><code>ValidatedJson&lt;T&gt;</code></li>
+<li><code>TenantContext</code></li>
+</ul>
+<p>反过来说，如果这段逻辑的目标更像：</p>
+<ul>
+<li>包裹整条请求处理链</li>
+<li>在请求前后都做动作</li>
+<li>作用于一批路由而不是单个参数</li>
+</ul>
+<p>那通常更适合 Middleware。</p>
+<p>这个判断不需要绝对教条，但足够指导大多数工程实践。</p>
+<hr>
+<h2 id="十、总结"><a href="#十、总结" class="headerlink" title="十、总结"></a>十、总结</h2><p>axum 的 Extractor 之所以重要，不是因为它提供了几个方便的类型，而是因为它把 Web 请求处理这件事拆得很清楚：</p>
+<ul>
+<li>路由负责匹配请求</li>
+<li>Extractor 负责准备 handler 输入</li>
+<li>Middleware 负责处理横切逻辑</li>
+<li>handler 负责真正的业务逻辑</li>
+</ul>
+<p>当你理解了这一层分工之后，handler 的写法就不再只是“会用几个类型”，而是开始具备清晰的设计感。</p>
+<p>这篇文章你至少应该带走下面几个关键点：</p>
+<ol>
+<li>Extractor 的本质是“把请求数据转换为 handler 参数”</li>
+<li>axum 会区分 <code>FromRequestParts</code> 和 <code>FromRequest</code></li>
+<li><code>Path</code>、<code>Query</code>、<code>Json</code>、<code>State</code> 是最常用的几类提取器</li>
+<li>body 通常只能被消费一次，所以 body 提取器要特别注意组合关系</li>
+<li>自定义 Extractor 很适合封装认证用户、分页参数、业务上下文等通用输入逻辑</li>
+<li>Middleware 和 Extractor 不是替代关系，而是分工不同</li>
+</ol>
+<p>如果你刚从中间件那篇文章继续往下看，那么到这里，你应该已经能把 axum 中请求进入 handler 之前最核心的两层机制串起来了：</p>
+<ul>
+<li>Middleware 负责包裹请求处理链</li>
+<li>Extractor 负责准备 handler 参数</li>
+</ul>
+<p>再往后，一个非常自然的进阶方向就是继续写：</p>
+<ul>
+<li>axum 状态管理与共享数据</li>
+<li>axum 错误处理与统一响应设计</li>
+<li>axum 与 tower 的关系</li>
+</ul>
+<p>因为当你把这几块再补上，整个 axum Web 服务的工程化骨架就基本完整了。</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
