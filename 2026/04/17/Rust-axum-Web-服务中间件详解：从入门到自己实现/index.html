@@ -1,0 +1,683 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust axum Web 服务中间件详解：从入门到自己实现</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust axum Web 服务中间件详解：从入门到自己实现</h1><div class="time">2026-04-17</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><h2 id="引言"><a href="#引言" class="headerlink" title="引言"></a>引言</h2><p>在 Web 服务开发里，路由和处理函数当然重要，但真正决定一个服务是否“像工程项目”的，往往是中间件。</p>
+<p>比如下面这些能力，通常都不是直接写在业务 handler 里的：</p>
+<ul>
+<li>请求日志记录</li>
+<li>统一鉴权</li>
+<li>超时控制</li>
+<li>跨域处理</li>
+<li>请求 ID 注入</li>
+<li>指标统计</li>
+<li>限流与熔断</li>
+</ul>
+<p>这些横切能力如果全部写进业务函数，会很快让代码变得混乱：</p>
+<ul>
+<li>handler 不再只关心业务本身</li>
+<li>相同逻辑被反复复制</li>
+<li>路由层和业务层耦合严重</li>
+<li>后续很难扩展和排查问题</li>
+</ul>
+<p>而中间件，就是解决这类问题的关键手段。</p>
+<p>在 Rust 的 axum 框架里，中间件并不是一个“额外附加”的概念，它和整个框架底层的 <code>tower</code> 抽象是紧密结合的。也正因为如此，axum 中间件既容易上手，又有很强的扩展能力。</p>
+<p>这篇文章我会从浅到深讲清楚几个问题：</p>
+<ol>
+<li>什么是中间件，为什么它重要</li>
+<li>axum 中间件的执行模型到底是什么</li>
+<li>如何用 <code>from_fn</code> 写自己的中间件</li>
+<li>如何在中间件里做鉴权，并把上下文传递给 handler</li>
+<li><code>layer</code> 和 <code>route_layer</code> 到底有什么区别</li>
+<li>为什么 axum 背后其实是 <code>tower::Layer</code> 和 <code>tower::Service</code></li>
+<li>初学者在写中间件时最容易踩哪些坑</li>
+</ol>
+<p>如果你刚学会 axum，这篇文章可以作为一个比较完整的入门案例；如果你已经能写基础路由，这篇文章会帮你把“能用”提升到“理解设计”。</p>
+<hr>
+<h2 id="一、什么是中间件？"><a href="#一、什么是中间件？" class="headerlink" title="一、什么是中间件？"></a>一、什么是中间件？</h2><p>先用一句最直白的话来定义：</p>
+<blockquote>
+<p>中间件就是在请求到达 handler 前后插入的一层通用处理逻辑。</p>
+</blockquote>
+<p>一次 HTTP 请求进入服务后，通常会经历这样一条链路：</p>
+<pre><code class="highlight text">客户端请求
+   -&gt; 日志中间件
+   -&gt; 鉴权中间件
+   -&gt; 限流中间件
+   -&gt; 业务 handler
+   -&gt; 响应返回</code></pre>
+
+<p>你可以把它理解成“洋葱模型”：</p>
+<ul>
+<li>请求进入时，从外到内一层层穿过</li>
+<li>响应返回时，再从内到外一层层返回</li>
+</ul>
+<p>所以中间件天然适合处理“和具体业务无关，但又作用于很多路由”的逻辑。</p>
+<p>例如：</p>
+<ul>
+<li>记录请求耗时</li>
+<li>校验请求头里的 token</li>
+<li>给每个请求打唯一标识</li>
+<li>给响应补充统一 header</li>
+</ul>
+<p>这类逻辑有两个特点：</p>
+<ul>
+<li>它们不是某一个接口独有的</li>
+<li>它们应该尽量集中管理，而不是散落在各个 handler 中</li>
+</ul>
+<hr>
+<h2 id="二、axum-中间件的核心理解"><a href="#二、axum-中间件的核心理解" class="headerlink" title="二、axum 中间件的核心理解"></a>二、axum 中间件的核心理解</h2><p>很多人第一次学 axum 中间件，容易只记住一个写法：</p>
+<pre><code class="highlight rust">.<span class="title function_ invoke__">layer</span>(middleware::<span class="title function_ invoke__">from_fn</span>(my_middleware))</code></pre>
+
+<p>但如果只停留在这个层面，后面很容易对执行顺序、作用范围、状态传递感到困惑。</p>
+<p>要真正理解 axum 中间件，必须先记住一句话：</p>
+<blockquote>
+<p>axum 构建在 tower 之上，而 tower 的核心抽象是 <code>Service</code> 和 <code>Layer</code>。</p>
+</blockquote>
+<p>可以先做一个粗略理解：</p>
+<ul>
+<li><code>Service</code>：接收请求并返回响应的东西</li>
+<li><code>Layer</code>：把一个 <code>Service</code> 包起来，变成一个新的 <code>Service</code></li>
+</ul>
+<p>所以本质上，中间件不是“在 handler 前插一段代码”这么简单，而是：</p>
+<blockquote>
+<p>通过包装服务的方式，在请求处理链外面再套一层逻辑。</p>
+</blockquote>
+<p>这也是为什么 axum 的 <code>.layer(...)</code> 看起来像“叠一层”。</p>
+<h3 id="2-1-axum-中间件最常见的三种入口"><a href="#2-1-axum-中间件最常见的三种入口" class="headerlink" title="2.1 axum 中间件最常见的三种入口"></a>2.1 axum 中间件最常见的三种入口</h3><p>在日常开发里，你通常会接触到这几种方式：</p>
+<ol>
+<li><code>middleware::from_fn</code></li>
+<li><code>middleware::from_fn_with_state</code></li>
+<li><code>Router::layer</code> &#x2F; <code>Router::route_layer</code></li>
+</ol>
+<p>其中最适合初学者入门的是前两种。</p>
+<h3 id="2-2-from-fn-的执行模型"><a href="#2-2-from-fn-的执行模型" class="headerlink" title="2.2 from_fn 的执行模型"></a>2.2 from_fn 的执行模型</h3><p>一个最基本的中间件函数通常长这样：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+	extract::Request,
+	middleware::Next,
+	response::Response,
+&#125;;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">my_middleware</span>(request: Request, next: Next) <span class="punctuation">-&gt;</span> Response &#123;
+	<span class="built_in">println!</span>(<span class="string">&quot;before handler&quot;</span>);
+
+	<span class="keyword">let</span> <span class="variable">response</span> = next.<span class="title function_ invoke__">run</span>(request).<span class="keyword">await</span>;
+
+	<span class="built_in">println!</span>(<span class="string">&quot;after handler&quot;</span>);
+	response
+&#125;</code></pre>
+
+<p>这里最关键的是 <code>next.run(request).await</code>。</p>
+<p>你可以把它理解成：</p>
+<ul>
+<li>调用之前，是“请求进入下一层之前”</li>
+<li>调用之后，是“下一层执行完成，响应返回之后”</li>
+</ul>
+<p>所以中间件往往具备两个切入点：</p>
+<ul>
+<li>请求前处理</li>
+<li>响应后处理</li>
+</ul>
+<p>这正是它适合做日志、埋点、统一 header 注入的原因。</p>
+<hr>
+<h2 id="三、先写一个最简单的日志中间件"><a href="#三、先写一个最简单的日志中间件" class="headerlink" title="三、先写一个最简单的日志中间件"></a>三、先写一个最简单的日志中间件</h2><p>学习任何框架，中间件最适合作为第一个例子的通常都是日志。</p>
+<p>因为它既能体现“前置 + 后置”这两个阶段，也不会掺杂太多业务逻辑。</p>
+<h3 id="3-1-代码示例"><a href="#3-1-代码示例" class="headerlink" title="3.1 代码示例"></a>3.1 代码示例</h3><pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+	extract::Request,
+	middleware::Next,
+	response::Response,
+&#125;;
+<span class="keyword">use</span> std::time::Instant;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">access_log</span>(request: Request, next: Next) <span class="punctuation">-&gt;</span> Response &#123;
+	<span class="keyword">let</span> <span class="variable">method</span> = request.<span class="title function_ invoke__">method</span>().<span class="title function_ invoke__">clone</span>();
+	<span class="keyword">let</span> <span class="variable">path</span> = request.<span class="title function_ invoke__">uri</span>().<span class="title function_ invoke__">path</span>().<span class="title function_ invoke__">to_string</span>();
+	<span class="keyword">let</span> <span class="variable">start</span> = Instant::<span class="title function_ invoke__">now</span>();
+
+	<span class="keyword">let</span> <span class="variable">response</span> = next.<span class="title function_ invoke__">run</span>(request).<span class="keyword">await</span>;
+
+	<span class="keyword">let</span> <span class="variable">status</span> = response.<span class="title function_ invoke__">status</span>();
+	<span class="keyword">let</span> <span class="variable">cost</span> = start.<span class="title function_ invoke__">elapsed</span>();
+
+	<span class="built_in">println!</span>(<span class="string">&quot;[&#123;&#125;] &#123;&#125; -&gt; &#123;&#125; (&#123;:?&#125;)&quot;</span>, method, path, status, cost);
+	response
+&#125;</code></pre>
+
+<p>这个中间件做了三件事：</p>
+<ol>
+<li>在请求进入时记录 method 和 path</li>
+<li>调用下一层服务</li>
+<li>在响应返回时计算耗时并打印状态码</li>
+</ol>
+<h3 id="3-2-挂载到-Router"><a href="#3-2-挂载到-Router" class="headerlink" title="3.2 挂载到 Router"></a>3.2 挂载到 Router</h3><pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;middleware, routing::get, Router&#125;;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">ping</span>() <span class="punctuation">-&gt;</span> &amp;<span class="symbol">&#x27;static</span> <span class="type">str</span> &#123;
+	<span class="string">&quot;pong&quot;</span>
+&#125;
+
+<span class="keyword">let</span> <span class="variable">app</span> = Router::<span class="title function_ invoke__">new</span>()
+	.<span class="title function_ invoke__">route</span>(<span class="string">&quot;/ping&quot;</span>, <span class="title function_ invoke__">get</span>(ping))
+	.<span class="title function_ invoke__">layer</span>(middleware::<span class="title function_ invoke__">from_fn</span>(access_log));</code></pre>
+
+<p>现在访问 <code>/ping</code>，你就会在控制台看到类似输出：</p>
+<pre><code class="highlight text">[GET] /ping -&gt; 200 OK (624.541µs)</code></pre>
+
+<p>这是一个很小的例子，但它已经具备了中间件最核心的思维模式：</p>
+<ul>
+<li>不修改业务 handler</li>
+<li>统一作用于请求链</li>
+<li>前后两段逻辑自然分离</li>
+</ul>
+<hr>
+<h2 id="四、真正有实战价值的例子：鉴权中间件"><a href="#四、真正有实战价值的例子：鉴权中间件" class="headerlink" title="四、真正有实战价值的例子：鉴权中间件"></a>四、真正有实战价值的例子：鉴权中间件</h2><p>日志只能帮助理解执行模型，而鉴权才是真正最常见的业务中间件之一。</p>
+<p>在很多服务里，我们都会遇到这类需求：</p>
+<ul>
+<li>访问公开接口时不需要登录</li>
+<li>访问受保护接口时必须带 token</li>
+<li>token 校验通过后，把用户信息传给 handler</li>
+</ul>
+<p>这非常适合通过中间件来实现。</p>
+<h3 id="4-1-设计目标"><a href="#4-1-设计目标" class="headerlink" title="4.1 设计目标"></a>4.1 设计目标</h3><p>我们希望达到这样的效果：</p>
+<ul>
+<li><code>GET /ping</code> 公开访问</li>
+<li><code>GET /profile</code> 需要鉴权</li>
+<li>客户端需要带上 <code>Authorization: Bearer secret-token</code></li>
+<li>校验成功后，把当前用户写入 request extensions</li>
+<li>handler 直接读取用户上下文，不再关心 token 校验细节</li>
+</ul>
+<h3 id="4-2-完整可运行示例"><a href="#4-2-完整可运行示例" class="headerlink" title="4.2 完整可运行示例"></a>4.2 完整可运行示例</h3><p>先看 <code>Cargo.toml</code>：</p>
+<pre><code class="highlight toml"><span class="section">[dependencies]</span>
+<span class="attr">axum</span> = <span class="string">&quot;0.8&quot;</span>
+<span class="attr">tokio</span> = &#123; version = <span class="string">&quot;1&quot;</span>, features = [<span class="string">&quot;full&quot;</span>] &#125;
+<span class="attr">serde</span> = &#123; version = <span class="string">&quot;1&quot;</span>, features = [<span class="string">&quot;derive&quot;</span>] &#125;
+<span class="attr">serde_json</span> = <span class="string">&quot;1&quot;</span></code></pre>
+
+<p>再看主程序：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+	extract::&#123;Request, State&#125;,
+	http::&#123;header::AUTHORIZATION, StatusCode&#125;,
+	middleware::&#123;<span class="keyword">self</span>, Next&#125;,
+	response::&#123;IntoResponse, Response&#125;,
+	routing::get,
+	Extension, Json, Router,
+&#125;;
+<span class="keyword">use</span> serde::Serialize;
+<span class="keyword">use</span> serde_json::json;
+<span class="keyword">use</span> std::time::Instant;
+
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+	api_token: <span class="type">String</span>,
+&#125;
+
+<span class="meta">#[derive(Clone, Debug)]</span>
+<span class="keyword">struct</span> <span class="title class_">CurrentUser</span> &#123;
+	user_id: <span class="type">u64</span>,
+	role: &amp;<span class="symbol">&#x27;static</span> <span class="type">str</span>,
+&#125;
+
+<span class="meta">#[derive(Serialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">ApiResponse</span>&lt;T&gt; &#123;
+	code: <span class="type">u32</span>,
+	message: <span class="type">String</span>,
+	data: T,
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">access_log</span>(request: Request, next: Next) <span class="punctuation">-&gt;</span> Response &#123;
+	<span class="keyword">let</span> <span class="variable">method</span> = request.<span class="title function_ invoke__">method</span>().<span class="title function_ invoke__">clone</span>();
+	<span class="keyword">let</span> <span class="variable">path</span> = request.<span class="title function_ invoke__">uri</span>().<span class="title function_ invoke__">path</span>().<span class="title function_ invoke__">to_string</span>();
+	<span class="keyword">let</span> <span class="variable">start</span> = Instant::<span class="title function_ invoke__">now</span>();
+
+	<span class="keyword">let</span> <span class="variable">response</span> = next.<span class="title function_ invoke__">run</span>(request).<span class="keyword">await</span>;
+
+	<span class="built_in">println!</span>(
+		<span class="string">&quot;[&#123;&#125;] &#123;&#125; -&gt; &#123;&#125; (&#123;:?&#125;)&quot;</span>,
+		method,
+		path,
+		response.<span class="title function_ invoke__">status</span>(),
+		start.<span class="title function_ invoke__">elapsed</span>()
+	);
+
+	response
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">require_auth</span>(
+	<span class="title function_ invoke__">State</span>(state): State&lt;AppState&gt;,
+	<span class="keyword">mut</span> request: Request,
+	next: Next,
+) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;Response, StatusCode&gt; &#123;
+	<span class="keyword">let</span> <span class="variable">token</span> = request
+		.<span class="title function_ invoke__">headers</span>()
+		.<span class="title function_ invoke__">get</span>(AUTHORIZATION)
+		.<span class="title function_ invoke__">and_then</span>(|value| value.<span class="title function_ invoke__">to_str</span>().<span class="title function_ invoke__">ok</span>())
+		.<span class="title function_ invoke__">and_then</span>(|value| value.<span class="title function_ invoke__">strip_prefix</span>(<span class="string">&quot;Bearer &quot;</span>));
+
+	<span class="keyword">if</span> token != <span class="title function_ invoke__">Some</span>(state.api_token.<span class="title function_ invoke__">as_str</span>()) &#123;
+		<span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(StatusCode::UNAUTHORIZED);
+	&#125;
+
+	request.<span class="title function_ invoke__">extensions_mut</span>().<span class="title function_ invoke__">insert</span>(CurrentUser &#123;
+		user_id: <span class="number">1001</span>,
+		role: <span class="string">&quot;admin&quot;</span>,
+	&#125;);
+
+	<span class="title function_ invoke__">Ok</span>(next.<span class="title function_ invoke__">run</span>(request).<span class="keyword">await</span>)
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">ping</span>() <span class="punctuation">-&gt;</span> &amp;<span class="symbol">&#x27;static</span> <span class="type">str</span> &#123;
+	<span class="string">&quot;pong&quot;</span>
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">profile</span>(<span class="title function_ invoke__">Extension</span>(user): Extension&lt;CurrentUser&gt;) <span class="punctuation">-&gt;</span> <span class="keyword">impl</span> <span class="title class_">IntoResponse</span> &#123;
+	<span class="title function_ invoke__">Json</span>(ApiResponse &#123;
+		code: <span class="number">0</span>,
+		message: <span class="string">&quot;ok&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+		data: json!(&#123;
+			<span class="string">&quot;user_id&quot;</span>: user.user_id,
+			<span class="string">&quot;role&quot;</span>: user.role,
+		&#125;),
+	&#125;)
+&#125;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+	<span class="keyword">let</span> <span class="variable">state</span> = AppState &#123;
+		api_token: <span class="string">&quot;secret-token&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+	&#125;;
+
+	<span class="keyword">let</span> <span class="variable">protected_routes</span> = Router::<span class="title function_ invoke__">new</span>()
+		.<span class="title function_ invoke__">route</span>(<span class="string">&quot;/profile&quot;</span>, <span class="title function_ invoke__">get</span>(profile))
+		.<span class="title function_ invoke__">route_layer</span>(middleware::<span class="title function_ invoke__">from_fn_with_state</span>(
+			state.<span class="title function_ invoke__">clone</span>(),
+			require_auth,
+		));
+
+	<span class="keyword">let</span> <span class="variable">app</span> = Router::<span class="title function_ invoke__">new</span>()
+		.<span class="title function_ invoke__">route</span>(<span class="string">&quot;/ping&quot;</span>, <span class="title function_ invoke__">get</span>(ping))
+		.<span class="title function_ invoke__">merge</span>(protected_routes)
+		.<span class="title function_ invoke__">layer</span>(middleware::<span class="title function_ invoke__">from_fn</span>(access_log))
+		.<span class="title function_ invoke__">with_state</span>(state);
+
+	<span class="keyword">let</span> <span class="variable">listener</span> = tokio::net::TcpListener::<span class="title function_ invoke__">bind</span>(<span class="string">&quot;0.0.0.0:3000&quot;</span>)
+		.<span class="keyword">await</span>
+		.<span class="title function_ invoke__">unwrap</span>();
+
+	<span class="built_in">println!</span>(<span class="string">&quot;server listening on http://127.0.0.1:3000&quot;</span>);
+
+	axum::<span class="title function_ invoke__">serve</span>(listener, app).<span class="keyword">await</span>.<span class="title function_ invoke__">unwrap</span>();
+&#125;</code></pre>
+
+<h3 id="4-3-运行结果"><a href="#4-3-运行结果" class="headerlink" title="4.3 运行结果"></a>4.3 运行结果</h3><p>请求公开接口：</p>
+<pre><code class="highlight bash">curl http://127.0.0.1:3000/ping</code></pre>
+
+<p>返回：</p>
+<pre><code class="highlight text">pong</code></pre>
+
+<p>请求受保护接口但不带 token：</p>
+<pre><code class="highlight bash">curl http://127.0.0.1:3000/profile</code></pre>
+
+<p>返回状态码：</p>
+<pre><code class="highlight text">401 Unauthorized</code></pre>
+
+<p>携带 token 请求：</p>
+<pre><code class="highlight bash">curl -H <span class="string">&quot;Authorization: Bearer secret-token&quot;</span> http://127.0.0.1:3000/profile</code></pre>
+
+<p>返回：</p>
+<pre><code class="highlight json"><span class="punctuation">&#123;</span>
+  <span class="attr">&quot;code&quot;</span><span class="punctuation">:</span> <span class="number">0</span><span class="punctuation">,</span>
+  <span class="attr">&quot;message&quot;</span><span class="punctuation">:</span> <span class="string">&quot;ok&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;data&quot;</span><span class="punctuation">:</span> <span class="punctuation">&#123;</span>
+	<span class="attr">&quot;user_id&quot;</span><span class="punctuation">:</span> <span class="number">1001</span><span class="punctuation">,</span>
+	<span class="attr">&quot;role&quot;</span><span class="punctuation">:</span> <span class="string">&quot;admin&quot;</span>
+  <span class="punctuation">&#125;</span>
+<span class="punctuation">&#125;</span></code></pre>
+
+<hr>
+<h2 id="五、这个鉴权中间件到底做对了什么？"><a href="#五、这个鉴权中间件到底做对了什么？" class="headerlink" title="五、这个鉴权中间件到底做对了什么？"></a>五、这个鉴权中间件到底做对了什么？</h2><p>很多初学者第一次写鉴权，喜欢直接在 handler 里这样做：</p>
+<pre><code class="highlight rust"><span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">profile</span>(headers: HeaderMap) &#123;
+	<span class="comment">// 这里面自己解析 Authorization</span>
+	<span class="comment">// 自己校验 token</span>
+	<span class="comment">// 自己决定是否返回 401</span>
+&#125;</code></pre>
+
+<p>这当然能跑，但设计上并不理想。</p>
+<h3 id="5-1-handler-职责被污染"><a href="#5-1-handler-职责被污染" class="headerlink" title="5.1 handler 职责被污染"></a>5.1 handler 职责被污染</h3><p>handler 本来应该只关心业务：</p>
+<ul>
+<li>获取当前用户</li>
+<li>查询用户资料</li>
+<li>返回结果</li>
+</ul>
+<p>如果每个 handler 都重复做 token 解析，那就意味着：</p>
+<ul>
+<li>每个接口都重复写一遍</li>
+<li>一旦认证方式变化，需要全局修改</li>
+<li>很难统一错误处理</li>
+</ul>
+<h3 id="5-2-中间件把“认证”和“业务”拆开了"><a href="#5-2-中间件把“认证”和“业务”拆开了" class="headerlink" title="5.2 中间件把“认证”和“业务”拆开了"></a>5.2 中间件把“认证”和“业务”拆开了</h3><p>在上面的实现里：</p>
+<ul>
+<li><code>require_auth</code> 负责认证</li>
+<li><code>profile</code> 只负责使用认证结果</li>
+</ul>
+<p>这一点非常重要。</p>
+<p>因为工程设计里最值钱的不是“把功能写出来”，而是“把边界切清楚”。</p>
+<h3 id="5-3-用-request-extensions-传递上下文"><a href="#5-3-用-request-extensions-传递上下文" class="headerlink" title="5.3 用 request extensions 传递上下文"></a>5.3 用 request extensions 传递上下文</h3><p>下面这行代码是整个设计里的关键：</p>
+<pre><code class="highlight rust">request.<span class="title function_ invoke__">extensions_mut</span>().<span class="title function_ invoke__">insert</span>(CurrentUser &#123;
+	user_id: <span class="number">1001</span>,
+	role: <span class="string">&quot;admin&quot;</span>,
+&#125;);</code></pre>
+
+<p>它的含义是：</p>
+<blockquote>
+<p>中间件把已经解析好的用户上下文放进 request 的扩展存储区，供后续 handler 提取。</p>
+</blockquote>
+<p>然后在 handler 中：</p>
+<pre><code class="highlight rust"><span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">profile</span>(<span class="title function_ invoke__">Extension</span>(user): Extension&lt;CurrentUser&gt;) <span class="punctuation">-&gt;</span> <span class="keyword">impl</span> <span class="title class_">IntoResponse</span> &#123;
+	<span class="comment">// 直接使用 user</span>
+&#125;</code></pre>
+
+<p>这样就形成了非常干净的职责分层：</p>
+<ul>
+<li>中间件负责“把用户识别出来”</li>
+<li>handler 负责“使用已经识别出的用户”</li>
+</ul>
+<p>这比在每个 handler 里重复解析 header 明显更清晰。</p>
+<hr>
+<h2 id="六、layer-和-route-layer-的区别"><a href="#六、layer-和-route-layer-的区别" class="headerlink" title="六、layer 和 route_layer 的区别"></a>六、layer 和 route_layer 的区别</h2><p>这是 axum 初学者最容易混淆的点之一。</p>
+<h3 id="6-1-layer：作用在整个-Router-上"><a href="#6-1-layer：作用在整个-Router-上" class="headerlink" title="6.1 layer：作用在整个 Router 上"></a>6.1 layer：作用在整个 Router 上</h3><pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">app</span> = Router::<span class="title function_ invoke__">new</span>()
+	.<span class="title function_ invoke__">route</span>(<span class="string">&quot;/ping&quot;</span>, <span class="title function_ invoke__">get</span>(ping))
+	.<span class="title function_ invoke__">route</span>(<span class="string">&quot;/profile&quot;</span>, <span class="title function_ invoke__">get</span>(profile))
+	.<span class="title function_ invoke__">layer</span>(middleware::<span class="title function_ invoke__">from_fn</span>(access_log));</code></pre>
+
+<p>这里的 <code>layer</code> 会作用于整个 Router。</p>
+<p>也就是说，这个 Router 下的所有路由都会经过该中间件。</p>
+<p>这很适合：</p>
+<ul>
+<li>统一日志</li>
+<li>超时控制</li>
+<li>压缩</li>
+<li>CORS</li>
+</ul>
+<h3 id="6-2-route-layer：只作用于匹配到的路由"><a href="#6-2-route-layer：只作用于匹配到的路由" class="headerlink" title="6.2 route_layer：只作用于匹配到的路由"></a>6.2 route_layer：只作用于匹配到的路由</h3><pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">protected_routes</span> = Router::<span class="title function_ invoke__">new</span>()
+	.<span class="title function_ invoke__">route</span>(<span class="string">&quot;/profile&quot;</span>, <span class="title function_ invoke__">get</span>(profile))
+	.<span class="title function_ invoke__">route_layer</span>(middleware::<span class="title function_ invoke__">from_fn_with_state</span>(state.<span class="title function_ invoke__">clone</span>(), require_auth));</code></pre>
+
+<p>这里的 <code>route_layer</code> 只会对当前路由组生效。</p>
+<p>它特别适合做：</p>
+<ul>
+<li>需要保护的接口组</li>
+<li>只针对部分接口启用的中间件</li>
+</ul>
+<h3 id="6-3-为什么鉴权更适合-route-layer"><a href="#6-3-为什么鉴权更适合-route-layer" class="headerlink" title="6.3 为什么鉴权更适合 route_layer"></a>6.3 为什么鉴权更适合 route_layer</h3><p>假设你把鉴权写在顶层 <code>layer</code>：</p>
+<pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">app</span> = Router::<span class="title function_ invoke__">new</span>()
+	.<span class="title function_ invoke__">route</span>(<span class="string">&quot;/ping&quot;</span>, <span class="title function_ invoke__">get</span>(ping))
+	.<span class="title function_ invoke__">route</span>(<span class="string">&quot;/profile&quot;</span>, <span class="title function_ invoke__">get</span>(profile))
+	.<span class="title function_ invoke__">layer</span>(middleware::<span class="title function_ invoke__">from_fn_with_state</span>(state.<span class="title function_ invoke__">clone</span>(), require_auth));</code></pre>
+
+<p>那意味着：</p>
+<ul>
+<li><code>/ping</code> 也会被要求认证</li>
+<li>甚至有时连本该返回 404 的请求，也可能先被鉴权拦住</li>
+</ul>
+<p>这通常不是我们想要的行为。</p>
+<p>所以经验上可以记一句：</p>
+<blockquote>
+<p>日志、超时、压缩这类全局能力用 <code>layer</code>；鉴权、权限控制这类局部能力更适合 <code>route_layer</code>。</p>
+</blockquote>
+<hr>
+<h2 id="七、中间件的执行顺序怎么理解？"><a href="#七、中间件的执行顺序怎么理解？" class="headerlink" title="七、中间件的执行顺序怎么理解？"></a>七、中间件的执行顺序怎么理解？</h2><p>如果你叠了多个中间件，顺序就变得很重要。</p>
+<p>很多人第一次看到下面这种写法时，会直觉地以为执行顺序是从上到下：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;routing::get, Router&#125;;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">handler</span>() &#123;&#125;
+
+<span class="keyword">let</span> <span class="variable">app</span> = Router::<span class="title function_ invoke__">new</span>()
+		.<span class="title function_ invoke__">route</span>(<span class="string">&quot;/&quot;</span>, <span class="title function_ invoke__">get</span>(handler))
+		.<span class="title function_ invoke__">layer</span>(layer_one)
+		.<span class="title function_ invoke__">layer</span>(layer_two)
+		.<span class="title function_ invoke__">layer</span>(layer_three);</code></pre>
+
+<p>但真正的理解方式应该是：</p>
+<pre><code class="highlight text">layer_three(
+		layer_two(
+				layer_one(
+						handler
+				)
+		)
+)</code></pre>
+
+<p>也就是说，后调用的 <code>.layer(...)</code> 会包在最外层。</p>
+<h3 id="7-1-请求进入时的执行顺序"><a href="#7-1-请求进入时的执行顺序" class="headerlink" title="7.1 请求进入时的执行顺序"></a>7.1 请求进入时的执行顺序</h3><p>对于上面这段代码，请求进来时的顺序是：</p>
+<ol>
+<li><code>layer_three</code> 前置逻辑</li>
+<li><code>layer_two</code> 前置逻辑</li>
+<li><code>layer_one</code> 前置逻辑</li>
+<li><code>handler</code></li>
+</ol>
+<h3 id="7-2-响应返回时的执行顺序"><a href="#7-2-响应返回时的执行顺序" class="headerlink" title="7.2 响应返回时的执行顺序"></a>7.2 响应返回时的执行顺序</h3><p>当 handler 开始返回响应时，顺序正好反过来：</p>
+<ol>
+<li><code>layer_one</code> 后置逻辑</li>
+<li><code>layer_two</code> 后置逻辑</li>
+<li><code>layer_three</code> 后置逻辑</li>
+</ol>
+<p>如果把它画成一条链，会更直观：</p>
+<pre><code class="highlight text">请求进入:
+客户端
+	-&gt; layer_three
+	-&gt; layer_two
+	-&gt; layer_one
+	-&gt; handler
+
+响应返回:
+handler
+	-&gt; layer_one
+	-&gt; layer_two
+	-&gt; layer_three
+	-&gt; 客户端</code></pre>
+
+<p>所以可以总结成一句非常重要的话：</p>
+<blockquote>
+<p>在 axum 里，多个 <code>.layer(...)</code> 叠加时，最靠后的那一层最先处理请求，也最晚处理响应。</p>
+</blockquote>
+<p>例如：</p>
+<pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">app</span> = Router::<span class="title function_ invoke__">new</span>()
+	.<span class="title function_ invoke__">route</span>(<span class="string">&quot;/profile&quot;</span>, <span class="title function_ invoke__">get</span>(profile))
+	.<span class="title function_ invoke__">layer</span>(middleware::<span class="title function_ invoke__">from_fn</span>(access_log))
+	.<span class="title function_ invoke__">layer</span>(middleware::<span class="title function_ invoke__">from_fn</span>(trace_request));</code></pre>
+
+<p>你可以把它理解为：</p>
+<pre><code class="highlight text">trace_request(
+	access_log(
+		handler
+	)
+)</code></pre>
+
+<p>请求进入顺序：</p>
+<ol>
+<li><code>trace_request</code> 前置逻辑</li>
+<li><code>access_log</code> 前置逻辑</li>
+<li>handler</li>
+<li><code>access_log</code> 后置逻辑</li>
+<li><code>trace_request</code> 后置逻辑</li>
+</ol>
+<p>这就是典型的“洋葱模型”。</p>
+<p>如果把这条规则套回你刚才那段代码：</p>
+<ul>
+<li><code>layer_three</code> 最外层</li>
+<li><code>layer_two</code> 在中间</li>
+<li><code>layer_one</code> 最内层</li>
+<li><code>handler</code> 在最中心</li>
+</ul>
+<p>所以如果你同时有：</p>
+<ul>
+<li>请求 ID 注入</li>
+<li>日志记录</li>
+<li>鉴权</li>
+</ul>
+<p>通常要想清楚顺序问题：</p>
+<ul>
+<li>是先打 request id 再记录日志</li>
+<li>还是先鉴权再记业务日志</li>
+</ul>
+<p>顺序不同，日志内容和排查体验就会不同。</p>
+<hr>
+<h2 id="八、什么时候用-from-fn，什么时候自己实现-Layer？"><a href="#八、什么时候用-from-fn，什么时候自己实现-Layer？" class="headerlink" title="八、什么时候用 from_fn，什么时候自己实现 Layer？"></a>八、什么时候用 from_fn，什么时候自己实现 Layer？</h2><p>对初学者来说，<code>from_fn</code> 已经能解决 80% 的问题。</p>
+<p>比如：</p>
+<ul>
+<li>打日志</li>
+<li>检查 header</li>
+<li>记录耗时</li>
+<li>注入 request 上下文</li>
+<li>做简单权限校验</li>
+</ul>
+<p>这些场景优先用 <code>from_fn</code> 就够了。</p>
+<p>但如果你想写一个：</p>
+<ul>
+<li>可复用性很高</li>
+<li>可以像第三方组件一样挂载</li>
+<li>和 tower 生态深度兼容</li>
+</ul>
+<p>的通用中间件，那么通常应该实现 <code>tower::Layer</code> 和 <code>tower::Service</code>。</p>
+<h3 id="8-1-一个简化版骨架"><a href="#8-1-一个简化版骨架" class="headerlink" title="8.1 一个简化版骨架"></a>8.1 一个简化版骨架</h3><p>下面是一个“请求 ID 中间件”的简化骨架，用来帮助你理解底层结构：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+	body::Body,
+	http::Request,
+	response::Response,
+&#125;;
+<span class="keyword">use</span> std::&#123;
+	future::Future,
+	pin::Pin,
+	task::&#123;Context, Poll&#125;,
+&#125;;
+<span class="keyword">use</span> tower::&#123;Layer, Service&#125;;
+<span class="keyword">use</span> uuid::Uuid;
+
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">RequestId</span>(<span class="type">String</span>);
+
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">RequestIdLayer</span>;
+
+<span class="keyword">impl</span>&lt;S&gt; Layer&lt;S&gt; <span class="keyword">for</span> <span class="title class_">RequestIdLayer</span> &#123;
+	<span class="keyword">type</span> <span class="title class_">Service</span> = RequestIdService&lt;S&gt;;
+
+	<span class="keyword">fn</span> <span class="title function_">layer</span>(&amp;<span class="keyword">self</span>, inner: S) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span>::Service &#123;
+		RequestIdService &#123; inner &#125;
+	&#125;
+&#125;
+
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">RequestIdService</span>&lt;S&gt; &#123;
+	inner: S,
+&#125;
+
+<span class="keyword">impl</span>&lt;S&gt; Service&lt;Request&lt;Body&gt;&gt; <span class="keyword">for</span> <span class="title class_">RequestIdService</span>&lt;S&gt;
+<span class="keyword">where</span>
+	S: Service&lt;Request&lt;Body&gt;, Response = Response&gt; + <span class="built_in">Clone</span> + <span class="built_in">Send</span> + <span class="symbol">&#x27;static</span>,
+	S::Future: <span class="built_in">Send</span> + <span class="symbol">&#x27;static</span>,
+&#123;
+	<span class="keyword">type</span> <span class="title class_">Response</span> = S::Response;
+	<span class="keyword">type</span> <span class="title class_">Error</span> = S::Error;
+	<span class="keyword">type</span> <span class="title class_">Future</span> = Pin&lt;<span class="type">Box</span>&lt;<span class="keyword">dyn</span> Future&lt;Output = <span class="type">Result</span>&lt;<span class="keyword">Self</span>::Response, <span class="keyword">Self</span>::Error&gt;&gt; + <span class="built_in">Send</span>&gt;&gt;;
+
+	<span class="keyword">fn</span> <span class="title function_">poll_ready</span>(&amp;<span class="keyword">mut</span> <span class="keyword">self</span>, cx: &amp;<span class="keyword">mut</span> Context&lt;<span class="symbol">&#x27;_</span>&gt;) <span class="punctuation">-&gt;</span> Poll&lt;<span class="type">Result</span>&lt;(), <span class="keyword">Self</span>::Error&gt;&gt; &#123;
+		<span class="keyword">self</span>.inner.<span class="title function_ invoke__">poll_ready</span>(cx)
+	&#125;
+
+	<span class="keyword">fn</span> <span class="title function_">call</span>(&amp;<span class="keyword">mut</span> <span class="keyword">self</span>, <span class="keyword">mut</span> request: Request&lt;Body&gt;) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span>::Future &#123;
+		<span class="keyword">let</span> <span class="variable">request_id</span> = Uuid::<span class="title function_ invoke__">new_v4</span>().<span class="title function_ invoke__">to_string</span>();
+		request.<span class="title function_ invoke__">extensions_mut</span>().<span class="title function_ invoke__">insert</span>(<span class="title function_ invoke__">RequestId</span>(request_id));
+
+		<span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">inner</span> = <span class="keyword">self</span>.inner.<span class="title function_ invoke__">clone</span>();
+		<span class="type">Box</span>::<span class="title function_ invoke__">pin</span>(<span class="keyword">async</span> <span class="keyword">move</span> &#123; inner.<span class="title function_ invoke__">call</span>(request).<span class="keyword">await</span> &#125;)
+	&#125;
+&#125;</code></pre>
+
+<p>这个例子不要求你现在就完全掌握，但你至少要看懂两件事：</p>
+<ol>
+<li><code>Layer</code> 是“包装器工厂”</li>
+<li><code>Service</code> 是真正处理请求的对象</li>
+</ol>
+<p>也就是说，axum 中间件的本质并不是语法糖，而是基于 tower 抽象出来的一套通用服务链模型。</p>
+<p>这也是 axum 和 tower-http 能很好协同的根本原因。</p>
+<hr>
+<h2 id="九、生产环境里，很多中间件其实不用自己写"><a href="#九、生产环境里，很多中间件其实不用自己写" class="headerlink" title="九、生产环境里，很多中间件其实不用自己写"></a>九、生产环境里，很多中间件其实不用自己写</h2><p>虽然这篇文章的主题是“自己实现中间件”，但从工程实践角度说，有一句话非常重要：</p>
+<blockquote>
+<p>能用成熟组件，就不要重复造轮子。</p>
+</blockquote>
+<p>在真实项目里，很多常见需求都可以直接用现成中间件：</p>
+<ul>
+<li><code>tower_http::trace::TraceLayer</code>：请求日志与 tracing 集成</li>
+<li><code>tower_http::cors::CorsLayer</code>：跨域</li>
+<li><code>tower_http::compression::CompressionLayer</code>：压缩</li>
+<li><code>tower::timeout::TimeoutLayer</code>：超时</li>
+<li><code>tower::limit</code>：并发限制、速率限制</li>
+</ul>
+<p>自己写中间件的典型场景通常是：</p>
+<ul>
+<li>认证逻辑和你的业务强相关</li>
+<li>需要往 request extensions 里写入自定义上下文</li>
+<li>需要统一封装某种公司内部规范</li>
+</ul>
+<p>所以更合理的策略不是“所有中间件都自己写”，而是：</p>
+<ul>
+<li>通用能力尽量复用社区组件</li>
+<li>业务能力按需自己实现</li>
+</ul>
+<hr>
+<h2 id="十、初学者最容易踩的几个坑"><a href="#十、初学者最容易踩的几个坑" class="headerlink" title="十、初学者最容易踩的几个坑"></a>十、初学者最容易踩的几个坑</h2><h3 id="10-1-在中间件里消费了请求体"><a href="#10-1-在中间件里消费了请求体" class="headerlink" title="10.1 在中间件里消费了请求体"></a>10.1 在中间件里消费了请求体</h3><p>HTTP 请求体通常只能被消费一次。</p>
+<p>如果你在中间件里提前把 body 读走了，后面的 handler 往往就拿不到内容了。</p>
+<p>所以对于请求体处理，要非常谨慎。除非你明确知道自己在做什么，否则不要在通用中间件里随意读取 body。</p>
+<h3 id="10-2-鉴权写在顶层-layer，结果把-404-也拦了"><a href="#10-2-鉴权写在顶层-layer，结果把-404-也拦了" class="headerlink" title="10.2 鉴权写在顶层 layer，结果把 404 也拦了"></a>10.2 鉴权写在顶层 layer，结果把 404 也拦了</h3><p>这是最常见的设计错误之一。</p>
+<p>如果你只想保护部分路由，优先考虑 <code>route_layer</code>，而不是直接挂在整个 app 顶层。</p>
+<h3 id="10-3-中间件里做阻塞操作"><a href="#10-3-中间件里做阻塞操作" class="headerlink" title="10.3 中间件里做阻塞操作"></a>10.3 中间件里做阻塞操作</h3><p>axum 运行在异步运行时里。</p>
+<p>如果你在中间件里直接做阻塞 IO，比如：</p>
+<ul>
+<li>大量同步文件读取</li>
+<li>阻塞式数据库操作</li>
+<li>长时间 CPU 密集型任务</li>
+</ul>
+<p>那么你会拖慢整个请求处理链。</p>
+<h3 id="10-4-把太多业务细节塞进中间件"><a href="#10-4-把太多业务细节塞进中间件" class="headerlink" title="10.4 把太多业务细节塞进中间件"></a>10.4 把太多业务细节塞进中间件</h3><p>中间件适合做“横切能力”，不适合承载复杂业务流程。</p>
+<p>比如：</p>
+<ul>
+<li>认证适合放中间件</li>
+<li>查询订单详情不适合放中间件</li>
+<li>检查权限标签是否存在可以放中间件</li>
+<li>执行复杂订单结算流程不适合放中间件</li>
+</ul>
+<p>判断标准很简单：</p>
+<blockquote>
+<p>如果这段逻辑和很多 handler 都相关，它更可能适合中间件；如果它只属于某一个业务动作，那更应该放在业务层。</p>
+</blockquote>
+<hr>
+<h2 id="十一、一个适合初学者模仿的落地思路"><a href="#十一、一个适合初学者模仿的落地思路" class="headerlink" title="十一、一个适合初学者模仿的落地思路"></a>十一、一个适合初学者模仿的落地思路</h2><p>如果你准备自己写一个小型 axum 服务，我建议中间件部分按下面顺序练习：</p>
+<ol>
+<li>先写一个访问日志中间件，理解 <code>next.run(request).await</code></li>
+<li>再写一个 token 鉴权中间件，理解“提前返回错误响应”</li>
+<li>然后尝试把用户上下文写入 extensions，理解“上下文传递”</li>
+<li>最后再去理解 <code>Layer</code> 和 <code>Service</code>，知道底层抽象是什么</li>
+</ol>
+<p>这个学习路径是比较稳的。</p>
+<p>因为中间件真正难的不是语法，而是这三件事：</p>
+<ul>
+<li>作用范围怎么控制</li>
+<li>执行顺序怎么设计</li>
+<li>上下文怎么安全传递</li>
+</ul>
+<p>把这三件事理解清楚，axum 中间件基本就入门了。</p>
+<hr>
+<h2 id="十二、总结"><a href="#十二、总结" class="headerlink" title="十二、总结"></a>十二、总结</h2><p>axum 中间件之所以值得认真学，是因为它不是一个“框架附带技巧”，而是 Web 服务工程化的核心能力之一。</p>
+<p>这篇文章里，你可以记住以下几个关键点：</p>
+<ul>
+<li>中间件适合处理横切逻辑，不适合塞复杂业务</li>
+<li><code>from_fn</code> 是最适合初学者的实现方式</li>
+<li><code>next.run(request).await</code> 是理解中间件前后逻辑的关键</li>
+<li>认证完成后，最好通过 request extensions 向 handler 传递上下文</li>
+<li><code>layer</code> 更适合全局能力，<code>route_layer</code> 更适合局部保护</li>
+<li>axum 中间件的底层本质是 tower 的 <code>Layer</code> 和 <code>Service</code></li>
+</ul>
+<p>如果你只是想把项目先做起来，那么从 <code>from_fn</code> 开始就足够了；如果你想真正理解 axum 的设计，那就继续往 tower 的服务抽象里走。</p>
+<p>这也是 Rust Web 开发里非常有意思的一点：</p>
+<p>表面上你是在“写一个中间件”，实际上你是在理解一整套可组合、可扩展的服务模型。</p>
+<p>当你把这一层想通，后面不管是接 tracing、做限流、接网关能力，都会自然很多。</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
