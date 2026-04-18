@@ -1,0 +1,761 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust axum 状态管理与共享数据详解：State、Arc、Mutex、RwLock 与工程实践</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust axum 状态管理与共享数据详解：State、Arc、Mutex、RwLock 与工程实践</h1><div class="time">2026-04-18</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><h2 id="引言"><a href="#引言" class="headerlink" title="引言"></a>引言</h2><p>学 axum 的时候，很多人一开始最关心的是：</p>
+<ul>
+<li>路由怎么写</li>
+<li>handler 怎么收参数</li>
+<li>中间件怎么挂</li>
+</ul>
+<p>但只要你开始写一个稍微像样的 Web 服务，很快就会碰到另一个更实际的问题：</p>
+<blockquote>
+<p>这些共享对象到底该放哪？</p>
+</blockquote>
+<p>例如：</p>
+<ul>
+<li>数据库连接池要怎么传给每个 handler</li>
+<li>配置对象要怎么共享</li>
+<li>缓存客户端要不要全局单例</li>
+<li>统计计数器要怎么安全更新</li>
+<li>某些状态到底该用 <code>Arc</code>，还是 <code>Mutex</code>，还是 <code>RwLock</code></li>
+</ul>
+<p>这些问题如果处理得不好，项目很容易出现两种极端：</p>
+<ul>
+<li>要么所有东西都塞进 <code>main.rs</code></li>
+<li>要么一看到共享数据就无脑上锁</li>
+</ul>
+<p>前者会让代码组织越来越乱，后者会让并发模型越来越脆弱。</p>
+<p>在 axum 里，状态管理并不是一个零散技巧，而是整个 Web 工程设计里非常核心的一层。</p>
+<p>这篇文章我会尽量把“会用”和“为什么这么用”一起讲清楚，重点回答这些问题：</p>
+<ol>
+<li>axum 里的 <code>State&lt;T&gt;</code> 到底是什么</li>
+<li>什么数据适合直接放进状态里</li>
+<li>为什么很多共享数据要配合 <code>Arc</code></li>
+<li><code>Mutex</code> 和 <code>RwLock</code> 应该怎么选</li>
+<li>数据库连接池、配置、缓存客户端这些工程对象该怎么组织</li>
+<li>什么样的状态设计是合理的，什么样的是危险的</li>
+</ol>
+<p>如果你已经写完了 axum 的中间件和提取器，这一篇基本就是下一步最自然的进阶内容。</p>
+<hr>
+<h2 id="一、先回答最核心的问题：什么是状态管理？"><a href="#一、先回答最核心的问题：什么是状态管理？" class="headerlink" title="一、先回答最核心的问题：什么是状态管理？"></a>一、先回答最核心的问题：什么是状态管理？</h2><p>先不要急着看 API，先把概念定清楚。</p>
+<p>所谓状态管理，本质上是在回答一个问题：</p>
+<blockquote>
+<p>对于多个请求都要用到的数据，我们应该如何在应用里组织、共享和访问它？</p>
+</blockquote>
+<p>在 Web 服务里，常见的“状态”通常包括下面这些：</p>
+<ul>
+<li>应用配置，例如端口、数据库地址、第三方服务配置</li>
+<li>数据库连接池</li>
+<li>Redis 客户端或其他缓存客户端</li>
+<li>业务服务对象</li>
+<li>统计计数器、限流器、内存缓存</li>
+<li>启动后就长期存在的只读字典或规则数据</li>
+</ul>
+<p>这些数据有一个共同点：</p>
+<ul>
+<li>它们不是某一个请求独有的</li>
+<li>它们通常在应用启动时创建</li>
+<li>它们会被很多 handler 反复访问</li>
+</ul>
+<p>所以状态管理的重点从来不只是“共享”，而是同时处理好三件事：</p>
+<ol>
+<li>生命周期：什么时候创建，活多久</li>
+<li>并发安全：多个请求同时访问时是否安全</li>
+<li>可维护性：代码结构是否清晰，依赖关系是否明确</li>
+</ol>
+<p>如果只顾着让代码“先能跑”，通常很快就会遇到后遗症。</p>
+<hr>
+<h2 id="二、axum-里的-State-到底是什么？"><a href="#二、axum-里的-State-到底是什么？" class="headerlink" title="二、axum 里的 State&lt;T&gt; 到底是什么？"></a>二、axum 里的 <code>State&lt;T&gt;</code> 到底是什么？</h2><p>在 axum 里，最常见的状态注入方式就是 <code>State&lt;T&gt;</code>。</p>
+<p>先看一个最基础的例子：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+	extract::State,
+	routing::get,
+	Router,
+&#125;;
+
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+	app_name: <span class="type">String</span>,
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">health</span>(<span class="title function_ invoke__">State</span>(state): State&lt;AppState&gt;) <span class="punctuation">-&gt;</span> <span class="type">String</span> &#123;
+	<span class="built_in">format!</span>(<span class="string">&quot;&#123;&#125; is running&quot;</span>, state.app_name)
+&#125;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+	<span class="keyword">let</span> <span class="variable">state</span> = AppState &#123;
+		app_name: <span class="string">&quot;axum-demo&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+	&#125;;
+
+	<span class="keyword">let</span> <span class="variable">app</span> = Router::<span class="title function_ invoke__">new</span>()
+		.<span class="title function_ invoke__">route</span>(<span class="string">&quot;/health&quot;</span>, <span class="title function_ invoke__">get</span>(health))
+		.<span class="title function_ invoke__">with_state</span>(state);
+
+	<span class="keyword">let</span> <span class="variable">listener</span> = tokio::net::TcpListener::<span class="title function_ invoke__">bind</span>(<span class="string">&quot;0.0.0.0:3000&quot;</span>)
+		.<span class="keyword">await</span>
+		.<span class="title function_ invoke__">unwrap</span>();
+
+	axum::<span class="title function_ invoke__">serve</span>(listener, app).<span class="keyword">await</span>.<span class="title function_ invoke__">unwrap</span>();
+&#125;</code></pre>
+
+<p>这个例子里最关键的只有两步：</p>
+<ol>
+<li>用 <code>with_state(state)</code> 把状态挂到 Router 上</li>
+<li>在 handler 里通过 <code>State(state)</code> 把它提取出来</li>
+</ol>
+<p>这说明 <code>State&lt;T&gt;</code> 的本质不是某种“神秘全局变量”，而是：</p>
+<blockquote>
+<p>Router 持有一份应用状态，handler 通过 Extractor 按类型拿到它。</p>
+</blockquote>
+<p>这件事很重要，因为它带来两个直接好处：</p>
+<ul>
+<li>依赖是显式的，handler 参数就能看出它依赖什么</li>
+<li>状态注入和业务逻辑解耦，不需要手动层层传参</li>
+</ul>
+<h3 id="2-1-为什么-AppState-通常要实现-Clone？"><a href="#2-1-为什么-AppState-通常要实现-Clone？" class="headerlink" title="2.1 为什么 AppState 通常要实现 Clone？"></a>2.1 为什么 <code>AppState</code> 通常要实现 <code>Clone</code>？</h3><p>你会发现很多示例里的状态结构体都会写：</p>
+<pre><code class="highlight rust"><span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+	<span class="comment">// ...</span>
+&#125;</code></pre>
+
+<p>原因不是“写着好看”，而是 axum 在路由和服务构建过程中，通常要求状态是可克隆的。</p>
+<p>但这里要注意一个容易误解的点：</p>
+<blockquote>
+<p><code>Clone</code> 不等于深拷贝所有数据。</p>
+</blockquote>
+<p>如果你的 <code>AppState</code> 里面放的是：</p>
+<ul>
+<li><code>Arc&lt;T&gt;</code></li>
+<li>数据库连接池</li>
+<li>Redis 客户端</li>
+</ul>
+<p>那么它们的 <code>Clone</code> 往往只是复制一个轻量句柄，而不是重新拷贝整份底层资源。</p>
+<p>这也是为什么很多工程里的 <code>AppState</code> 看起来是“可 Clone 的”，但实际并不会造成昂贵复制。</p>
+<hr>
+<h2 id="三、哪些数据适合放进-AppState？"><a href="#三、哪些数据适合放进-AppState？" class="headerlink" title="三、哪些数据适合放进 AppState？"></a>三、哪些数据适合放进 <code>AppState</code>？</h2><p>不是所有数据都适合塞进状态对象。</p>
+<p>一个很实用的判断标准是：</p>
+<blockquote>
+<p>如果某个对象会在应用启动后长期存在，并被多个请求重复使用，那么它通常适合放进 <code>AppState</code>。</p>
+</blockquote>
+<p>常见适合放进去的内容有：</p>
+<ul>
+<li>只读配置对象</li>
+<li>数据库连接池</li>
+<li>Redis 客户端</li>
+<li>HTTP 客户端</li>
+<li>业务服务对象</li>
+<li>共享缓存句柄</li>
+</ul>
+<p>例如：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> std::sync::Arc;
+
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppConfig</span> &#123;
+	app_name: <span class="type">String</span>,
+	enable_metrics: <span class="type">bool</span>,
+&#125;
+
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">UserService</span> &#123;
+	<span class="comment">// 这里可以持有数据库池或仓储对象</span>
+&#125;
+
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+	config: Arc&lt;AppConfig&gt;,
+	user_service: UserService,
+&#125;</code></pre>
+
+<p>这样做的核心好处是：</p>
+<ul>
+<li>启动时一次性组装依赖</li>
+<li>handler 不关心对象怎么初始化</li>
+<li>状态结构本身就表达了系统的核心依赖关系</li>
+</ul>
+<h3 id="3-1-哪些东西不适合直接塞进去？"><a href="#3-1-哪些东西不适合直接塞进去？" class="headerlink" title="3.1 哪些东西不适合直接塞进去？"></a>3.1 哪些东西不适合直接塞进去？</h3><p>反过来，这几类内容要谨慎处理：</p>
+<ul>
+<li>每个请求独有的数据</li>
+<li>生命周期很短的临时对象</li>
+<li>需要按请求动态变化的上下文</li>
+<li>大量频繁写入且锁竞争严重的可变数据</li>
+</ul>
+<p>例如“当前登录用户”就不应该放进全局 <code>AppState</code>，因为它属于单个请求上下文，更适合放在 request extensions 或自定义 Extractor 的语义里。</p>
+<p>再比如“某个 handler 临时计算出的中间结果”，也不应该变成全局共享状态。</p>
+<p>所以一个简单判断是：</p>
+<blockquote>
+<p>全局状态负责“应用级共享依赖”，请求上下文负责“请求级动态数据”。</p>
+</blockquote>
+<hr>
+<h2 id="四、为什么很多状态都要配合-Arc？"><a href="#四、为什么很多状态都要配合-Arc？" class="headerlink" title="四、为什么很多状态都要配合 Arc？"></a>四、为什么很多状态都要配合 <code>Arc</code>？</h2><p>只要一提到 Rust 共享状态，很多人第一反应就是：</p>
+<p><code>Arc</code>。</p>
+<p>这当然不算错，但更关键的是要知道它到底解决了什么问题。</p>
+<p><code>Arc&lt;T&gt;</code> 的核心作用是：</p>
+<blockquote>
+<p>让多个所有者可以安全共享同一份堆上数据。</p>
+</blockquote>
+<p>在 axum 项目里，常见场景是：</p>
+<ul>
+<li>整个应用要共享一份配置</li>
+<li>多个 handler 要共享一份服务对象</li>
+<li>某些只读规则表不想每次复制</li>
+</ul>
+<p>例如：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> std::sync::Arc;
+
+<span class="meta">#[derive(Debug)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppConfig</span> &#123;
+	app_name: <span class="type">String</span>,
+	api_version: <span class="type">String</span>,
+&#125;
+
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+	config: Arc&lt;AppConfig&gt;,
+&#125;</code></pre>
+
+<p>这里把配置放到 <code>Arc</code> 里，意味着：</p>
+<ul>
+<li>配置对象只有一份底层数据</li>
+<li><code>AppState</code> 被克隆时，只会增加引用计数</li>
+<li>不会反复拷贝大对象</li>
+</ul>
+<h3 id="4-1-什么情况下不一定要-Arc？"><a href="#4-1-什么情况下不一定要-Arc？" class="headerlink" title="4.1 什么情况下不一定要 Arc？"></a>4.1 什么情况下不一定要 <code>Arc</code>？</h3><p>如果你的状态字段本身就是轻量、可复制或内部已经做了共享管理，那未必还需要额外包一层 <code>Arc</code>。</p>
+<p>例如很多数据库连接池类型本身就是轻量句柄，可直接 <code>Clone</code>。</p>
+<p>这时候更合理的写法通常是：</p>
+<pre><code class="highlight rust"><span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+	db: sqlx::PgPool,
+&#125;</code></pre>
+
+<p>而不是：</p>
+<pre><code class="highlight rust"><span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+	db: Arc&lt;sqlx::PgPool&gt;,
+&#125;</code></pre>
+
+<p>后者不一定错，但通常是多包了一层，没有明显收益。</p>
+<p>所以要记住：</p>
+<blockquote>
+<p><code>Arc</code> 是共享所有权工具，不是所有状态字段的默认包装纸。</p>
+</blockquote>
+<hr>
+<h2 id="五、可变共享状态：什么时候该用-Mutex？"><a href="#五、可变共享状态：什么时候该用-Mutex？" class="headerlink" title="五、可变共享状态：什么时候该用 Mutex？"></a>五、可变共享状态：什么时候该用 <code>Mutex</code>？</h2><p>只读共享数据相对简单，真正麻烦的是可变共享数据。</p>
+<p>例如你可能会有这样的需求：</p>
+<ul>
+<li>统计访问次数</li>
+<li>维护一个内存缓存</li>
+<li>保存在线用户列表</li>
+<li>更新某个运行时配置</li>
+</ul>
+<p>这类数据就不能只靠 <code>Arc&lt;T&gt;</code>，因为 <code>Arc</code> 只解决共享所有权，不解决内部可变性的并发安全。</p>
+<p>这时就需要同步原语，最常见的就是 <code>Mutex&lt;T&gt;</code>。</p>
+<p>先看一个最简单的例子：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+	extract::State,
+	routing::get,
+	Router,
+&#125;;
+<span class="keyword">use</span> std::sync::&#123;Arc, Mutex&#125;;
+
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+	counter: Arc&lt;Mutex&lt;<span class="type">u64</span>&gt;&gt;,
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">visit</span>(<span class="title function_ invoke__">State</span>(state): State&lt;AppState&gt;) <span class="punctuation">-&gt;</span> <span class="type">String</span> &#123;
+	<span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">counter</span> = state.counter.<span class="title function_ invoke__">lock</span>().<span class="title function_ invoke__">unwrap</span>();
+	*counter += <span class="number">1</span>;
+	<span class="built_in">format!</span>(<span class="string">&quot;visit count = &#123;&#125;&quot;</span>, *counter)
+&#125;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+	<span class="keyword">let</span> <span class="variable">state</span> = AppState &#123;
+		counter: Arc::<span class="title function_ invoke__">new</span>(Mutex::<span class="title function_ invoke__">new</span>(<span class="number">0</span>)),
+	&#125;;
+
+	<span class="keyword">let</span> <span class="variable">app</span> = Router::<span class="title function_ invoke__">new</span>()
+		.<span class="title function_ invoke__">route</span>(<span class="string">&quot;/visit&quot;</span>, <span class="title function_ invoke__">get</span>(visit))
+		.<span class="title function_ invoke__">with_state</span>(state);
+
+	<span class="keyword">let</span> <span class="variable">listener</span> = tokio::net::TcpListener::<span class="title function_ invoke__">bind</span>(<span class="string">&quot;0.0.0.0:3000&quot;</span>)
+		.<span class="keyword">await</span>
+		.<span class="title function_ invoke__">unwrap</span>();
+
+	axum::<span class="title function_ invoke__">serve</span>(listener, app).<span class="keyword">await</span>.<span class="title function_ invoke__">unwrap</span>();
+&#125;</code></pre>
+
+<p>这里的逻辑很直白：</p>
+<ul>
+<li><code>Arc</code> 负责共享同一个计数器</li>
+<li><code>Mutex</code> 负责保证同一时刻只有一个请求能修改它</li>
+</ul>
+<h3 id="5-1-这个例子为什么“能用”，但不一定“理想”？"><a href="#5-1-这个例子为什么“能用”，但不一定“理想”？" class="headerlink" title="5.1 这个例子为什么“能用”，但不一定“理想”？"></a>5.1 这个例子为什么“能用”，但不一定“理想”？</h3><p>因为它虽然正确，但也暴露了真实工程里的几个问题：</p>
+<ul>
+<li>锁会带来竞争</li>
+<li><code>std::sync::Mutex</code> 在异步环境里要格外小心</li>
+<li>如果临界区过大，很容易把并发性能拖垮</li>
+</ul>
+<p>所以这个例子更适合用来理解模型，而不是直接照抄到所有场景。</p>
+<hr>
+<h2 id="六、异步环境里为什么要谨慎对待锁？"><a href="#六、异步环境里为什么要谨慎对待锁？" class="headerlink" title="六、异步环境里为什么要谨慎对待锁？"></a>六、异步环境里为什么要谨慎对待锁？</h2><p>这是状态管理里最容易被忽略，但又最关键的部分之一。</p>
+<p>axum 运行在异步运行时上，很多 handler 都是 <code>async fn</code>。而异步函数里一旦涉及锁，就要特别注意两件事：</p>
+<ol>
+<li>不要轻易在持锁状态下跨 <code>await</code></li>
+<li>不要让锁保护的临界区过大</li>
+</ol>
+<p>例如下面这种写法就是典型危险信号：</p>
+<pre><code class="highlight rust"><span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">wrong_handler</span>(<span class="title function_ invoke__">State</span>(state): State&lt;AppState&gt;) &#123;
+	<span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">guard</span> = state.cache.<span class="title function_ invoke__">lock</span>().<span class="title function_ invoke__">unwrap</span>();
+
+	<span class="comment">// 错误方向：持锁期间做异步等待</span>
+	<span class="keyword">let</span> <span class="variable">data</span> = <span class="title function_ invoke__">fetch_remote_data</span>().<span class="keyword">await</span>;
+
+	guard.<span class="title function_ invoke__">insert</span>(<span class="string">&quot;key&quot;</span>.<span class="title function_ invoke__">to_string</span>(), data);
+&#125;</code></pre>
+
+<p>问题在于：</p>
+<ul>
+<li>锁还没释放</li>
+<li>当前任务却在等待异步操作</li>
+<li>其他请求可能一直拿不到锁</li>
+</ul>
+<p>更合理的写法通常是缩小临界区：</p>
+<pre><code class="highlight rust"><span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">better_handler</span>(<span class="title function_ invoke__">State</span>(state): State&lt;AppState&gt;) &#123;
+	<span class="keyword">let</span> <span class="variable">data</span> = <span class="title function_ invoke__">fetch_remote_data</span>().<span class="keyword">await</span>;
+
+	<span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">guard</span> = state.cache.<span class="title function_ invoke__">lock</span>().<span class="title function_ invoke__">unwrap</span>();
+	guard.<span class="title function_ invoke__">insert</span>(<span class="string">&quot;key&quot;</span>.<span class="title function_ invoke__">to_string</span>(), data);
+&#125;</code></pre>
+
+<p>核心原则很简单：</p>
+<blockquote>
+<p>把需要加锁的代码范围压到最小，只保护真正需要共享修改的那一小段。</p>
+</blockquote>
+<h3 id="6-1-std-sync-Mutex-和-tokio-sync-Mutex-怎么选？"><a href="#6-1-std-sync-Mutex-和-tokio-sync-Mutex-怎么选？" class="headerlink" title="6.1 std::sync::Mutex 和 tokio::sync::Mutex 怎么选？"></a>6.1 <code>std::sync::Mutex</code> 和 <code>tokio::sync::Mutex</code> 怎么选？</h3><p>这也是一个非常高频的问题。</p>
+<p>可以先记一个实用判断：</p>
+<ul>
+<li>如果临界区很小，而且不会跨 <code>await</code>，<code>std::sync::Mutex</code> 往往就够用</li>
+<li>如果锁内逻辑必须跨异步等待，才考虑 <code>tokio::sync::Mutex</code></li>
+</ul>
+<p>但即使是 <code>tokio::sync::Mutex</code>，也不意味着“可以放心把一大段异步逻辑包在锁里”。</p>
+<p>因为问题的根源不只是“能不能 await”，而是：</p>
+<blockquote>
+<p>一旦锁持有时间太长，系统吞吐量就会明显下降。</p>
+</blockquote>
+<p>所以比“选哪种锁”更重要的，是先思考：</p>
+<ul>
+<li>这个共享可变状态真的必要吗</li>
+<li>能不能改成消息传递</li>
+<li>能不能改成分片缓存</li>
+<li>能不能把更新频率降低</li>
+</ul>
+<p>很多并发问题不是靠换锁类型解决的，而是靠重新设计数据流解决的。</p>
+<hr>
+<h2 id="七、读多写少的场景：什么时候用-RwLock？"><a href="#七、读多写少的场景：什么时候用-RwLock？" class="headerlink" title="七、读多写少的场景：什么时候用 RwLock？"></a>七、读多写少的场景：什么时候用 <code>RwLock</code>？</h2><p>如果某个共享数据的访问模式是：</p>
+<ul>
+<li>读很多</li>
+<li>写很少</li>
+</ul>
+<p>那 <code>RwLock&lt;T&gt;</code> 往往比 <code>Mutex&lt;T&gt;</code> 更合适。</p>
+<p>它的核心语义是：</p>
+<ul>
+<li>多个读可以并发进行</li>
+<li>写时必须独占</li>
+</ul>
+<p>一个典型场景是运行时规则表或只偶尔更新的配置缓存。</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;extract::State, routing::get, Router&#125;;
+<span class="keyword">use</span> std::&#123;collections::HashMap, sync::Arc&#125;;
+<span class="keyword">use</span> tokio::sync::RwLock;
+
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+	feature_flags: Arc&lt;RwLock&lt;HashMap&lt;<span class="type">String</span>, <span class="type">bool</span>&gt;&gt;&gt;,
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">feature_enabled</span>(<span class="title function_ invoke__">State</span>(state): State&lt;AppState&gt;) <span class="punctuation">-&gt;</span> <span class="type">String</span> &#123;
+	<span class="keyword">let</span> <span class="variable">flags</span> = state.feature_flags.<span class="title function_ invoke__">read</span>().<span class="keyword">await</span>;
+	<span class="keyword">let</span> <span class="variable">enabled</span> = flags.<span class="title function_ invoke__">get</span>(<span class="string">&quot;new-homepage&quot;</span>).<span class="title function_ invoke__">copied</span>().<span class="title function_ invoke__">unwrap_or</span>(<span class="literal">false</span>);
+	<span class="built_in">format!</span>(<span class="string">&quot;new-homepage = &#123;&#125;&quot;</span>, enabled)
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">enable_feature</span>(<span class="title function_ invoke__">State</span>(state): State&lt;AppState&gt;) <span class="punctuation">-&gt;</span> <span class="type">String</span> &#123;
+	<span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">flags</span> = state.feature_flags.<span class="title function_ invoke__">write</span>().<span class="keyword">await</span>;
+	flags.<span class="title function_ invoke__">insert</span>(<span class="string">&quot;new-homepage&quot;</span>.<span class="title function_ invoke__">to_string</span>(), <span class="literal">true</span>);
+	<span class="string">&quot;ok&quot;</span>.<span class="title function_ invoke__">to_string</span>()
+&#125;</code></pre>
+
+<p>这个例子里：</p>
+<ul>
+<li>高频读取可以共享读锁</li>
+<li>少量写入时才独占写锁</li>
+</ul>
+<h3 id="7-1-RwLock-也不是银弹"><a href="#7-1-RwLock-也不是银弹" class="headerlink" title="7.1 RwLock 也不是银弹"></a>7.1 <code>RwLock</code> 也不是银弹</h3><p>很多人会想：既然读能并发，那是不是 <code>RwLock</code> 总比 <code>Mutex</code> 更高级？</p>
+<p>不是。</p>
+<p>因为 <code>RwLock</code> 也有成本：</p>
+<ul>
+<li>实现更复杂</li>
+<li>读写切换有额外开销</li>
+<li>如果写入并不稀少，收益未必明显</li>
+</ul>
+<p>所以是否使用 <code>RwLock</code>，应该由数据访问模式决定，而不是“看起来更厉害”决定。</p>
+<hr>
+<h2 id="八、工程里最常见的状态：数据库连接池怎么放？"><a href="#八、工程里最常见的状态：数据库连接池怎么放？" class="headerlink" title="八、工程里最常见的状态：数据库连接池怎么放？"></a>八、工程里最常见的状态：数据库连接池怎么放？</h2><p>这是实际项目里最常见的状态之一，而且很适合拿来理解“共享状态不等于共享可变裸对象”。</p>
+<p>以 <code>sqlx::PgPool</code> 为例，通常会这么组织：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+	extract::&#123;Path, State&#125;,
+	routing::get,
+	Json, Router,
+&#125;;
+<span class="keyword">use</span> serde::Serialize;
+<span class="keyword">use</span> sqlx::PgPool;
+
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+	db: PgPool,
+&#125;
+
+<span class="meta">#[derive(Serialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">UserResponse</span> &#123;
+	id: <span class="type">i64</span>,
+	name: <span class="type">String</span>,
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">get_user</span>(
+	<span class="title function_ invoke__">State</span>(state): State&lt;AppState&gt;,
+	<span class="title function_ invoke__">Path</span>(id): Path&lt;<span class="type">i64</span>&gt;,
+) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;Json&lt;UserResponse&gt;, <span class="type">String</span>&gt; &#123;
+	<span class="keyword">let</span> <span class="variable">row</span> = sqlx::query_as::&lt;_, (<span class="type">i64</span>, <span class="type">String</span>)&gt;(
+		<span class="string">&quot;select id, name from users where id = $1&quot;</span>
+	)
+	.<span class="title function_ invoke__">bind</span>(id)
+	.<span class="title function_ invoke__">fetch_one</span>(&amp;state.db)
+	.<span class="keyword">await</span>
+	.<span class="title function_ invoke__">map_err</span>(|err| err.<span class="title function_ invoke__">to_string</span>())?;
+
+	<span class="title function_ invoke__">Ok</span>(<span class="title function_ invoke__">Json</span>(UserResponse &#123;
+		id: row.<span class="number">0</span>,
+		name: row.<span class="number">1</span>,
+	&#125;))
+&#125;</code></pre>
+
+<p>这里有一个经常被初学者忽略的点：</p>
+<blockquote>
+<p>连接池本身就是为并发共享设计的。</p>
+</blockquote>
+<p>也就是说，你共享的不是“一个数据库连接”，而是“一个连接池句柄”。</p>
+<p>请求来了之后：</p>
+<ul>
+<li>handler 通过池去借连接</li>
+<li>用完之后归还</li>
+<li>池负责整体复用和并发控制</li>
+</ul>
+<p>所以对连接池这类对象，通常不需要你再手动包一层 <code>Mutex</code>。</p>
+<p>错误方向往往长这样：</p>
+<pre><code class="highlight rust"><span class="comment">// 通常没有必要</span>
+Arc&lt;Mutex&lt;PgPool&gt;&gt;</code></pre>
+
+<p>这类写法会平白增加锁竞争，还破坏连接池本身的并发能力。</p>
+<hr>
+<h2 id="九、状态结构应该怎么设计？"><a href="#九、状态结构应该怎么设计？" class="headerlink" title="九、状态结构应该怎么设计？"></a>九、状态结构应该怎么设计？</h2><p>状态管理真正有深度的地方，不在于会不会写 <code>State&lt;T&gt;</code>，而在于：</p>
+<blockquote>
+<p>你的 <code>AppState</code> 到底应该长什么样。</p>
+</blockquote>
+<h3 id="9-1-小项目的状态结构"><a href="#9-1-小项目的状态结构" class="headerlink" title="9.1 小项目的状态结构"></a>9.1 小项目的状态结构</h3><p>对于小项目，通常直接一个统一状态结构体就足够了：</p>
+<pre><code class="highlight rust"><span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+	config: Arc&lt;AppConfig&gt;,
+	db: sqlx::PgPool,
+	redis: redis::Client,
+&#125;</code></pre>
+
+<p>这种写法简单直接，适合：</p>
+<ul>
+<li>接口不多</li>
+<li>服务边界比较单一</li>
+<li>项目还处于快速迭代阶段</li>
+</ul>
+<h3 id="9-2-中型项目更推荐“状态里放服务，而不是到处放基础设施”"><a href="#9-2-中型项目更推荐“状态里放服务，而不是到处放基础设施”" class="headerlink" title="9.2 中型项目更推荐“状态里放服务，而不是到处放基础设施”"></a>9.2 中型项目更推荐“状态里放服务，而不是到处放基础设施”</h3><p>当项目变大后，如果 <code>AppState</code> 里全是基础设施对象，handler 往往会慢慢演变成这样：</p>
+<ul>
+<li>自己查数据库</li>
+<li>自己拼缓存 key</li>
+<li>自己做业务判断</li>
+<li>自己处理事务</li>
+</ul>
+<p>这会让 handler 越来越像“脚本入口”，而不是清晰的接口层。</p>
+<p>更好的方式通常是：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> std::sync::Arc;
+
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+	config: Arc&lt;AppConfig&gt;,
+	user_service: Arc&lt;UserService&gt;,
+	order_service: Arc&lt;OrderService&gt;,
+&#125;</code></pre>
+
+<p>也就是说：</p>
+<ul>
+<li>基础设施对象先组装成 service</li>
+<li>service 再统一放进状态</li>
+<li>handler 只和 service 对话</li>
+</ul>
+<p>这样 handler 会清爽很多，例如：</p>
+<pre><code class="highlight rust"><span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">get_user</span>(
+	<span class="title function_ invoke__">State</span>(state): State&lt;AppState&gt;,
+	<span class="title function_ invoke__">Path</span>(id): Path&lt;<span class="type">i64</span>&gt;,
+) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;Json&lt;UserDto&gt;, AppError&gt; &#123;
+	<span class="keyword">let</span> <span class="variable">user</span> = state.user_service.<span class="title function_ invoke__">get_user</span>(id).<span class="keyword">await</span>?;
+	<span class="title function_ invoke__">Ok</span>(<span class="title function_ invoke__">Json</span>(user))
+&#125;</code></pre>
+
+<p>这种设计的好处是：</p>
+<ul>
+<li>业务逻辑更集中</li>
+<li>handler 更薄</li>
+<li>单元测试更容易做</li>
+<li>后续重构底层依赖时影响更小</li>
+</ul>
+<hr>
+<h2 id="十、一个更像真实项目的完整示例"><a href="#十、一个更像真实项目的完整示例" class="headerlink" title="十、一个更像真实项目的完整示例"></a>十、一个更像真实项目的完整示例</h2><p>下面给一个稍微完整一点的例子，把配置、连接池和 service 放进统一状态里。</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+	extract::&#123;Path, State&#125;,
+	http::StatusCode,
+	response::IntoResponse,
+	routing::get,
+	Json, Router,
+&#125;;
+<span class="keyword">use</span> serde::Serialize;
+<span class="keyword">use</span> sqlx::PgPool;
+<span class="keyword">use</span> std::sync::Arc;
+
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppConfig</span> &#123;
+	app_name: <span class="type">String</span>,
+&#125;
+
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">UserService</span> &#123;
+	db: PgPool,
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">UserService</span> &#123;
+	<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">get_user</span>(&amp;<span class="keyword">self</span>, id: <span class="type">i64</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;UserDto, AppError&gt; &#123;
+		<span class="keyword">let</span> <span class="variable">row</span> = sqlx::query_as::&lt;_, (<span class="type">i64</span>, <span class="type">String</span>)&gt;(
+			<span class="string">&quot;select id, name from users where id = $1&quot;</span>
+		)
+		.<span class="title function_ invoke__">bind</span>(id)
+		.<span class="title function_ invoke__">fetch_one</span>(&amp;<span class="keyword">self</span>.db)
+		.<span class="keyword">await</span>
+		.<span class="title function_ invoke__">map_err</span>(|_| AppError::NotFound)?;
+
+		<span class="title function_ invoke__">Ok</span>(UserDto &#123;
+			id: row.<span class="number">0</span>,
+			name: row.<span class="number">1</span>,
+		&#125;)
+	&#125;
+&#125;
+
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+	config: Arc&lt;AppConfig&gt;,
+	user_service: Arc&lt;UserService&gt;,
+&#125;
+
+<span class="meta">#[derive(Serialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">UserDto</span> &#123;
+	id: <span class="type">i64</span>,
+	name: <span class="type">String</span>,
+&#125;
+
+<span class="keyword">enum</span> <span class="title class_">AppError</span> &#123;
+	NotFound,
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">IntoResponse</span> <span class="keyword">for</span> <span class="title class_">AppError</span> &#123;
+	<span class="keyword">fn</span> <span class="title function_">into_response</span>(<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> axum::response::Response &#123;
+		<span class="keyword">match</span> <span class="keyword">self</span> &#123;
+			AppError::NotFound =&gt; (StatusCode::NOT_FOUND, <span class="string">&quot;user not found&quot;</span>).<span class="title function_ invoke__">into_response</span>(),
+		&#125;
+	&#125;
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">get_user</span>(
+	<span class="title function_ invoke__">State</span>(state): State&lt;AppState&gt;,
+	<span class="title function_ invoke__">Path</span>(id): Path&lt;<span class="type">i64</span>&gt;,
+) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;Json&lt;UserDto&gt;, AppError&gt; &#123;
+	<span class="keyword">let</span> <span class="variable">user</span> = state.user_service.<span class="title function_ invoke__">get_user</span>(id).<span class="keyword">await</span>?;
+	<span class="title function_ invoke__">Ok</span>(<span class="title function_ invoke__">Json</span>(user))
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">health</span>(<span class="title function_ invoke__">State</span>(state): State&lt;AppState&gt;) <span class="punctuation">-&gt;</span> <span class="type">String</span> &#123;
+	<span class="built_in">format!</span>(<span class="string">&quot;&#123;&#125; is running&quot;</span>, state.config.app_name)
+&#125;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+	<span class="keyword">let</span> <span class="variable">db</span> = PgPool::<span class="title function_ invoke__">connect</span>(<span class="string">&quot;postgres://postgres:postgres@localhost/app&quot;</span>)
+		.<span class="keyword">await</span>
+		.<span class="title function_ invoke__">unwrap</span>();
+
+	<span class="keyword">let</span> <span class="variable">state</span> = AppState &#123;
+		config: Arc::<span class="title function_ invoke__">new</span>(AppConfig &#123;
+			app_name: <span class="string">&quot;user-service&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+		&#125;),
+		user_service: Arc::<span class="title function_ invoke__">new</span>(UserService &#123; db &#125;),
+	&#125;;
+
+	<span class="keyword">let</span> <span class="variable">app</span> = Router::<span class="title function_ invoke__">new</span>()
+		.<span class="title function_ invoke__">route</span>(<span class="string">&quot;/health&quot;</span>, <span class="title function_ invoke__">get</span>(health))
+		.<span class="title function_ invoke__">route</span>(<span class="string">&quot;/users/&#123;id&#125;&quot;</span>, <span class="title function_ invoke__">get</span>(get_user))
+		.<span class="title function_ invoke__">with_state</span>(state);
+
+	<span class="keyword">let</span> <span class="variable">listener</span> = tokio::net::TcpListener::<span class="title function_ invoke__">bind</span>(<span class="string">&quot;0.0.0.0:3000&quot;</span>)
+		.<span class="keyword">await</span>
+		.<span class="title function_ invoke__">unwrap</span>();
+
+	axum::<span class="title function_ invoke__">serve</span>(listener, app).<span class="keyword">await</span>.<span class="title function_ invoke__">unwrap</span>();
+&#125;</code></pre>
+
+<p>这个例子里，状态分工是清楚的：</p>
+<ul>
+<li><code>config</code> 负责应用级只读配置</li>
+<li><code>user_service</code> 负责用户相关业务能力</li>
+<li><code>PgPool</code> 被封装在 service 内部</li>
+<li>handler 不直接处理底层细节</li>
+</ul>
+<p>这就是一种比较健康的状态组织方式。</p>
+<hr>
+<h2 id="十一、状态管理里最常见的几个坏味道"><a href="#十一、状态管理里最常见的几个坏味道" class="headerlink" title="十一、状态管理里最常见的几个坏味道"></a>十一、状态管理里最常见的几个坏味道</h2><h3 id="11-1-把所有东西都塞进-AppState"><a href="#11-1-把所有东西都塞进-AppState" class="headerlink" title="11.1 把所有东西都塞进 AppState"></a>11.1 把所有东西都塞进 <code>AppState</code></h3><p>很多项目早期会这么写，短期没问题，但一旦对象越来越多，<code>AppState</code> 就会变成一个巨大的杂物箱。</p>
+<p>如果你发现状态里已经包含：</p>
+<ul>
+<li>十几个客户端</li>
+<li>一堆无关配置</li>
+<li>各种临时缓存</li>
+<li>各种裸数据结构</li>
+</ul>
+<p>那通常意味着该做分层了。</p>
+<h3 id="11-2-为了共享就到处上-Arc"><a href="#11-2-为了共享就到处上-Arc" class="headerlink" title="11.2 为了共享就到处上 Arc&lt;Mutex&lt;T&gt;&gt;"></a>11.2 为了共享就到处上 <code>Arc&lt;Mutex&lt;T&gt;&gt;</code></h3><p>这是 Rust 初学者极其常见的模式：</p>
+<p>“有共享数据”</p>
+<p>“那就 <code>Arc&lt;Mutex&lt;_&gt;&gt;</code>”</p>
+<p>这当然有时能工作，但它很容易把架构拖向另一个极端：</p>
+<ul>
+<li>到处是锁</li>
+<li>不知道谁在什么时候修改数据</li>
+<li>锁竞争难分析</li>
+<li>handler 逻辑开始和底层同步细节强耦合</li>
+</ul>
+<p>更好的顺序应该是：</p>
+<ol>
+<li>先问这个数据是不是真的需要全局可变共享</li>
+<li>再问能不能通过 service 封装修改路径</li>
+<li>最后才决定是否要用锁</li>
+</ol>
+<h3 id="11-3-把请求级数据误放进全局状态"><a href="#11-3-把请求级数据误放进全局状态" class="headerlink" title="11.3 把请求级数据误放进全局状态"></a>11.3 把请求级数据误放进全局状态</h3><p>例如：</p>
+<ul>
+<li>当前用户</li>
+<li>当前请求 ID</li>
+<li>当前租户信息</li>
+</ul>
+<p>这些都不应该成为全局状态的一部分。</p>
+<p>因为它们不是“应用级共享依赖”，而是“请求级上下文”。</p>
+<p>这类数据更适合：</p>
+<ul>
+<li>中间件注入 extensions</li>
+<li>自定义 Extractor 提取</li>
+</ul>
+<h3 id="11-4-在-handler-里直接操作太多共享状态"><a href="#11-4-在-handler-里直接操作太多共享状态" class="headerlink" title="11.4 在 handler 里直接操作太多共享状态"></a>11.4 在 handler 里直接操作太多共享状态</h3><p>如果一个 handler 同时做这些事情：</p>
+<ul>
+<li>拿状态</li>
+<li>上锁</li>
+<li>更新缓存</li>
+<li>查数据库</li>
+<li>写审计日志</li>
+<li>拼业务响应</li>
+</ul>
+<p>那说明状态组织和职责划分已经开始失衡。</p>
+<p>handler 应该是接口层，而不是共享状态的总调度中心。</p>
+<hr>
+<h2 id="十二、如何选择：值、Arc、Mutex、RwLock"><a href="#十二、如何选择：值、Arc、Mutex、RwLock" class="headerlink" title="十二、如何选择：值、Arc、Mutex、RwLock"></a>十二、如何选择：值、<code>Arc</code>、<code>Mutex</code>、<code>RwLock</code></h2><p>如果你希望快速判断，可以先用这套简化规则：</p>
+<h3 id="12-1-直接放值"><a href="#12-1-直接放值" class="headerlink" title="12.1 直接放值"></a>12.1 直接放值</h3><p>适合：</p>
+<ul>
+<li>轻量对象</li>
+<li>只读配置</li>
+<li>本身已经是轻量句柄的客户端或连接池</li>
+</ul>
+<p>示例：</p>
+<pre><code class="highlight rust"><span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+	db: sqlx::PgPool,
+&#125;</code></pre>
+
+<h3 id="12-2-放-Arc"><a href="#12-2-放-Arc" class="headerlink" title="12.2 放 Arc&lt;T&gt;"></a>12.2 放 <code>Arc&lt;T&gt;</code></h3><p>适合：</p>
+<ul>
+<li>较大的只读对象</li>
+<li>需要多处共享所有权的 service</li>
+<li>不希望克隆底层大对象</li>
+</ul>
+<p>示例：</p>
+<pre><code class="highlight rust"><span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+	config: Arc&lt;AppConfig&gt;,
+	user_service: Arc&lt;UserService&gt;,
+&#125;</code></pre>
+
+<h3 id="12-3-放-Arc"><a href="#12-3-放-Arc" class="headerlink" title="12.3 放 Arc&lt;Mutex&lt;T&gt;&gt;"></a>12.3 放 <code>Arc&lt;Mutex&lt;T&gt;&gt;</code></h3><p>适合：</p>
+<ul>
+<li>确实需要可变共享</li>
+<li>写操作较明确</li>
+<li>临界区可控</li>
+</ul>
+<p>示例：</p>
+<pre><code class="highlight rust"><span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+	counter: Arc&lt;Mutex&lt;<span class="type">u64</span>&gt;&gt;,
+&#125;</code></pre>
+
+<h3 id="12-4-放-Arc"><a href="#12-4-放-Arc" class="headerlink" title="12.4 放 Arc&lt;RwLock&lt;T&gt;&gt;"></a>12.4 放 <code>Arc&lt;RwLock&lt;T&gt;&gt;</code></h3><p>适合：</p>
+<ul>
+<li>读多写少</li>
+<li>希望提升并发读能力</li>
+</ul>
+<p>示例：</p>
+<pre><code class="highlight rust"><span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+	flags: Arc&lt;tokio::sync::RwLock&lt;HashMap&lt;<span class="type">String</span>, <span class="type">bool</span>&gt;&gt;&gt;,
+&#125;</code></pre>
+
+<p>但请始终记住：</p>
+<blockquote>
+<p>选容器只是最后一步，先搞清楚数据的访问模式和职责边界，才是更重要的事。</p>
+</blockquote>
+<hr>
+<h2 id="十三、总结"><a href="#十三、总结" class="headerlink" title="十三、总结"></a>十三、总结</h2><p>axum 的状态管理表面上看只是一个 <code>State&lt;T&gt;</code>，但真正需要理解的是它背后的设计问题：</p>
+<ul>
+<li>什么是应用级共享依赖</li>
+<li>什么是请求级上下文</li>
+<li>什么数据应该只读共享</li>
+<li>什么数据真的需要可变共享</li>
+<li>如何在并发安全和代码可维护性之间取得平衡</li>
+</ul>
+<p>如果把这篇文章压缩成几个最关键的结论，大概就是这些：</p>
+<ol>
+<li><code>State&lt;T&gt;</code> 是 axum 提供的应用状态注入机制</li>
+<li><code>AppState</code> 里更适合放长期存在、会被多个请求复用的对象</li>
+<li><code>Arc</code> 解决共享所有权，不等于自动解决并发修改问题</li>
+<li><code>Mutex</code> 和 <code>RwLock</code> 只该在确实需要可变共享时使用</li>
+<li>在异步环境里，持锁范围一定要尽量小，尽量不要跨 <code>await</code></li>
+<li>数据库连接池这类对象通常本身就是并发共享句柄，不要无脑再包 <code>Mutex</code></li>
+<li>中型项目更推荐把 service 放进状态，而不是让 handler 直接操作所有基础设施</li>
+</ol>
+<p>如果你已经把 axum 的中间件、提取器和状态管理这三块串起来，那么整个请求进入应用后的主干流程其实已经非常清楚了：</p>
+<ul>
+<li>Middleware 处理横切逻辑</li>
+<li>Extractor 准备 handler 输入</li>
+<li>State 提供应用级共享依赖</li>
+<li>handler 聚焦业务逻辑</li>
+</ul>
+<p>再往下继续写，一个非常自然的方向就是错误处理与统一响应设计。因为当状态、输入提取、横切逻辑都建立起来之后，剩下最影响工程质量的，往往就是错误模型和响应模型如何统一。</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
