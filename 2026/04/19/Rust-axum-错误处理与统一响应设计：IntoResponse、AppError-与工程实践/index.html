@@ -1,0 +1,813 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust axum 错误处理与统一响应设计：IntoResponse、AppError 与工程实践</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust axum 错误处理与统一响应设计：IntoResponse、AppError 与工程实践</h1><div class="time">2026-04-19</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><h2 id="引言"><a href="#引言" class="headerlink" title="引言"></a>引言</h2><p>很多人刚学 axum 的时候，会先觉得它的 handler 写起来很舒服。</p>
+<p>比如下面这种代码，看起来就很直观：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;routing::get, Json, Router&#125;;
+<span class="keyword">use</span> serde::Serialize;
+
+<span class="meta">#[derive(Serialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">UserResponse</span> &#123;
+    id: <span class="type">u64</span>,
+    name: <span class="type">String</span>,
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">get_user</span>() <span class="punctuation">-&gt;</span> Json&lt;UserResponse&gt; &#123;
+    <span class="title function_ invoke__">Json</span>(UserResponse &#123;
+        id: <span class="number">1</span>,
+        name: <span class="string">&quot;chen&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+    &#125;)
+&#125;
+
+<span class="keyword">let</span> <span class="variable">app</span> = Router::<span class="title function_ invoke__">new</span>().<span class="title function_ invoke__">route</span>(<span class="string">&quot;/users/1&quot;</span>, <span class="title function_ invoke__">get</span>(get_user));</code></pre>
+
+<p>但是只要接口开始变多，你很快就会遇到这些问题：</p>
+<ul>
+<li>查询数据库失败了，应该返回什么</li>
+<li>参数校验失败了，应该返回什么</li>
+<li>业务上“用户不存在”和系统上“数据库挂了”要不要一样处理</li>
+<li>前端到底应该收到怎样统一的 JSON 结构</li>
+<li>handler 里是不是要到处写 <code>StatusCode::INTERNAL_SERVER_ERROR</code></li>
+</ul>
+<p>如果这些问题没有提前设计，代码通常会迅速变成这样：</p>
+<ul>
+<li>每个 handler 都在自己拼错误响应</li>
+<li>响应 JSON 结构一会儿这样，一会儿那样</li>
+<li>业务错误和系统错误混在一起</li>
+<li>日志层、接口层、服务层的职责边界越来越模糊</li>
+</ul>
+<p>而错误处理这件事，一旦项目长起来，影响的从来不只是“代码好不好看”，还会直接影响：</p>
+<ul>
+<li>接口一致性</li>
+<li>排查问题的效率</li>
+<li>前后端协作成本</li>
+<li>服务可维护性</li>
+</ul>
+<p>在 axum 里，错误处理真正的关键不是背几个返回类型，而是理解下面几层关系：</p>
+<ol>
+<li>handler 返回值为什么能自动变成 HTTP 响应</li>
+<li><code>Result&lt;T, E&gt;</code> 在 axum 里是怎么工作的</li>
+<li><code>IntoResponse</code> 到底扮演什么角色</li>
+<li>如何设计自己的 <code>AppError</code></li>
+<li>如何做统一成功&#x2F;失败响应结构</li>
+<li>如何把业务错误和系统错误分层</li>
+</ol>
+<p>这篇文章我会围绕这几件事展开，尽量把“API 会用”和“工程上该怎么设计”一起讲清楚。</p>
+<hr>
+<h2 id="一、先理解根问题：axum-为什么能把返回值变成响应？"><a href="#一、先理解根问题：axum-为什么能把返回值变成响应？" class="headerlink" title="一、先理解根问题：axum 为什么能把返回值变成响应？"></a>一、先理解根问题：axum 为什么能把返回值变成响应？</h2><p>先看两个最常见的 handler：</p>
+<pre><code class="highlight rust"><span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">ping</span>() <span class="punctuation">-&gt;</span> &amp;<span class="symbol">&#x27;static</span> <span class="type">str</span> &#123;
+    <span class="string">&quot;pong&quot;</span>
+&#125;</code></pre>
+
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::Json;
+<span class="keyword">use</span> serde::Serialize;
+
+<span class="meta">#[derive(Serialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">HealthResponse</span> &#123;
+    ok: <span class="type">bool</span>,
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">health</span>() <span class="punctuation">-&gt;</span> Json&lt;HealthResponse&gt; &#123;
+    <span class="title function_ invoke__">Json</span>(HealthResponse &#123; ok: <span class="literal">true</span> &#125;)
+&#125;</code></pre>
+
+<p>这两个函数都没有手动构造 <code>Response</code>，但 axum 依然知道怎么把它们返回给客户端。</p>
+<p>原因在于：</p>
+<blockquote>
+<p>axum 并不要求 handler 必须显式返回 <code>Response</code>，它只要求返回值能转换成 <code>Response</code>。</p>
+</blockquote>
+<p>这层转换能力的核心，就是 <code>IntoResponse</code>。</p>
+<p>你可以把它先粗略理解为：</p>
+<blockquote>
+<p>只要一个类型实现了 <code>IntoResponse</code>，axum 就知道如何把它变成 HTTP 响应。</p>
+</blockquote>
+<p>所以：</p>
+<ul>
+<li><code>&amp;&#39;static str</code> 可以作为响应</li>
+<li><code>String</code> 可以作为响应</li>
+<li><code>Json&lt;T&gt;</code> 可以作为响应</li>
+<li><code>(StatusCode, String)</code> 可以作为响应</li>
+<li>你自己定义的错误类型，只要实现了 <code>IntoResponse</code>，也可以作为响应</li>
+</ul>
+<p>这就是整个错误处理设计的基础。</p>
+<hr>
+<h2 id="二、为什么-Result-在-axum-里这么常见？"><a href="#二、为什么-Result-在-axum-里这么常见？" class="headerlink" title="二、为什么 Result&lt;T, E&gt; 在 axum 里这么常见？"></a>二、为什么 <code>Result&lt;T, E&gt;</code> 在 axum 里这么常见？</h2><p>只要接口稍微有点真实业务，handler 就几乎不可能永远成功。</p>
+<p>例如：</p>
+<ul>
+<li>数据库查询可能失败</li>
+<li>用户可能不存在</li>
+<li>token 可能无效</li>
+<li>JSON 反序列化可能失败</li>
+</ul>
+<p>所以 handler 很自然会写成 <code>Result&lt;T, E&gt;</code>。</p>
+<p>例如：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;http::StatusCode, Json&#125;;
+<span class="keyword">use</span> serde::Serialize;
+
+<span class="meta">#[derive(Serialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">UserResponse</span> &#123;
+    id: <span class="type">u64</span>,
+    name: <span class="type">String</span>,
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">get_user</span>() <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;Json&lt;UserResponse&gt;, StatusCode&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">user</span> = UserResponse &#123;
+        id: <span class="number">1</span>,
+        name: <span class="string">&quot;chen&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+    &#125;;
+
+    <span class="title function_ invoke__">Ok</span>(<span class="title function_ invoke__">Json</span>(user))
+&#125;</code></pre>
+
+<p>这段代码之所以成立，不是因为 <code>Result</code> 有什么特权，而是因为 axum 能处理这样的规则：</p>
+<ul>
+<li><code>Ok(T)</code>：把 <code>T</code> 转成响应</li>
+<li><code>Err(E)</code>：把 <code>E</code> 转成响应</li>
+</ul>
+<p>前提只有一个：</p>
+<blockquote>
+<p><code>T</code> 和 <code>E</code> 都必须实现 <code>IntoResponse</code>。</p>
+</blockquote>
+<p>这句话非常关键，因为它解释了 axum 错误处理的核心机制：</p>
+<blockquote>
+<p>在 axum 看来，“错误”本质上也只是另一种响应。</p>
+</blockquote>
+<p>这和很多初学者的直觉不一样。我们平时会把“成功返回”和“错误返回”看成两套完全不同的逻辑，但在 axum 这一层抽象里，它们最后都会被归约成同一件事：</p>
+<blockquote>
+<p>生成一个 HTTP 响应。</p>
+</blockquote>
+<hr>
+<h2 id="三、最基础的错误处理写法"><a href="#三、最基础的错误处理写法" class="headerlink" title="三、最基础的错误处理写法"></a>三、最基础的错误处理写法</h2><p>在刚开始写接口时，最常见的做法通常是直接返回状态码或者元组。</p>
+<p>例如：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+&#125;;
+<span class="keyword">use</span> serde::Serialize;
+
+<span class="meta">#[derive(Serialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">UserResponse</span> &#123;
+    id: <span class="type">u64</span>,
+    name: <span class="type">String</span>,
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">get_user</span>() <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;Json&lt;UserResponse&gt;, (StatusCode, <span class="type">String</span>)&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">found</span> = <span class="literal">false</span>;
+
+    <span class="keyword">if</span> !found &#123;
+        <span class="keyword">return</span> <span class="title function_ invoke__">Err</span>((StatusCode::NOT_FOUND, <span class="string">&quot;user not found&quot;</span>.<span class="title function_ invoke__">to_string</span>()));
+    &#125;
+
+    <span class="title function_ invoke__">Ok</span>(<span class="title function_ invoke__">Json</span>(UserResponse &#123;
+        id: <span class="number">1</span>,
+        name: <span class="string">&quot;chen&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+    &#125;))
+&#125;</code></pre>
+
+<p>这种写法的优点很明显：</p>
+<ul>
+<li>简单</li>
+<li>直接</li>
+<li>学习成本低</li>
+</ul>
+<p>但缺点也会很快暴露：</p>
+<ul>
+<li>错误结构不统一</li>
+<li>handler 里到处拼字符串</li>
+<li>业务错误难以复用</li>
+<li>一旦错误场景变多，代码会迅速散掉</li>
+</ul>
+<p>所以这种方式适合 demo，不太适合中型项目。</p>
+<hr>
+<h2 id="四、IntoResponse-到底解决了什么？"><a href="#四、IntoResponse-到底解决了什么？" class="headerlink" title="四、IntoResponse 到底解决了什么？"></a>四、<code>IntoResponse</code> 到底解决了什么？</h2><p>要真正把 axum 的错误处理吃透，必须对 <code>IntoResponse</code> 有更具体的理解。</p>
+<p>可以把它理解成一条规则：</p>
+<blockquote>
+<p>某个类型如果知道如何把自己变成 HTTP 响应，它就应该实现 <code>IntoResponse</code>。</p>
+</blockquote>
+<p>这意味着，<code>IntoResponse</code> 并不只用于“正常响应”，也非常适合“错误响应”。</p>
+<p>例如我们可以定义一个简单错误类型：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+    http::StatusCode,
+    response::&#123;IntoResponse, Response&#125;,
+&#125;;
+
+<span class="keyword">enum</span> <span class="title class_">AppError</span> &#123;
+    NotFound,
+    Unauthorized,
+    Internal,
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">IntoResponse</span> <span class="keyword">for</span> <span class="title class_">AppError</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">into_response</span>(<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> Response &#123;
+        <span class="keyword">match</span> <span class="keyword">self</span> &#123;
+            AppError::NotFound =&gt; &#123;
+                (StatusCode::NOT_FOUND, <span class="string">&quot;resource not found&quot;</span>).<span class="title function_ invoke__">into_response</span>()
+            &#125;
+            AppError::Unauthorized =&gt; &#123;
+                (StatusCode::UNAUTHORIZED, <span class="string">&quot;unauthorized&quot;</span>).<span class="title function_ invoke__">into_response</span>()
+            &#125;
+            AppError::Internal =&gt; &#123;
+                (StatusCode::INTERNAL_SERVER_ERROR, <span class="string">&quot;internal server error&quot;</span>).<span class="title function_ invoke__">into_response</span>()
+            &#125;
+        &#125;
+    &#125;
+&#125;</code></pre>
+
+<p>这样 handler 就可以写成：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::Json;
+<span class="keyword">use</span> serde::Serialize;
+
+<span class="meta">#[derive(Serialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">UserResponse</span> &#123;
+    id: <span class="type">u64</span>,
+    name: <span class="type">String</span>,
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">get_user</span>() <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;Json&lt;UserResponse&gt;, AppError&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">found</span> = <span class="literal">false</span>;
+
+    <span class="keyword">if</span> !found &#123;
+        <span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(AppError::NotFound);
+    &#125;
+
+    <span class="title function_ invoke__">Ok</span>(<span class="title function_ invoke__">Json</span>(UserResponse &#123;
+        id: <span class="number">1</span>,
+        name: <span class="string">&quot;chen&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+    &#125;))
+&#125;</code></pre>
+
+<p>和前一种写法相比，它真正的价值不只是“少写点字符串”，而是：</p>
+<blockquote>
+<p>错误开始从零散文本，变成系统中的一个明确类型。</p>
+</blockquote>
+<p>这会直接改变整个项目的可维护性。</p>
+<hr>
+<h2 id="五、为什么要自定义-AppError？"><a href="#五、为什么要自定义-AppError？" class="headerlink" title="五、为什么要自定义 AppError？"></a>五、为什么要自定义 <code>AppError</code>？</h2><p>一旦项目进入真实开发阶段，错误来源就会迅速增多：</p>
+<ul>
+<li>参数校验错误</li>
+<li>认证失败</li>
+<li>资源不存在</li>
+<li>数据库错误</li>
+<li>外部服务调用失败</li>
+<li>内部逻辑异常</li>
+</ul>
+<p>如果这些错误都直接在 handler 里用 <code>(StatusCode, String)</code> 表达，那么你会很快遇到两个问题：</p>
+<ol>
+<li>handler 里业务逻辑和错误拼装逻辑混在一起</li>
+<li>整个项目没有统一的错误语义模型</li>
+</ol>
+<p>自定义 <code>AppError</code> 的意义就在于：</p>
+<blockquote>
+<p>用类型系统把错误语义收拢起来。</p>
+</blockquote>
+<p>例如：</p>
+<pre><code class="highlight rust"><span class="keyword">enum</span> <span class="title class_">AppError</span> &#123;
+    <span class="title function_ invoke__">BadRequest</span>(<span class="type">String</span>),
+    <span class="title function_ invoke__">Unauthorized</span>(<span class="type">String</span>),
+    <span class="title function_ invoke__">NotFound</span>(<span class="type">String</span>),
+    <span class="title function_ invoke__">Conflict</span>(<span class="type">String</span>),
+    <span class="title function_ invoke__">Internal</span>(<span class="type">String</span>),
+&#125;</code></pre>
+
+<p>这个设计比直接返回元组更强的地方在于：</p>
+<ul>
+<li>错误种类是被枚举出来的</li>
+<li>不同错误可以映射到不同 HTTP 状态码</li>
+<li>上层调用方可以继续基于错误类型做处理</li>
+<li>后续接入日志、监控、统一错误码时更容易扩展</li>
+</ul>
+<h3 id="5-1-一个更实用的-AppError-实现"><a href="#5-1-一个更实用的-AppError-实现" class="headerlink" title="5.1 一个更实用的 AppError 实现"></a>5.1 一个更实用的 <code>AppError</code> 实现</h3><p>下面给一个更接近工程实践的例子：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+    http::StatusCode,
+    response::&#123;IntoResponse, Response&#125;,
+    Json,
+&#125;;
+<span class="keyword">use</span> serde::Serialize;
+
+<span class="meta">#[derive(Serialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">ErrorBody</span> &#123;
+    code: &amp;<span class="symbol">&#x27;static</span> <span class="type">str</span>,
+    message: <span class="type">String</span>,
+&#125;
+
+<span class="keyword">enum</span> <span class="title class_">AppError</span> &#123;
+    <span class="title function_ invoke__">BadRequest</span>(<span class="type">String</span>),
+    <span class="title function_ invoke__">Unauthorized</span>(<span class="type">String</span>),
+    <span class="title function_ invoke__">NotFound</span>(<span class="type">String</span>),
+    <span class="title function_ invoke__">Internal</span>(<span class="type">String</span>),
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">IntoResponse</span> <span class="keyword">for</span> <span class="title class_">AppError</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">into_response</span>(<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> Response &#123;
+        <span class="keyword">let</span> (status, code, message) = <span class="keyword">match</span> <span class="keyword">self</span> &#123;
+            AppError::<span class="title function_ invoke__">BadRequest</span>(message) =&gt; (StatusCode::BAD_REQUEST, <span class="string">&quot;BAD_REQUEST&quot;</span>, message),
+            AppError::<span class="title function_ invoke__">Unauthorized</span>(message) =&gt; &#123;
+                (StatusCode::UNAUTHORIZED, <span class="string">&quot;UNAUTHORIZED&quot;</span>, message)
+            &#125;
+            AppError::<span class="title function_ invoke__">NotFound</span>(message) =&gt; (StatusCode::NOT_FOUND, <span class="string">&quot;NOT_FOUND&quot;</span>, message),
+            AppError::<span class="title function_ invoke__">Internal</span>(message) =&gt; &#123;
+                (StatusCode::INTERNAL_SERVER_ERROR, <span class="string">&quot;INTERNAL_ERROR&quot;</span>, message)
+            &#125;
+        &#125;;
+
+        (status, <span class="title function_ invoke__">Json</span>(ErrorBody &#123; code, message &#125;)).<span class="title function_ invoke__">into_response</span>()
+    &#125;
+&#125;</code></pre>
+
+<p>这样之后，错误响应就不再只是一个裸字符串，而是一个统一结构的 JSON：</p>
+<pre><code class="highlight json"><span class="punctuation">&#123;</span>
+  <span class="attr">&quot;code&quot;</span><span class="punctuation">:</span> <span class="string">&quot;NOT_FOUND&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;message&quot;</span><span class="punctuation">:</span> <span class="string">&quot;user not found&quot;</span>
+<span class="punctuation">&#125;</span></code></pre>
+
+<p>这一步非常重要，因为从这里开始，你就已经进入“接口规范化”的阶段了。</p>
+<hr>
+<h2 id="六、统一成功响应和失败响应，到底该不该做？"><a href="#六、统一成功响应和失败响应，到底该不该做？" class="headerlink" title="六、统一成功响应和失败响应，到底该不该做？"></a>六、统一成功响应和失败响应，到底该不该做？</h2><p>这是一个很常见、也很值得认真回答的问题。</p>
+<p>很多团队喜欢把所有接口都包成统一结构，例如：</p>
+<p>成功：</p>
+<pre><code class="highlight json"><span class="punctuation">&#123;</span>
+  <span class="attr">&quot;code&quot;</span><span class="punctuation">:</span> <span class="number">0</span><span class="punctuation">,</span>
+  <span class="attr">&quot;message&quot;</span><span class="punctuation">:</span> <span class="string">&quot;ok&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;data&quot;</span><span class="punctuation">:</span> <span class="punctuation">&#123;</span>
+    <span class="attr">&quot;id&quot;</span><span class="punctuation">:</span> <span class="number">1</span><span class="punctuation">,</span>
+    <span class="attr">&quot;name&quot;</span><span class="punctuation">:</span> <span class="string">&quot;chen&quot;</span>
+  <span class="punctuation">&#125;</span>
+<span class="punctuation">&#125;</span></code></pre>
+
+<p>失败：</p>
+<pre><code class="highlight json"><span class="punctuation">&#123;</span>
+  <span class="attr">&quot;code&quot;</span><span class="punctuation">:</span> <span class="number">10001</span><span class="punctuation">,</span>
+  <span class="attr">&quot;message&quot;</span><span class="punctuation">:</span> <span class="string">&quot;user not found&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;data&quot;</span><span class="punctuation">:</span> <span class="literal"><span class="keyword">null</span></span>
+<span class="punctuation">&#125;</span></code></pre>
+
+<p>这种设计有没有价值？有。</p>
+<p>它的优势通常在于：</p>
+<ul>
+<li>前端处理逻辑统一</li>
+<li>业务错误码可控</li>
+<li>更容易对接内部平台规范</li>
+</ul>
+<p>但也有代价：</p>
+<ul>
+<li>会增加响应封装层级</li>
+<li>如果设计不清楚，容易和 HTTP 状态码重复表达</li>
+<li>有些团队最后会把所有错误都包成 200，反而破坏 HTTP 语义</li>
+</ul>
+<p>所以更稳妥的思路通常是：</p>
+<blockquote>
+<p>保留正确的 HTTP 状态码，同时让 JSON body 保持统一格式。</p>
+</blockquote>
+<p>也就是说：</p>
+<ul>
+<li>成功时返回 <code>200/201/...</code> 和统一成功 body</li>
+<li>失败时返回 <code>4xx/5xx</code> 和统一错误 body</li>
+</ul>
+<p>这样可以同时兼顾：</p>
+<ul>
+<li>HTTP 协议语义</li>
+<li>前后端统一结构</li>
+<li>监控和排障可读性</li>
+</ul>
+<hr>
+<h2 id="七、如何设计统一响应结构？"><a href="#七、如何设计统一响应结构？" class="headerlink" title="七、如何设计统一响应结构？"></a>七、如何设计统一响应结构？</h2><p>一个常见做法是定义统一响应包裹类型：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> serde::Serialize;
+
+<span class="meta">#[derive(Serialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">ApiResponse</span>&lt;T&gt; &#123;
+    code: <span class="type">i32</span>,
+    message: <span class="type">String</span>,
+    data: <span class="type">Option</span>&lt;T&gt;,
+&#125;</code></pre>
+
+<p>然后给它加上一些辅助构造函数：</p>
+<pre><code class="highlight rust"><span class="keyword">impl</span>&lt;T&gt; ApiResponse&lt;T&gt; &#123;
+    <span class="keyword">fn</span> <span class="title function_">success</span>(data: T) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123;
+        <span class="keyword">Self</span> &#123;
+            code: <span class="number">0</span>,
+            message: <span class="string">&quot;ok&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+            data: <span class="title function_ invoke__">Some</span>(data),
+        &#125;
+    &#125;
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">ApiResponse</span>&lt;()&gt; &#123;
+    <span class="keyword">fn</span> <span class="title function_">error</span>(code: <span class="type">i32</span>, message: <span class="type">String</span>) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123;
+        <span class="keyword">Self</span> &#123;
+            code,
+            message,
+            data: <span class="literal">None</span>,
+        &#125;
+    &#125;
+&#125;</code></pre>
+
+<p>然后业务成功响应就可以写成：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::Json;
+<span class="keyword">use</span> serde::Serialize;
+
+<span class="meta">#[derive(Serialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">UserDto</span> &#123;
+    id: <span class="type">u64</span>,
+    name: <span class="type">String</span>,
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">get_user</span>() <span class="punctuation">-&gt;</span> Json&lt;ApiResponse&lt;UserDto&gt;&gt; &#123;
+    <span class="title function_ invoke__">Json</span>(ApiResponse::<span class="title function_ invoke__">success</span>(UserDto &#123;
+        id: <span class="number">1</span>,
+        name: <span class="string">&quot;chen&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+    &#125;))
+&#125;</code></pre>
+
+<h3 id="7-1-成功响应统一，不代表错误也必须手动重复拼装"><a href="#7-1-成功响应统一，不代表错误也必须手动重复拼装" class="headerlink" title="7.1 成功响应统一，不代表错误也必须手动重复拼装"></a>7.1 成功响应统一，不代表错误也必须手动重复拼装</h3><p>很多人到这一步会继续在 handler 里手动写：</p>
+<pre><code class="highlight rust"><span class="title function_ invoke__">Err</span>((StatusCode::NOT_FOUND, <span class="title function_ invoke__">Json</span>(ApiResponse::&lt;()&gt;::<span class="title function_ invoke__">error</span>(<span class="number">10001</span>, <span class="string">&quot;user not found&quot;</span>.<span class="title function_ invoke__">to_string</span>()))))</code></pre>
+
+<p>这当然能工作，但很快就会变得丑陋。</p>
+<p>更好的方式是把这部分逻辑继续塞回 <code>AppError</code> 的 <code>IntoResponse</code> 实现里。</p>
+<p>这样 handler 只负责返回语义化错误：</p>
+<pre><code class="highlight rust"><span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(AppError::<span class="title function_ invoke__">NotFound</span>(<span class="string">&quot;user not found&quot;</span>.<span class="title function_ invoke__">to_string</span>()));</code></pre>
+
+<p>而 HTTP 状态码和 JSON 错误包裹结构，都由错误类型统一决定。</p>
+<p>这才是更干净的设计。</p>
+<hr>
+<h2 id="八、一个完整一点的统一错误响应实现"><a href="#八、一个完整一点的统一错误响应实现" class="headerlink" title="八、一个完整一点的统一错误响应实现"></a>八、一个完整一点的统一错误响应实现</h2><p>下面给一个相对完整、又不至于太重的实现方式。</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+    http::StatusCode,
+    response::&#123;IntoResponse, Response&#125;,
+    Json,
+&#125;;
+<span class="keyword">use</span> serde::Serialize;
+
+<span class="meta">#[derive(Serialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">ApiResponse</span>&lt;T&gt; &#123;
+    code: <span class="type">i32</span>,
+    message: <span class="type">String</span>,
+    data: <span class="type">Option</span>&lt;T&gt;,
+&#125;
+
+<span class="keyword">impl</span>&lt;T&gt; ApiResponse&lt;T&gt; &#123;
+    <span class="keyword">fn</span> <span class="title function_">success</span>(data: T) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123;
+        <span class="keyword">Self</span> &#123;
+            code: <span class="number">0</span>,
+            message: <span class="string">&quot;ok&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+            data: <span class="title function_ invoke__">Some</span>(data),
+        &#125;
+    &#125;
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">ApiResponse</span>&lt;()&gt; &#123;
+    <span class="keyword">fn</span> <span class="title function_">error</span>(code: <span class="type">i32</span>, message: <span class="type">String</span>) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123;
+        <span class="keyword">Self</span> &#123;
+            code,
+            message,
+            data: <span class="literal">None</span>,
+        &#125;
+    &#125;
+&#125;
+
+<span class="keyword">enum</span> <span class="title class_">AppError</span> &#123;
+    <span class="title function_ invoke__">BadRequest</span>(<span class="type">String</span>),
+    <span class="title function_ invoke__">Unauthorized</span>(<span class="type">String</span>),
+    <span class="title function_ invoke__">NotFound</span>(<span class="type">String</span>),
+    <span class="title function_ invoke__">Internal</span>(<span class="type">String</span>),
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">IntoResponse</span> <span class="keyword">for</span> <span class="title class_">AppError</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">into_response</span>(<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> Response &#123;
+        <span class="keyword">let</span> (status, biz_code, message) = <span class="keyword">match</span> <span class="keyword">self</span> &#123;
+            AppError::<span class="title function_ invoke__">BadRequest</span>(message) =&gt; (StatusCode::BAD_REQUEST, <span class="number">40001</span>, message),
+            AppError::<span class="title function_ invoke__">Unauthorized</span>(message) =&gt; (StatusCode::UNAUTHORIZED, <span class="number">40101</span>, message),
+            AppError::<span class="title function_ invoke__">NotFound</span>(message) =&gt; (StatusCode::NOT_FOUND, <span class="number">40401</span>, message),
+            AppError::<span class="title function_ invoke__">Internal</span>(message) =&gt; &#123;
+                (StatusCode::INTERNAL_SERVER_ERROR, <span class="number">50001</span>, message)
+            &#125;
+        &#125;;
+
+        <span class="keyword">let</span> <span class="variable">body</span> = ApiResponse::&lt;()&gt;::<span class="title function_ invoke__">error</span>(biz_code, message);
+        (status, <span class="title function_ invoke__">Json</span>(body)).<span class="title function_ invoke__">into_response</span>()
+    &#125;
+&#125;</code></pre>
+
+<p>这一套设计带来的好处是：</p>
+<ul>
+<li>handler 可以只返回 <code>Result&lt;T, AppError&gt;</code></li>
+<li>HTTP 状态码统一从错误类型推导</li>
+<li>JSON 错误结构统一</li>
+<li>业务错误码统一</li>
+</ul>
+<p>这基本已经是很多项目里很实用的一种中间复杂度方案了。</p>
+<hr>
+<h2 id="九、业务错误和系统错误为什么一定要分层？"><a href="#九、业务错误和系统错误为什么一定要分层？" class="headerlink" title="九、业务错误和系统错误为什么一定要分层？"></a>九、业务错误和系统错误为什么一定要分层？</h2><p>这是很多项目刚开始不重视，后面会越来越痛的点。</p>
+<p>先看两个错误：</p>
+<ol>
+<li>用户不存在</li>
+<li>数据库连接失败</li>
+</ol>
+<p>它们看起来都属于“失败”，但性质完全不同。</p>
+<h3 id="9-1-业务错误"><a href="#9-1-业务错误" class="headerlink" title="9.1 业务错误"></a>9.1 业务错误</h3><p>业务错误通常是：</p>
+<ul>
+<li>可以预期</li>
+<li>属于业务规则的一部分</li>
+<li>经常需要明确返回给客户端</li>
+</ul>
+<p>例如：</p>
+<ul>
+<li>用户不存在</li>
+<li>余额不足</li>
+<li>订单状态不允许取消</li>
+<li>验证码错误</li>
+</ul>
+<p>这类错误通常应该：</p>
+<ul>
+<li>有明确错误语义</li>
+<li>有稳定的业务错误码</li>
+<li>返回可理解的信息</li>
+</ul>
+<h3 id="9-2-系统错误"><a href="#9-2-系统错误" class="headerlink" title="9.2 系统错误"></a>9.2 系统错误</h3><p>系统错误通常是：</p>
+<ul>
+<li>非业务本意</li>
+<li>更多是底层故障或异常</li>
+<li>主要用于日志、排障和监控</li>
+</ul>
+<p>例如：</p>
+<ul>
+<li>数据库超时</li>
+<li>网络故障</li>
+<li>第三方服务异常</li>
+<li>序列化异常</li>
+</ul>
+<p>这类错误通常不适合原样暴露给客户端。</p>
+<p>原因很简单：</p>
+<ul>
+<li>信息不稳定</li>
+<li>容易泄露内部细节</li>
+<li>对客户端通常没有直接帮助</li>
+</ul>
+<p>所以更合理的做法通常是：</p>
+<ul>
+<li>对外返回统一、安全、稳定的错误信息</li>
+<li>对内记录详细日志</li>
+</ul>
+<p>也就是说：</p>
+<blockquote>
+<p>客户端需要的是“可消费的错误语义”，不是你的内部堆栈细节。</p>
+</blockquote>
+<hr>
+<h2 id="十、如何把服务层错误映射到-AppError？"><a href="#十、如何把服务层错误映射到-AppError？" class="headerlink" title="十、如何把服务层错误映射到 AppError？"></a>十、如何把服务层错误映射到 <code>AppError</code>？</h2><p>一个比较清晰的分层通常是这样：</p>
+<ul>
+<li>handler 层：HTTP 入参、HTTP 出参、响应格式</li>
+<li>service 层：业务逻辑、业务错误</li>
+<li>repository 或基础设施层：数据库&#x2F;缓存&#x2F;外部服务调用</li>
+</ul>
+<p>这时错误的映射关系往往会分层发生。</p>
+<p>例如：</p>
+<pre><code class="highlight rust"><span class="keyword">enum</span> <span class="title class_">ServiceError</span> &#123;
+    UserNotFound,
+    <span class="title function_ invoke__">InvalidInput</span>(<span class="type">String</span>),
+    DbError,
+&#125;</code></pre>
+
+<p>然后在 HTTP 层把它转换为 <code>AppError</code>：</p>
+<pre><code class="highlight rust"><span class="keyword">impl</span> <span class="title class_">From</span>&lt;ServiceError&gt; <span class="keyword">for</span> <span class="title class_">AppError</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">from</span>(err: ServiceError) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123;
+        <span class="keyword">match</span> err &#123;
+            ServiceError::UserNotFound =&gt; &#123;
+                AppError::<span class="title function_ invoke__">NotFound</span>(<span class="string">&quot;user not found&quot;</span>.<span class="title function_ invoke__">to_string</span>())
+            &#125;
+            ServiceError::<span class="title function_ invoke__">InvalidInput</span>(message) =&gt; &#123;
+                AppError::<span class="title function_ invoke__">BadRequest</span>(message)
+            &#125;
+            ServiceError::DbError =&gt; &#123;
+                AppError::<span class="title function_ invoke__">Internal</span>(<span class="string">&quot;internal server error&quot;</span>.<span class="title function_ invoke__">to_string</span>())
+            &#125;
+        &#125;
+    &#125;
+&#125;</code></pre>
+
+<p>之后 handler 就可以很自然地写：</p>
+<pre><code class="highlight rust"><span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">get_user</span>() <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;Json&lt;ApiResponse&lt;UserDto&gt;&gt;, AppError&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">user</span> = <span class="title function_ invoke__">user_service_get_user</span>().<span class="keyword">await</span>.<span class="title function_ invoke__">map_err</span>(AppError::from)?;
+    <span class="title function_ invoke__">Ok</span>(<span class="title function_ invoke__">Json</span>(ApiResponse::<span class="title function_ invoke__">success</span>(user)))
+&#125;</code></pre>
+
+<p>这种设计的好处是：</p>
+<ul>
+<li>service 层不需要依赖 HTTP 状态码</li>
+<li>HTTP 层统一决定怎么向客户端表达错误</li>
+<li>业务语义和传输语义被分开了</li>
+</ul>
+<p>这通常比“所有层都直接返回 <code>StatusCode</code>”健康得多。</p>
+<hr>
+<h2 id="十一、一个更接近真实项目的完整示例"><a href="#十一、一个更接近真实项目的完整示例" class="headerlink" title="十一、一个更接近真实项目的完整示例"></a>十一、一个更接近真实项目的完整示例</h2><p>下面给一个相对完整的示例，把统一成功响应、统一错误响应和错误分层串起来。</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+    extract::Path,
+    http::StatusCode,
+    response::&#123;IntoResponse, Response&#125;,
+    routing::get,
+    Json, Router,
+&#125;;
+<span class="keyword">use</span> serde::Serialize;
+
+<span class="meta">#[derive(Serialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">ApiResponse</span>&lt;T&gt; &#123;
+    code: <span class="type">i32</span>,
+    message: <span class="type">String</span>,
+    data: <span class="type">Option</span>&lt;T&gt;,
+&#125;
+
+<span class="keyword">impl</span>&lt;T&gt; ApiResponse&lt;T&gt; &#123;
+    <span class="keyword">fn</span> <span class="title function_">success</span>(data: T) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123;
+        <span class="keyword">Self</span> &#123;
+            code: <span class="number">0</span>,
+            message: <span class="string">&quot;ok&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+            data: <span class="title function_ invoke__">Some</span>(data),
+        &#125;
+    &#125;
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">ApiResponse</span>&lt;()&gt; &#123;
+    <span class="keyword">fn</span> <span class="title function_">error</span>(code: <span class="type">i32</span>, message: <span class="type">String</span>) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123;
+        <span class="keyword">Self</span> &#123;
+            code,
+            message,
+            data: <span class="literal">None</span>,
+        &#125;
+    &#125;
+&#125;
+
+<span class="meta">#[derive(Serialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">UserDto</span> &#123;
+    id: <span class="type">u64</span>,
+    name: <span class="type">String</span>,
+&#125;
+
+<span class="keyword">enum</span> <span class="title class_">ServiceError</span> &#123;
+    UserNotFound,
+    DbError,
+&#125;
+
+<span class="keyword">enum</span> <span class="title class_">AppError</span> &#123;
+    <span class="title function_ invoke__">NotFound</span>(<span class="type">String</span>),
+    <span class="title function_ invoke__">Internal</span>(<span class="type">String</span>),
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">From</span>&lt;ServiceError&gt; <span class="keyword">for</span> <span class="title class_">AppError</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">from</span>(err: ServiceError) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123;
+        <span class="keyword">match</span> err &#123;
+            ServiceError::UserNotFound =&gt; &#123;
+                AppError::<span class="title function_ invoke__">NotFound</span>(<span class="string">&quot;user not found&quot;</span>.<span class="title function_ invoke__">to_string</span>())
+            &#125;
+            ServiceError::DbError =&gt; &#123;
+                AppError::<span class="title function_ invoke__">Internal</span>(<span class="string">&quot;internal server error&quot;</span>.<span class="title function_ invoke__">to_string</span>())
+            &#125;
+        &#125;
+    &#125;
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">IntoResponse</span> <span class="keyword">for</span> <span class="title class_">AppError</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">into_response</span>(<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> Response &#123;
+        <span class="keyword">let</span> (status, code, message) = <span class="keyword">match</span> <span class="keyword">self</span> &#123;
+            AppError::<span class="title function_ invoke__">NotFound</span>(message) =&gt; (StatusCode::NOT_FOUND, <span class="number">40401</span>, message),
+            AppError::<span class="title function_ invoke__">Internal</span>(message) =&gt; &#123;
+                (StatusCode::INTERNAL_SERVER_ERROR, <span class="number">50001</span>, message)
+            &#125;
+        &#125;;
+
+        <span class="keyword">let</span> <span class="variable">body</span> = ApiResponse::&lt;()&gt;::<span class="title function_ invoke__">error</span>(code, message);
+        (status, <span class="title function_ invoke__">Json</span>(body)).<span class="title function_ invoke__">into_response</span>()
+    &#125;
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">user_service_get_user</span>(id: <span class="type">u64</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;UserDto, ServiceError&gt; &#123;
+    <span class="keyword">if</span> id == <span class="number">1</span> &#123;
+        <span class="title function_ invoke__">Ok</span>(UserDto &#123;
+            id: <span class="number">1</span>,
+            name: <span class="string">&quot;chen&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+        &#125;)
+    &#125; <span class="keyword">else</span> &#123;
+        <span class="title function_ invoke__">Err</span>(ServiceError::UserNotFound)
+    &#125;
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">get_user</span>(
+    <span class="title function_ invoke__">Path</span>(id): Path&lt;<span class="type">u64</span>&gt;,
+) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;Json&lt;ApiResponse&lt;UserDto&gt;&gt;, AppError&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">user</span> = <span class="title function_ invoke__">user_service_get_user</span>(id).<span class="keyword">await</span>?;
+    <span class="title function_ invoke__">Ok</span>(<span class="title function_ invoke__">Json</span>(ApiResponse::<span class="title function_ invoke__">success</span>(user)))
+&#125;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">app</span> = Router::<span class="title function_ invoke__">new</span>().<span class="title function_ invoke__">route</span>(<span class="string">&quot;/users/&#123;id&#125;&quot;</span>, <span class="title function_ invoke__">get</span>(get_user));
+
+    <span class="keyword">let</span> <span class="variable">listener</span> = tokio::net::TcpListener::<span class="title function_ invoke__">bind</span>(<span class="string">&quot;0.0.0.0:3000&quot;</span>)
+        .<span class="keyword">await</span>
+        .<span class="title function_ invoke__">unwrap</span>();
+
+    axum::<span class="title function_ invoke__">serve</span>(listener, app).<span class="keyword">await</span>.<span class="title function_ invoke__">unwrap</span>();
+&#125;</code></pre>
+
+<p>这个示例虽然不大，但已经体现了一个很重要的分层思路：</p>
+<ul>
+<li>handler 负责 HTTP 层入口和出口</li>
+<li>service 层负责业务结果</li>
+<li><code>AppError</code> 负责最终对外响应</li>
+</ul>
+<p>这正是很多可维护项目的基础形态。</p>
+<hr>
+<h2 id="十二、哪些错误不该直接暴露给客户端？"><a href="#十二、哪些错误不该直接暴露给客户端？" class="headerlink" title="十二、哪些错误不该直接暴露给客户端？"></a>十二、哪些错误不该直接暴露给客户端？</h2><p>这是实际项目里非常关键的一条线。</p>
+<p>很多底层错误从技术上讲当然可以 <code>to_string()</code> 后直接返回，但工程上通常不应该这么做。</p>
+<p>例如这些信息一般不适合直接暴露：</p>
+<ul>
+<li>数据库表名</li>
+<li>SQL 语句细节</li>
+<li>第三方接口地址</li>
+<li>内部服务拓扑信息</li>
+<li>堆栈细节</li>
+</ul>
+<p>所以像下面这种写法，通常就不太理想：</p>
+<pre><code class="highlight rust"><span class="title function_ invoke__">map_err</span>(|err| AppError::<span class="title function_ invoke__">Internal</span>(err.<span class="title function_ invoke__">to_string</span>()))</code></pre>
+
+<p>不是说永远不能这么写，而是你至少应该意识到：</p>
+<blockquote>
+<p><code>err.to_string()</code> 更适合写日志，不一定适合直接发给客户端。</p>
+</blockquote>
+<p>更稳妥的做法通常是：</p>
+<ul>
+<li>对客户端返回稳定、泛化的错误描述</li>
+<li>对日志记录完整内部错误详情</li>
+</ul>
+<p>例如：</p>
+<pre><code class="highlight rust"><span class="title function_ invoke__">map_err</span>(|err| &#123;
+    tracing::error!(error = %err, <span class="string">&quot;query user failed&quot;</span>);
+    AppError::<span class="title function_ invoke__">Internal</span>(<span class="string">&quot;internal server error&quot;</span>.<span class="title function_ invoke__">to_string</span>())
+&#125;)</code></pre>
+
+<p>这样安全性和排障性都会更好。</p>
+<hr>
+<h2 id="十三、错误处理中最常见的几个坑"><a href="#十三、错误处理中最常见的几个坑" class="headerlink" title="十三、错误处理中最常见的几个坑"></a>十三、错误处理中最常见的几个坑</h2><h3 id="13-1-handler-到处手写-StatusCode-String"><a href="#13-1-handler-到处手写-StatusCode-String" class="headerlink" title="13.1 handler 到处手写 (StatusCode, String)"></a>13.1 handler 到处手写 <code>(StatusCode, String)</code></h3><p>短期快，长期乱。</p>
+<p>一旦接口变多，错误结构会迅速失控。</p>
+<h3 id="13-2-把所有错误都当成-500"><a href="#13-2-把所有错误都当成-500" class="headerlink" title="13.2 把所有错误都当成 500"></a>13.2 把所有错误都当成 500</h3><p>这会让前端失去区分能力，也会让很多本来可预期的业务失败变得模糊。</p>
+<p>例如：</p>
+<ul>
+<li>参数错误应该是 400</li>
+<li>未认证应该是 401</li>
+<li>没权限通常是 403</li>
+<li>资源不存在通常是 404</li>
+<li>冲突通常是 409</li>
+</ul>
+<p>正确使用 4xx 和 5xx，是接口语义的一部分。</p>
+<h3 id="13-3-为了统一结构，把所有失败都返回-200"><a href="#13-3-为了统一结构，把所有失败都返回-200" class="headerlink" title="13.3 为了统一结构，把所有失败都返回 200"></a>13.3 为了统一结构，把所有失败都返回 200</h3><p>这是很多内部系统常见但非常值得警惕的做法。</p>
+<p>这样做的短期理由通常是“前端统一处理方便”，但代价很大：</p>
+<ul>
+<li>HTTP 语义失真</li>
+<li>监控和告警难做</li>
+<li>网关、代理、APM 工具无法正确识别失败</li>
+</ul>
+<p>统一 JSON 结构没有问题，但最好不要牺牲正确的状态码。</p>
+<h3 id="13-4-业务错误和系统错误不分层"><a href="#13-4-业务错误和系统错误不分层" class="headerlink" title="13.4 业务错误和系统错误不分层"></a>13.4 业务错误和系统错误不分层</h3><p>这会导致：</p>
+<ul>
+<li>service 层到处充满 <code>StatusCode</code></li>
+<li>repository 层开始关心 HTTP 语义</li>
+<li>handler 层反而越来越重</li>
+</ul>
+<p>一旦看到底层模块开始直接返回 HTTP 状态码，通常就说明分层边界有点歪了。</p>
+<h3 id="13-5-把内部错误详情直接透传出去"><a href="#13-5-把内部错误详情直接透传出去" class="headerlink" title="13.5 把内部错误详情直接透传出去"></a>13.5 把内部错误详情直接透传出去</h3><p>这既不安全，也不稳定，还会让客户端依赖不该依赖的内部实现细节。</p>
+<hr>
+<h2 id="十四、如何判断你的错误设计是不是健康的？"><a href="#十四、如何判断你的错误设计是不是健康的？" class="headerlink" title="十四、如何判断你的错误设计是不是健康的？"></a>十四、如何判断你的错误设计是不是健康的？</h2><p>我自己会用下面几个问题做快速判断：</p>
+<ol>
+<li>handler 是否只返回少量清晰的响应类型，而不是满屏手写元组</li>
+<li>业务错误是否有明确的枚举或类型模型</li>
+<li>底层错误是否在合适的位置统一映射，而不是到处散落</li>
+<li>对客户端的错误信息是否稳定、安全、可消费</li>
+<li>是否同时保留了正确的 HTTP 状态码和一致的 JSON 结构</li>
+</ol>
+<p>如果这几个问题都能回答得比较稳，那你的错误处理设计通常已经不会太差。</p>
+<hr>
+<h2 id="十五、总结"><a href="#十五、总结" class="headerlink" title="十五、总结"></a>十五、总结</h2><p>axum 的错误处理表面上看像是“返回一个 <code>Result</code> 就行”，但真正有工程价值的部分在于：</p>
+<ul>
+<li>用 <code>IntoResponse</code> 把响应转换逻辑统一起来</li>
+<li>用 <code>AppError</code> 把错误语义收拢起来</li>
+<li>用统一 JSON 结构把接口规范稳定下来</li>
+<li>用分层映射把业务错误和系统错误区分开来</li>
+</ul>
+<p>如果把这篇文章压缩成最重要的几个结论，大概就是：</p>
+<ol>
+<li>axum 里成功和失败最后都会被转换成 HTTP 响应</li>
+<li><code>Result&lt;T, E&gt;</code> 能工作，是因为 <code>T</code> 和 <code>E</code> 都可以实现 <code>IntoResponse</code></li>
+<li><code>AppError</code> 的价值不只是少写代码，而是建立统一错误语义模型</li>
+<li>统一响应结构可以做，但最好不要牺牲正确的 HTTP 状态码</li>
+<li>业务错误和系统错误要分层，不要让每一层都直接依赖 <code>StatusCode</code></li>
+<li>对客户端返回稳定信息，对日志保留详细内部信息，通常是更健康的策略</li>
+</ol>
+<p>如果你已经把前面的中间件、提取器、状态管理看完，那么这一篇会把 axum Web 服务里另一块非常关键的工程能力补上：</p>
+<ul>
+<li>中间件解决横切逻辑</li>
+<li>Extractor 解决输入提取</li>
+<li>State 解决共享依赖</li>
+<li>Error Handling 解决失败路径与响应一致性</li>
+</ul>
+<p>再往后继续写，一个非常自然的方向就是认证与授权，或者进一步往底层讲 axum 与 tower 的关系。因为当输入、状态、错误模型都建立起来之后，整个服务的工程骨架其实已经相当完整了。</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
