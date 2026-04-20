@@ -1,0 +1,657 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust axum 认证与授权实战：从 Token 校验到用户上下文注入</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust axum 认证与授权实战：从 Token 校验到用户上下文注入</h1><div class="time">2026-04-20</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><h2 id="引言"><a href="#引言" class="headerlink" title="引言"></a>引言</h2><p>学 axum 的时候，很多人很快都会写出这样的接口：</p>
+<ul>
+<li><code>GET /ping</code></li>
+<li><code>GET /users/&#123;id&#125;</code></li>
+<li><code>POST /articles</code></li>
+</ul>
+<p>但只要服务开始接近真实业务，另一个问题马上就会出现：</p>
+<blockquote>
+<p>哪些接口可以公开访问，哪些接口必须登录后才能访问？</p>
+</blockquote>
+<p>再往下写，又会碰到第二层问题：</p>
+<blockquote>
+<p>就算用户已经登录了，他是不是一定有权限执行这个操作？</p>
+</blockquote>
+<p>这两个问题看起来接近，但本质并不是一回事：</p>
+<ul>
+<li>认证：你是谁</li>
+<li>授权：你能做什么</li>
+</ul>
+<p>很多项目刚开始时会把它们混在一起处理：</p>
+<ul>
+<li>在 handler 里手动取 <code>Authorization</code></li>
+<li>手动拆 Bearer token</li>
+<li>手动查用户</li>
+<li>再手动判断角色和资源归属</li>
+</ul>
+<p>这种写法当然能跑，但很快就会出现几个问题：</p>
+<ul>
+<li>相同认证逻辑在多个 handler 里重复</li>
+<li>handler 里塞满请求头解析细节</li>
+<li>用户上下文在接口间无法复用</li>
+<li>认证和授权职责边界越来越模糊</li>
+</ul>
+<p>而 axum 恰好很适合把这件事拆干净，因为它本身就已经有很清晰的几层抽象：</p>
+<ul>
+<li>Middleware 负责横切处理</li>
+<li>Extractor 负责准备输入参数</li>
+<li>State 负责提供共享依赖</li>
+<li>handler 负责业务逻辑</li>
+</ul>
+<p>这篇文章我会围绕这条主线，把 axum 里的认证与授权从简单到实战串起来，重点讲清楚下面这些问题：</p>
+<ol>
+<li>认证和授权到底有什么区别</li>
+<li>最基础的基于 Header 的 Token 认证怎么做</li>
+<li>为什么中间件适合做认证前置拦截</li>
+<li>如何把用户上下文挂到请求里，再交给 handler 使用</li>
+<li>JWT 认证流程到底是什么</li>
+<li>为什么“中间件做认证，handler 做授权”通常是更清晰的设计</li>
+</ol>
+<p>如果你已经写过 axum 的中间件、提取器、状态管理和错误处理，这一篇基本就是下一步最自然的实战主题。</p>
+<hr>
+<h2 id="一、先把概念分开：认证不等于授权"><a href="#一、先把概念分开：认证不等于授权" class="headerlink" title="一、先把概念分开：认证不等于授权"></a>一、先把概念分开：认证不等于授权</h2><p>很多人第一次做接口权限控制时，会把认证和授权混成一个词：“鉴权”。</p>
+<p>从工程角度讲，这么说问题不大，但真正写系统时，最好还是把它们区分开。</p>
+<h3 id="1-1-认证是什么？"><a href="#1-1-认证是什么？" class="headerlink" title="1.1 认证是什么？"></a>1.1 认证是什么？</h3><p>认证回答的是：</p>
+<blockquote>
+<p>当前请求背后的用户是谁？</p>
+</blockquote>
+<p>典型例子：</p>
+<ul>
+<li>这个 token 是不是合法的</li>
+<li>这个 token 对应的是哪个用户</li>
+<li>这个用户当前登录态是否有效</li>
+</ul>
+<p>如果用户连身份都不能确认，那通常后面的业务逻辑就不该继续执行。</p>
+<h3 id="1-2-授权是什么？"><a href="#1-2-授权是什么？" class="headerlink" title="1.2 授权是什么？"></a>1.2 授权是什么？</h3><p>授权回答的是：</p>
+<blockquote>
+<p>已经确定身份之后，这个用户是否有权执行当前操作？</p>
+</blockquote>
+<p>典型例子：</p>
+<ul>
+<li>普通用户能不能访问管理后台接口</li>
+<li>当前用户能不能修改这篇文章</li>
+<li>这个租户下的用户能不能读取另一个租户的数据</li>
+</ul>
+<p>所以：</p>
+<ul>
+<li>认证更偏“身份确认”</li>
+<li>授权更偏“权限判断”</li>
+</ul>
+<p>这两个阶段分开以后，设计会清楚很多。</p>
+<hr>
+<h2 id="二、最简单的起点：基于-Header-的-Token-认证"><a href="#二、最简单的起点：基于-Header-的-Token-认证" class="headerlink" title="二、最简单的起点：基于 Header 的 Token 认证"></a>二、最简单的起点：基于 Header 的 Token 认证</h2><p>先不要一上来就讲 JWT，先从最基本的 Bearer Token 开始。</p>
+<p>假设我们约定：</p>
+<ul>
+<li>客户端请求受保护接口时，必须携带 <code>Authorization</code> 头</li>
+<li>格式为 <code>Authorization: Bearer secret-token</code></li>
+<li>服务端校验通过后，才允许继续访问</li>
+</ul>
+<p>最原始的 handler 写法可能会像这样：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+    extract::Request,
+    http::&#123;header::AUTHORIZATION, StatusCode&#125;,
+    response::IntoResponse,
+&#125;;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">profile</span>(request: Request) <span class="punctuation">-&gt;</span> <span class="keyword">impl</span> <span class="title class_">IntoResponse</span> &#123;
+    <span class="keyword">let</span> <span class="variable">auth_header</span> = request
+        .<span class="title function_ invoke__">headers</span>()
+        .<span class="title function_ invoke__">get</span>(AUTHORIZATION)
+        .<span class="title function_ invoke__">and_then</span>(|value| value.<span class="title function_ invoke__">to_str</span>().<span class="title function_ invoke__">ok</span>());
+
+    <span class="keyword">match</span> auth_header &#123;
+        <span class="title function_ invoke__">Some</span>(<span class="string">&quot;Bearer secret-token&quot;</span>) =&gt; <span class="string">&quot;ok&quot;</span>,
+        _ =&gt; (StatusCode::UNAUTHORIZED, <span class="string">&quot;unauthorized&quot;</span>).<span class="title function_ invoke__">into_response</span>(),
+    &#125;
+&#125;</code></pre>
+
+<p>这段代码当然可以工作，但问题也很明显：</p>
+<ul>
+<li>每个受保护接口都要重复写这段解析逻辑</li>
+<li>handler 被 HTTP 头部细节污染</li>
+<li>后续一旦 token 校验逻辑变复杂，代码会迅速膨胀</li>
+</ul>
+<p>所以这种写法只适合帮助理解，不适合长期维护。</p>
+<hr>
+<h2 id="三、为什么认证更适合放在-Middleware？"><a href="#三、为什么认证更适合放在-Middleware？" class="headerlink" title="三、为什么认证更适合放在 Middleware？"></a>三、为什么认证更适合放在 Middleware？</h2><p>只要一个逻辑具备下面这些特征，它通常就很适合放在中间件里：</p>
+<ul>
+<li>作用于一组路由，而不是某一个 handler</li>
+<li>属于横切逻辑</li>
+<li>在业务处理前就应该决定是否放行</li>
+</ul>
+<p>认证正好非常符合这几个特征。</p>
+<p>因为对受保护接口来说，认证通常是一道前置门槛：</p>
+<ul>
+<li>token 合法，继续往下走</li>
+<li>token 不合法，直接返回 401</li>
+</ul>
+<p>这和日志、超时、请求 ID 注入非常像，都是“包在 handler 外面的一层处理”。</p>
+<p>所以很自然的设计就是：</p>
+<blockquote>
+<p>中间件负责认证前置拦截。</p>
+</blockquote>
+<p>但这里有个关键点：</p>
+<blockquote>
+<p>中间件不仅可以拦截失败请求，还可以把认证后的用户上下文继续传给后面的 handler。</p>
+</blockquote>
+<p>这才是它真正有工程价值的地方。</p>
+<hr>
+<h2 id="四、先写一个最简单的认证中间件"><a href="#四、先写一个最简单的认证中间件" class="headerlink" title="四、先写一个最简单的认证中间件"></a>四、先写一个最简单的认证中间件</h2><p>下面先写一个最基础、可运行、便于理解的版本。</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+    extract::Request,
+    http::&#123;header::AUTHORIZATION, StatusCode&#125;,
+    middleware::Next,
+    response::&#123;IntoResponse, Response&#125;,
+&#125;;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">auth_middleware</span>(request: Request, next: Next) <span class="punctuation">-&gt;</span> Response &#123;
+    <span class="keyword">let</span> <span class="variable">auth_header</span> = request
+        .<span class="title function_ invoke__">headers</span>()
+        .<span class="title function_ invoke__">get</span>(AUTHORIZATION)
+        .<span class="title function_ invoke__">and_then</span>(|value| value.<span class="title function_ invoke__">to_str</span>().<span class="title function_ invoke__">ok</span>());
+
+    <span class="keyword">match</span> auth_header &#123;
+        <span class="title function_ invoke__">Some</span>(<span class="string">&quot;Bearer secret-token&quot;</span>) =&gt; next.<span class="title function_ invoke__">run</span>(request).<span class="keyword">await</span>,
+        _ =&gt; (StatusCode::UNAUTHORIZED, <span class="string">&quot;unauthorized&quot;</span>).<span class="title function_ invoke__">into_response</span>(),
+    &#125;
+&#125;</code></pre>
+
+<p>然后把它挂到受保护路由上：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;middleware, routing::get, Router&#125;;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">ping</span>() <span class="punctuation">-&gt;</span> &amp;<span class="symbol">&#x27;static</span> <span class="type">str</span> &#123;
+    <span class="string">&quot;pong&quot;</span>
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">profile</span>() <span class="punctuation">-&gt;</span> &amp;<span class="symbol">&#x27;static</span> <span class="type">str</span> &#123;
+    <span class="string">&quot;private profile&quot;</span>
+&#125;
+
+<span class="keyword">let</span> <span class="variable">app</span> = Router::<span class="title function_ invoke__">new</span>()
+    .<span class="title function_ invoke__">route</span>(<span class="string">&quot;/ping&quot;</span>, <span class="title function_ invoke__">get</span>(ping))
+    .<span class="title function_ invoke__">route</span>(<span class="string">&quot;/profile&quot;</span>, <span class="title function_ invoke__">get</span>(profile).<span class="title function_ invoke__">route_layer</span>(middleware::<span class="title function_ invoke__">from_fn</span>(auth_middleware)));</code></pre>
+
+<p>这个版本已经能满足最基本的需求：</p>
+<ul>
+<li><code>GET /ping</code> 可公开访问</li>
+<li><code>GET /profile</code> 需要带合法 token</li>
+</ul>
+<p>但它还缺一个很重要的能力：</p>
+<blockquote>
+<p>handler 还不知道“当前用户是谁”。</p>
+</blockquote>
+<p>也就是说，中间件虽然做了放行判断，但还没有把认证结果传递下去。</p>
+<hr>
+<h2 id="五、认证的真正价值：把用户上下文传给-handler"><a href="#五、认证的真正价值：把用户上下文传给-handler" class="headerlink" title="五、认证的真正价值：把用户上下文传给 handler"></a>五、认证的真正价值：把用户上下文传给 handler</h2><p>在真实业务里，接口往往不只是要知道“有没有登录”，还要知道：</p>
+<ul>
+<li>当前用户 ID 是多少</li>
+<li>当前用户名是什么</li>
+<li>当前角色是什么</li>
+<li>当前租户是什么</li>
+</ul>
+<p>这些信息可以统称为：</p>
+<blockquote>
+<p>用户上下文。</p>
+</blockquote>
+<p>在 axum 里，一个很自然的做法是：</p>
+<ol>
+<li>中间件校验 token</li>
+<li>解析出用户信息</li>
+<li>把用户信息写入 request extensions</li>
+<li>handler 再通过 Extractor 取出来</li>
+</ol>
+<p>这正好把 Middleware 和 Extractor 的职责衔接起来了。</p>
+<hr>
+<h2 id="六、把认证用户写入-request-extensions"><a href="#六、把认证用户写入-request-extensions" class="headerlink" title="六、把认证用户写入 request extensions"></a>六、把认证用户写入 request extensions</h2><p>先定义一个用户上下文类型：</p>
+<pre><code class="highlight rust"><span class="meta">#[derive(Debug, Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">CurrentUser</span> &#123;
+    user_id: <span class="type">u64</span>,
+    username: <span class="type">String</span>,
+    role: <span class="type">String</span>,
+&#125;</code></pre>
+
+<p>然后在中间件里校验 token，并把用户写入请求扩展：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+    extract::Request,
+    http::&#123;header::AUTHORIZATION, StatusCode&#125;,
+    middleware::Next,
+    response::&#123;IntoResponse, Response&#125;,
+&#125;;
+
+<span class="meta">#[derive(Debug, Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">CurrentUser</span> &#123;
+    user_id: <span class="type">u64</span>,
+    username: <span class="type">String</span>,
+    role: <span class="type">String</span>,
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">auth_middleware</span>(<span class="keyword">mut</span> request: Request, next: Next) <span class="punctuation">-&gt;</span> Response &#123;
+    <span class="keyword">let</span> <span class="variable">auth_header</span> = request
+        .<span class="title function_ invoke__">headers</span>()
+        .<span class="title function_ invoke__">get</span>(AUTHORIZATION)
+        .<span class="title function_ invoke__">and_then</span>(|value| value.<span class="title function_ invoke__">to_str</span>().<span class="title function_ invoke__">ok</span>());
+
+    <span class="keyword">let</span> <span class="variable">user</span> = <span class="keyword">match</span> auth_header &#123;
+        <span class="title function_ invoke__">Some</span>(<span class="string">&quot;Bearer admin-token&quot;</span>) =&gt; CurrentUser &#123;
+            user_id: <span class="number">1</span>,
+            username: <span class="string">&quot;admin&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+            role: <span class="string">&quot;admin&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+        &#125;,
+        <span class="title function_ invoke__">Some</span>(<span class="string">&quot;Bearer user-token&quot;</span>) =&gt; CurrentUser &#123;
+            user_id: <span class="number">2</span>,
+            username: <span class="string">&quot;alice&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+            role: <span class="string">&quot;user&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+        &#125;,
+        _ =&gt; <span class="title function_ invoke__">return</span> (StatusCode::UNAUTHORIZED, <span class="string">&quot;unauthorized&quot;</span>).<span class="title function_ invoke__">into_response</span>(),
+    &#125;;
+
+    request.<span class="title function_ invoke__">extensions_mut</span>().<span class="title function_ invoke__">insert</span>(user);
+    next.<span class="title function_ invoke__">run</span>(request).<span class="keyword">await</span>
+&#125;</code></pre>
+
+<p>这一步的意义非常大，因为它把认证结果正式变成了请求上下文的一部分。</p>
+<p>接下来，后面的处理层就不需要再重新解析一遍 token 了。</p>
+<hr>
+<h2 id="七、用自定义-Extractor-拿到当前用户"><a href="#七、用自定义-Extractor-拿到当前用户" class="headerlink" title="七、用自定义 Extractor 拿到当前用户"></a>七、用自定义 Extractor 拿到当前用户</h2><p>如果 handler 每次都手动从 extensions 里取 <code>CurrentUser</code>，虽然比自己解析 token 好一些，但还是不够优雅。</p>
+<p>更自然的方式是给 <code>CurrentUser</code> 实现自定义 Extractor。</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+    extract::FromRequestParts,
+    http::&#123;request::Parts, StatusCode&#125;,
+&#125;;
+
+<span class="meta">#[derive(Debug, Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">CurrentUser</span> &#123;
+    user_id: <span class="type">u64</span>,
+    username: <span class="type">String</span>,
+    role: <span class="type">String</span>,
+&#125;
+
+<span class="keyword">impl</span>&lt;S&gt; FromRequestParts&lt;S&gt; <span class="keyword">for</span> <span class="title class_">CurrentUser</span>
+<span class="keyword">where</span>
+    S: <span class="built_in">Send</span> + <span class="built_in">Sync</span>,
+&#123;
+    <span class="keyword">type</span> <span class="title class_">Rejection</span> = (StatusCode, <span class="type">String</span>);
+
+    <span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">from_request_parts</span>(
+        parts: &amp;<span class="keyword">mut</span> Parts,
+        _state: &amp;S,
+    ) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="keyword">Self</span>, <span class="keyword">Self</span>::Rejection&gt; &#123;
+        parts
+            .extensions
+            .get::&lt;CurrentUser&gt;()
+            .<span class="title function_ invoke__">cloned</span>()
+            .<span class="title function_ invoke__">ok_or</span>((StatusCode::UNAUTHORIZED, <span class="string">&quot;missing current user&quot;</span>.<span class="title function_ invoke__">to_string</span>()))
+    &#125;
+&#125;</code></pre>
+
+<p>之后 handler 就可以直接这么写：</p>
+<pre><code class="highlight rust"><span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">profile</span>(user: CurrentUser) <span class="punctuation">-&gt;</span> <span class="type">String</span> &#123;
+    <span class="built_in">format!</span>(<span class="string">&quot;hello &#123;&#125;, your id is &#123;&#125;&quot;</span>, user.username, user.user_id)
+&#125;</code></pre>
+
+<p>这里的好处非常明显：</p>
+<ul>
+<li>handler 参数语义清晰</li>
+<li>handler 不需要关心用户是从 header 还是 extensions 来的</li>
+<li>用户上下文成为可复用输入能力</li>
+</ul>
+<p>这也是前面几篇里一直在强调的设计方向：</p>
+<ul>
+<li>Middleware 负责横切处理</li>
+<li>Extractor 负责输入准备</li>
+</ul>
+<p>认证和用户上下文注入，正好是它们配合得最自然的一个场景。</p>
+<hr>
+<h2 id="八、一个完整一点的认证示例"><a href="#八、一个完整一点的认证示例" class="headerlink" title="八、一个完整一点的认证示例"></a>八、一个完整一点的认证示例</h2><p>下面给一个把路由、中间件、自定义 Extractor 串起来的完整示例。</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+    extract::&#123;FromRequestParts, Request&#125;,
+    http::&#123;header::AUTHORIZATION, request::Parts, StatusCode&#125;,
+    middleware::&#123;<span class="keyword">self</span>, Next&#125;,
+    response::&#123;IntoResponse, Response&#125;,
+    routing::get,
+    Router,
+&#125;;
+
+<span class="meta">#[derive(Debug, Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">CurrentUser</span> &#123;
+    user_id: <span class="type">u64</span>,
+    username: <span class="type">String</span>,
+    role: <span class="type">String</span>,
+&#125;
+
+<span class="keyword">impl</span>&lt;S&gt; FromRequestParts&lt;S&gt; <span class="keyword">for</span> <span class="title class_">CurrentUser</span>
+<span class="keyword">where</span>
+    S: <span class="built_in">Send</span> + <span class="built_in">Sync</span>,
+&#123;
+    <span class="keyword">type</span> <span class="title class_">Rejection</span> = (StatusCode, <span class="type">String</span>);
+
+    <span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">from_request_parts</span>(
+        parts: &amp;<span class="keyword">mut</span> Parts,
+        _state: &amp;S,
+    ) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="keyword">Self</span>, <span class="keyword">Self</span>::Rejection&gt; &#123;
+        parts
+            .extensions
+            .get::&lt;CurrentUser&gt;()
+            .<span class="title function_ invoke__">cloned</span>()
+            .<span class="title function_ invoke__">ok_or</span>((StatusCode::UNAUTHORIZED, <span class="string">&quot;missing current user&quot;</span>.<span class="title function_ invoke__">to_string</span>()))
+    &#125;
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">auth_middleware</span>(<span class="keyword">mut</span> request: Request, next: Next) <span class="punctuation">-&gt;</span> Response &#123;
+    <span class="keyword">let</span> <span class="variable">auth_header</span> = request
+        .<span class="title function_ invoke__">headers</span>()
+        .<span class="title function_ invoke__">get</span>(AUTHORIZATION)
+        .<span class="title function_ invoke__">and_then</span>(|value| value.<span class="title function_ invoke__">to_str</span>().<span class="title function_ invoke__">ok</span>());
+
+    <span class="keyword">let</span> <span class="variable">user</span> = <span class="keyword">match</span> auth_header &#123;
+        <span class="title function_ invoke__">Some</span>(<span class="string">&quot;Bearer admin-token&quot;</span>) =&gt; CurrentUser &#123;
+            user_id: <span class="number">1</span>,
+            username: <span class="string">&quot;admin&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+            role: <span class="string">&quot;admin&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+        &#125;,
+        <span class="title function_ invoke__">Some</span>(<span class="string">&quot;Bearer user-token&quot;</span>) =&gt; CurrentUser &#123;
+            user_id: <span class="number">2</span>,
+            username: <span class="string">&quot;alice&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+            role: <span class="string">&quot;user&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+        &#125;,
+        _ =&gt; <span class="title function_ invoke__">return</span> (StatusCode::UNAUTHORIZED, <span class="string">&quot;unauthorized&quot;</span>).<span class="title function_ invoke__">into_response</span>(),
+    &#125;;
+
+    request.<span class="title function_ invoke__">extensions_mut</span>().<span class="title function_ invoke__">insert</span>(user);
+    next.<span class="title function_ invoke__">run</span>(request).<span class="keyword">await</span>
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">ping</span>() <span class="punctuation">-&gt;</span> &amp;<span class="symbol">&#x27;static</span> <span class="type">str</span> &#123;
+    <span class="string">&quot;pong&quot;</span>
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">profile</span>(user: CurrentUser) <span class="punctuation">-&gt;</span> <span class="type">String</span> &#123;
+    <span class="built_in">format!</span>(<span class="string">&quot;profile of &#123;&#125;&quot;</span>, user.username)
+&#125;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">app</span> = Router::<span class="title function_ invoke__">new</span>()
+        .<span class="title function_ invoke__">route</span>(<span class="string">&quot;/ping&quot;</span>, <span class="title function_ invoke__">get</span>(ping))
+        .<span class="title function_ invoke__">route</span>(
+            <span class="string">&quot;/profile&quot;</span>,
+            <span class="title function_ invoke__">get</span>(profile).<span class="title function_ invoke__">route_layer</span>(middleware::<span class="title function_ invoke__">from_fn</span>(auth_middleware)),
+        );
+
+    <span class="keyword">let</span> <span class="variable">listener</span> = tokio::net::TcpListener::<span class="title function_ invoke__">bind</span>(<span class="string">&quot;0.0.0.0:3000&quot;</span>)
+        .<span class="keyword">await</span>
+        .<span class="title function_ invoke__">unwrap</span>();
+
+    axum::<span class="title function_ invoke__">serve</span>(listener, app).<span class="keyword">await</span>.<span class="title function_ invoke__">unwrap</span>();
+&#125;</code></pre>
+
+<p>这个例子已经很接近很多项目的基础认证框架了。</p>
+<hr>
+<h2 id="九、JWT-到底是什么，认证流程怎么走？"><a href="#九、JWT-到底是什么，认证流程怎么走？" class="headerlink" title="九、JWT 到底是什么，认证流程怎么走？"></a>九、JWT 到底是什么，认证流程怎么走？</h2><p>讲到这里，就可以把视角从“固定 token”扩展到更常见的 JWT 方案了。</p>
+<p>先说结论：</p>
+<blockquote>
+<p>JWT 不是权限系统本身，而是一种用来携带身份声明的令牌格式。</p>
+</blockquote>
+<p>它通常会携带一些声明信息，例如：</p>
+<ul>
+<li>用户 ID</li>
+<li>用户名</li>
+<li>角色</li>
+<li>过期时间</li>
+<li>签发时间</li>
+</ul>
+<p>一个典型的 JWT 认证流程通常是这样：</p>
+<ol>
+<li>用户登录成功</li>
+<li>服务端签发 JWT</li>
+<li>客户端在后续请求里携带 JWT</li>
+<li>中间件验证 JWT 签名和过期时间</li>
+<li>解析出 claims，构造当前用户上下文</li>
+<li>把用户上下文写入 request extensions</li>
+<li>handler 使用 <code>CurrentUser</code> 继续业务逻辑</li>
+</ol>
+<p>所以从设计上看，JWT 并不会改变前面那套结构，它只是把“如何从 token 里得到用户身份”这一环替换得更真实了。</p>
+<hr>
+<h2 id="十、一个简化版的-JWT-认证示例"><a href="#十、一个简化版的-JWT-认证示例" class="headerlink" title="十、一个简化版的 JWT 认证示例"></a>十、一个简化版的 JWT 认证示例</h2><p>下面给一个示意性例子，重点看结构，不纠结具体库细节。</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+    extract::Request,
+    http::&#123;header::AUTHORIZATION, StatusCode&#125;,
+    middleware::Next,
+    response::&#123;IntoResponse, Response&#125;,
+&#125;;
+<span class="keyword">use</span> serde::&#123;Deserialize, Serialize&#125;;
+
+<span class="meta">#[derive(Debug, Serialize, Deserialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">Claims</span> &#123;
+    sub: <span class="type">u64</span>,
+    username: <span class="type">String</span>,
+    role: <span class="type">String</span>,
+    exp: <span class="type">usize</span>,
+&#125;
+
+<span class="meta">#[derive(Debug, Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">CurrentUser</span> &#123;
+    user_id: <span class="type">u64</span>,
+    username: <span class="type">String</span>,
+    role: <span class="type">String</span>,
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">jwt_auth_middleware</span>(<span class="keyword">mut</span> request: Request, next: Next) <span class="punctuation">-&gt;</span> Response &#123;
+    <span class="keyword">let</span> <span class="variable">auth_header</span> = request
+        .<span class="title function_ invoke__">headers</span>()
+        .<span class="title function_ invoke__">get</span>(AUTHORIZATION)
+        .<span class="title function_ invoke__">and_then</span>(|value| value.<span class="title function_ invoke__">to_str</span>().<span class="title function_ invoke__">ok</span>());
+
+    <span class="keyword">let</span> <span class="variable">token</span> = <span class="keyword">match</span> auth_header.<span class="title function_ invoke__">and_then</span>(|value| value.<span class="title function_ invoke__">strip_prefix</span>(<span class="string">&quot;Bearer &quot;</span>)) &#123;
+        <span class="title function_ invoke__">Some</span>(token) =&gt; token,
+        <span class="literal">None</span> =&gt; <span class="title function_ invoke__">return</span> (StatusCode::UNAUTHORIZED, <span class="string">&quot;missing bearer token&quot;</span>).<span class="title function_ invoke__">into_response</span>(),
+    &#125;;
+
+    <span class="keyword">let</span> <span class="variable">claims</span> = <span class="keyword">match</span> <span class="title function_ invoke__">decode_jwt</span>(token) &#123;
+        <span class="title function_ invoke__">Ok</span>(claims) =&gt; claims,
+        <span class="title function_ invoke__">Err</span>(_) =&gt; <span class="title function_ invoke__">return</span> (StatusCode::UNAUTHORIZED, <span class="string">&quot;invalid token&quot;</span>).<span class="title function_ invoke__">into_response</span>(),
+    &#125;;
+
+    <span class="keyword">let</span> <span class="variable">user</span> = CurrentUser &#123;
+        user_id: claims.sub,
+        username: claims.username,
+        role: claims.role,
+    &#125;;
+
+    request.<span class="title function_ invoke__">extensions_mut</span>().<span class="title function_ invoke__">insert</span>(user);
+    next.<span class="title function_ invoke__">run</span>(request).<span class="keyword">await</span>
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">decode_jwt</span>(_token: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;Claims, ()&gt; &#123;
+    <span class="title function_ invoke__">Ok</span>(Claims &#123;
+        sub: <span class="number">1</span>,
+        username: <span class="string">&quot;admin&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+        role: <span class="string">&quot;admin&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+        exp: <span class="number">9999999999</span>,
+    &#125;)
+&#125;</code></pre>
+
+<p>从结构上看，它和前面的固定 token 示例没有本质区别，区别只在于：</p>
+<ul>
+<li>前面是把 token 和用户手工映射</li>
+<li>这里是通过 JWT 解析 claims</li>
+</ul>
+<p>也就是说，JWT 方案和 axum 的 Middleware + Extractor 设计是天然兼容的。</p>
+<hr>
+<h2 id="十一、为什么说“中间件做认证，handler-做授权”通常更清晰？"><a href="#十一、为什么说“中间件做认证，handler-做授权”通常更清晰？" class="headerlink" title="十一、为什么说“中间件做认证，handler 做授权”通常更清晰？"></a>十一、为什么说“中间件做认证，handler 做授权”通常更清晰？</h2><p>这可能是整篇文章里最值得记住的一句话。</p>
+<p>原因在于，认证和授权的职责天然不同。</p>
+<h3 id="11-1-中间件适合做认证"><a href="#11-1-中间件适合做认证" class="headerlink" title="11.1 中间件适合做认证"></a>11.1 中间件适合做认证</h3><p>因为认证往往是通用前置逻辑：</p>
+<ul>
+<li>有没有 token</li>
+<li>token 合不合法</li>
+<li>登录态是否有效</li>
+<li>用户身份能不能被确认</li>
+</ul>
+<p>这些逻辑通常在进入业务 handler 之前就应该统一完成。</p>
+<h3 id="11-2-handler-更适合做授权"><a href="#11-2-handler-更适合做授权" class="headerlink" title="11.2 handler 更适合做授权"></a>11.2 handler 更适合做授权</h3><p>因为授权往往依赖具体业务上下文：</p>
+<ul>
+<li>当前用户能不能修改这篇文章</li>
+<li>当前用户是不是管理员</li>
+<li>当前用户是不是资源所有者</li>
+<li>当前租户是否匹配</li>
+</ul>
+<p>这些判断通常离不开：</p>
+<ul>
+<li>路径参数</li>
+<li>数据库查询结果</li>
+<li>当前资源状态</li>
+</ul>
+<p>而这些信息恰恰更适合在 handler 或 service 层里决定。</p>
+<p>所以更清楚的分工通常是：</p>
+<ul>
+<li>中间件负责把“用户是谁”先确认下来</li>
+<li>handler 或 service 负责判断“这个用户能不能干这件事”</li>
+</ul>
+<p>这就是为什么很多项目里，不建议把所有权限逻辑都塞进中间件。</p>
+<hr>
+<h2 id="十二、一个授权判断的实际例子"><a href="#十二、一个授权判断的实际例子" class="headerlink" title="十二、一个授权判断的实际例子"></a>十二、一个授权判断的实际例子</h2><p>假设有一个接口：</p>
+<ul>
+<li><code>PATCH /articles/&#123;id&#125;</code></li>
+</ul>
+<p>业务规则是：</p>
+<ul>
+<li>管理员可以修改任何文章</li>
+<li>普通用户只能修改自己的文章</li>
+</ul>
+<p>这种场景就非常适合在 handler 或 service 层做授权判断。</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;extract::Path, http::StatusCode&#125;;
+
+<span class="meta">#[derive(Debug, Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">CurrentUser</span> &#123;
+    user_id: <span class="type">u64</span>,
+    username: <span class="type">String</span>,
+    role: <span class="type">String</span>,
+&#125;
+
+<span class="keyword">struct</span> <span class="title class_">Article</span> &#123;
+    id: <span class="type">u64</span>,
+    author_id: <span class="type">u64</span>,
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">update_article</span>(
+    user: CurrentUser,
+    <span class="title function_ invoke__">Path</span>(article_id): Path&lt;<span class="type">u64</span>&gt;,
+) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="type">String</span>, (StatusCode, <span class="type">String</span>)&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">article</span> = <span class="title function_ invoke__">find_article</span>(article_id).<span class="keyword">await</span>;
+
+    <span class="keyword">if</span> user.role != <span class="string">&quot;admin&quot;</span> &amp;&amp; user.user_id != article.author_id &#123;
+        <span class="keyword">return</span> <span class="title function_ invoke__">Err</span>((StatusCode::FORBIDDEN, <span class="string">&quot;forbidden&quot;</span>.<span class="title function_ invoke__">to_string</span>()));
+    &#125;
+
+    <span class="title function_ invoke__">Ok</span>(<span class="built_in">format!</span>(<span class="string">&quot;article &#123;&#125; updated&quot;</span>, article.id))
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">find_article</span>(article_id: <span class="type">u64</span>) <span class="punctuation">-&gt;</span> Article &#123;
+    Article &#123;
+        id: article_id,
+        author_id: <span class="number">2</span>,
+    &#125;
+&#125;</code></pre>
+
+<p>这里的判断为什么适合放在 handler 或 service，而不是中间件？</p>
+<p>因为它依赖当前资源本身：</p>
+<ul>
+<li>文章作者是谁</li>
+<li>当前用户是不是资源所有者</li>
+</ul>
+<p>这已经不是纯认证逻辑了，而是典型授权逻辑。</p>
+<hr>
+<h2 id="十三、真实项目里认证与授权通常怎么分层？"><a href="#十三、真实项目里认证与授权通常怎么分层？" class="headerlink" title="十三、真实项目里认证与授权通常怎么分层？"></a>十三、真实项目里认证与授权通常怎么分层？</h2><p>一个比较清晰、也比较常见的设计可以是这样：</p>
+<h3 id="13-1-Middleware-层"><a href="#13-1-Middleware-层" class="headerlink" title="13.1 Middleware 层"></a>13.1 Middleware 层</h3><p>负责：</p>
+<ul>
+<li>提取 <code>Authorization</code></li>
+<li>校验 token &#x2F; JWT</li>
+<li>解析当前用户身份</li>
+<li>把用户上下文写入 request extensions</li>
+</ul>
+<h3 id="13-2-Extractor-层"><a href="#13-2-Extractor-层" class="headerlink" title="13.2 Extractor 层"></a>13.2 Extractor 层</h3><p>负责：</p>
+<ul>
+<li>从 request extensions 取出 <code>CurrentUser</code></li>
+<li>给 handler 提供语义明确的参数输入</li>
+</ul>
+<h3 id="13-3-Handler-Service-层"><a href="#13-3-Handler-Service-层" class="headerlink" title="13.3 Handler &#x2F; Service 层"></a>13.3 Handler &#x2F; Service 层</h3><p>负责：</p>
+<ul>
+<li>根据当前用户和业务资源做授权判断</li>
+<li>返回业务结果或业务错误</li>
+</ul>
+<p>这套分层的好处是：</p>
+<ul>
+<li>横切认证逻辑可复用</li>
+<li>handler 参数干净</li>
+<li>权限规则更贴近业务语义</li>
+<li>后续改 token 方案时，不会牵扯所有 handler</li>
+</ul>
+<hr>
+<h2 id="十四、认证与授权里最常见的几个坑"><a href="#十四、认证与授权里最常见的几个坑" class="headerlink" title="十四、认证与授权里最常见的几个坑"></a>十四、认证与授权里最常见的几个坑</h2><h3 id="14-1-在每个-handler-里手动解析-Authorization"><a href="#14-1-在每个-handler-里手动解析-Authorization" class="headerlink" title="14.1 在每个 handler 里手动解析 Authorization"></a>14.1 在每个 handler 里手动解析 <code>Authorization</code></h3><p>这是最常见、也最该尽早摆脱的写法。</p>
+<p>短期快，长期几乎必乱。</p>
+<h3 id="14-2-把所有权限判断都塞进中间件"><a href="#14-2-把所有权限判断都塞进中间件" class="headerlink" title="14.2 把所有权限判断都塞进中间件"></a>14.2 把所有权限判断都塞进中间件</h3><p>认证适合中间件，授权未必。</p>
+<p>如果某个判断依赖：</p>
+<ul>
+<li>当前资源</li>
+<li>数据库查询</li>
+<li>业务状态</li>
+</ul>
+<p>那它通常更适合留在 handler 或 service 层。</p>
+<h3 id="14-3-只判断“是否登录”，不区分角色和资源归属"><a href="#14-3-只判断“是否登录”，不区分角色和资源归属" class="headerlink" title="14.3 只判断“是否登录”，不区分角色和资源归属"></a>14.3 只判断“是否登录”，不区分角色和资源归属</h3><p>很多系统刚开始只做了 401 控制，但真正的权限问题往往发生在已经登录之后。</p>
+<p>也就是说：</p>
+<ul>
+<li>认证解决“是不是你”</li>
+<li>授权解决“是不是轮到你”</li>
+</ul>
+<p>两者都要有。</p>
+<h3 id="14-4-把用户上下文放进全局-AppState"><a href="#14-4-把用户上下文放进全局-AppState" class="headerlink" title="14.4 把用户上下文放进全局 AppState"></a>14.4 把用户上下文放进全局 <code>AppState</code></h3><p>这是不合适的。</p>
+<p>当前用户属于请求级上下文，不属于应用级共享状态。</p>
+<p>它应该存在于：</p>
+<ul>
+<li>request extensions</li>
+<li>自定义 Extractor</li>
+</ul>
+<p>而不是全局状态。</p>
+<h3 id="14-5-JWT-校验通过就等于权限通过"><a href="#14-5-JWT-校验通过就等于权限通过" class="headerlink" title="14.5 JWT 校验通过就等于权限通过"></a>14.5 JWT 校验通过就等于权限通过</h3><p>这也是一个很常见的误区。</p>
+<p>JWT 只说明：</p>
+<ul>
+<li>token 合法</li>
+<li>身份可信</li>
+</ul>
+<p>但并不自动说明：</p>
+<ul>
+<li>当前用户可以修改这篇文章</li>
+<li>当前用户可以操作这个租户的数据</li>
+<li>当前用户可以调用管理员接口</li>
+</ul>
+<p>所以 JWT 通过只是认证成功，不是授权完成。</p>
+<hr>
+<h2 id="十五、总结"><a href="#十五、总结" class="headerlink" title="十五、总结"></a>十五、总结</h2><p>axum 的认证与授权之所以适合写得比较清楚，不是因为它内置了某套“权限框架”，而是因为它本身的抽象层次已经很适合拆分职责：</p>
+<ul>
+<li>Middleware 处理横切前置逻辑</li>
+<li>Extractor 提供语义明确的输入参数</li>
+<li>Handler &#x2F; Service 处理业务权限判断</li>
+</ul>
+<p>如果把这篇文章压缩成最关键的几个结论，大概就是这些：</p>
+<ol>
+<li>认证和授权不是一回事，认证是确认身份，授权是判断权限</li>
+<li>基于 Header 的 Token 校验是最简单的认证起点</li>
+<li>中间件非常适合做认证前置拦截</li>
+<li>认证后的用户上下文应该通过 request extensions 传递</li>
+<li>自定义 Extractor 可以把 <code>CurrentUser</code> 变成清晰的 handler 参数</li>
+<li>JWT 不会改变整体结构，它只是更真实的 token 载体</li>
+<li>中间件做认证，handler 或 service 做授权，通常是更稳妥的职责划分</li>
+</ol>
+<p>如果你已经把前面的中间件、提取器、状态管理、错误处理都串起来，那么这一篇其实把 axum Web 服务里非常关键的一条业务主线也补上了：</p>
+<ul>
+<li>中间件负责拦截与上下文注入</li>
+<li>Extractor 负责把上下文变成参数</li>
+<li>Handler &#x2F; Service 负责基于上下文执行业务规则</li>
+</ul>
+<p>再往后继续写，一个非常自然的方向就是 axum 与 tower 的关系。因为当你已经理解中间件、提取器、状态、错误、认证这些能力之后，再回头看底层的 <code>Layer</code> 和 <code>Service</code>，很多之前看起来抽象的设计就会变得非常具体。</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
