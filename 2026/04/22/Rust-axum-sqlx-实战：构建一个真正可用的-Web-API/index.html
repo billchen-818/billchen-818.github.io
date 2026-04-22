@@ -1,0 +1,664 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust axum + sqlx 实战：构建一个真正可用的 Web API</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust axum + sqlx 实战：构建一个真正可用的 Web API</h1><div class="time">2026-04-22</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><h2 id="引言"><a href="#引言" class="headerlink" title="引言"></a>引言</h2><p>学 axum 的时候，很多人很快能把路由、提取器、中间件写起来；学 sqlx 的时候，也能很快跑通数据库连接和基本查询。</p>
+<p>但只要一到真正做 Web API，问题立刻就不再是“某个单点 API 会不会用”，而是：</p>
+<blockquote>
+<p>axum 和 sqlx 到底应该怎么一起组织，才能写出一个像样的服务？</p>
+</blockquote>
+<p>例如这些问题，几乎每个项目都会碰到：</p>
+<ul>
+<li>数据库连接池应该怎么注入到 handler</li>
+<li>handler 能不能直接写 SQL</li>
+<li>service、repository 要不要分层</li>
+<li>事务应该放在哪一层处理</li>
+<li>查询失败、资源不存在、参数非法应该怎么映射成 HTTP 错误</li>
+<li>如何避免 <code>main.rs</code> 越写越大</li>
+</ul>
+<p>如果这些问题没有设计好，项目通常很快会滑向两个极端：</p>
+<ul>
+<li>要么为了快，把所有逻辑都塞进 handler</li>
+<li>要么一开始就过度设计，写一大堆抽象但跑不动业务</li>
+</ul>
+<p>真正可维护的方案，通常不是这两个极端里的任何一个，而是：</p>
+<blockquote>
+<p>在足够简单和足够清晰之间找到平衡。</p>
+</blockquote>
+<p>axum 和 sqlx 其实非常适合做这件事。</p>
+<p>因为它们分别擅长不同层面：</p>
+<ul>
+<li>axum 擅长 HTTP 层、路由层、提取器和响应模型</li>
+<li>sqlx 擅长数据库访问、连接池、事务和类型映射</li>
+</ul>
+<p>只要边界划分得当，这两者可以组合得非常顺手。</p>
+<p>这篇文章我会围绕一个“用户接口”的小实战，把下面这些问题串起来：</p>
+<ol>
+<li>axum + sqlx 的最基本集成方式</li>
+<li>连接池为什么适合放进 <code>State</code></li>
+<li>handler、service、repository 怎么分工</li>
+<li>查询和写入接口应该怎么组织</li>
+<li>事务应该放在哪一层处理</li>
+<li>常见错误如何映射成 HTTP 响应</li>
+<li>初学者最容易踩的坑有哪些</li>
+</ol>
+<p>如果你已经写过前面的状态管理、错误处理、认证、tower 原理篇，这一篇基本就是往真正项目落地的关键一步。</p>
+<hr>
+<h2 id="一、先回答根问题：为什么-axum-sqlx-这么常见？"><a href="#一、先回答根问题：为什么-axum-sqlx-这么常见？" class="headerlink" title="一、先回答根问题：为什么 axum + sqlx 这么常见？"></a>一、先回答根问题：为什么 axum + sqlx 这么常见？</h2><p>先不谈生态热度，先看它们在职责上的契合度。</p>
+<p>对于一个典型的 Web API 服务，通常会有这样几层事情：</p>
+<ol>
+<li>收到 HTTP 请求</li>
+<li>解析路径参数、查询参数、JSON body</li>
+<li>执行业务逻辑</li>
+<li>查询或修改数据库</li>
+<li>返回 HTTP 响应</li>
+</ol>
+<p>而 axum 和 sqlx 刚好分别对其中不同部分做得很舒服：</p>
+<ul>
+<li>axum 负责第 1、2、5 层</li>
+<li>sqlx 主要负责第 4 层</li>
+<li>第 3 层则由你自己的 service 层来组织</li>
+</ul>
+<p>所以从架构上看，这个组合天然就比较干净：</p>
+<ul>
+<li>Web 层不需要知道太多数据库细节</li>
+<li>数据访问层不需要依赖 HTTP 抽象</li>
+<li>业务逻辑可以放在中间层承上启下</li>
+</ul>
+<p>这也是为什么很多 Rust API 项目会很自然地走向 <code>axum + sqlx</code> 这个组合。</p>
+<hr>
+<h2 id="二、先看最小可用集成：连接池怎么注入到-axum？"><a href="#二、先看最小可用集成：连接池怎么注入到-axum？" class="headerlink" title="二、先看最小可用集成：连接池怎么注入到 axum？"></a>二、先看最小可用集成：连接池怎么注入到 axum？</h2><p>最基础的落地方式其实不复杂：</p>
+<ol>
+<li>应用启动时创建数据库连接池</li>
+<li>把连接池放进 <code>AppState</code></li>
+<li>用 <code>with_state(...)</code> 挂到 Router</li>
+<li>handler 里通过 <code>State&lt;AppState&gt;</code> 提取连接池</li>
+</ol>
+<p>例如：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+    extract::&#123;Path, State&#125;,
+    routing::get,
+    Json, Router,
+&#125;;
+<span class="keyword">use</span> serde::Serialize;
+<span class="keyword">use</span> sqlx::PgPool;
+
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+    db: PgPool,
+&#125;
+
+<span class="meta">#[derive(Serialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">UserDto</span> &#123;
+    id: <span class="type">i64</span>,
+    name: <span class="type">String</span>,
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">get_user</span>(
+    <span class="title function_ invoke__">State</span>(state): State&lt;AppState&gt;,
+    <span class="title function_ invoke__">Path</span>(id): Path&lt;<span class="type">i64</span>&gt;,
+) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;Json&lt;UserDto&gt;, <span class="type">String</span>&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">row</span> = sqlx::query_as::&lt;_, (<span class="type">i64</span>, <span class="type">String</span>)&gt;(
+        <span class="string">&quot;select id, name from users where id = $1&quot;</span>
+    )
+    .<span class="title function_ invoke__">bind</span>(id)
+    .<span class="title function_ invoke__">fetch_one</span>(&amp;state.db)
+    .<span class="keyword">await</span>
+    .<span class="title function_ invoke__">map_err</span>(|err| err.<span class="title function_ invoke__">to_string</span>())?;
+
+    <span class="title function_ invoke__">Ok</span>(<span class="title function_ invoke__">Json</span>(UserDto &#123;
+        id: row.<span class="number">0</span>,
+        name: row.<span class="number">1</span>,
+    &#125;))
+&#125;</code></pre>
+
+<p>这个版本已经足够把 axum 和 sqlx 接起来了。</p>
+<p>但如果项目稍微长一点，这种写法也会马上暴露问题：</p>
+<ul>
+<li>handler 里直接写 SQL</li>
+<li>handler 同时处理 HTTP、数据库、错误映射</li>
+<li>一旦接口变多，复制逻辑会越来越多</li>
+</ul>
+<p>所以它适合作为“起点”，但通常不应该是“终点”。</p>
+<hr>
+<h2 id="三、为什么连接池适合放在-State-里？"><a href="#三、为什么连接池适合放在-State-里？" class="headerlink" title="三、为什么连接池适合放在 State 里？"></a>三、为什么连接池适合放在 <code>State</code> 里？</h2><p>如果你前面已经看过状态管理那篇，这里会很自然。</p>
+<p>数据库连接池具有几个典型特点：</p>
+<ul>
+<li>应用启动时创建</li>
+<li>生命周期覆盖整个服务进程</li>
+<li>会被多个请求共享使用</li>
+<li>本身就是为并发访问设计的</li>
+</ul>
+<p>这几条几乎完全符合应用级共享状态的定义。</p>
+<p>所以它非常适合放进 <code>AppState</code>。</p>
+<p>例如：</p>
+<pre><code class="highlight rust"><span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+    db: sqlx::PgPool,
+&#125;</code></pre>
+
+<p>这里有一个非常值得强调的点：</p>
+<blockquote>
+<p>连接池不是“单个数据库连接”，而是“可并发共享的连接管理器”。</p>
+</blockquote>
+<p>所以在大多数情况下，你不需要再给它外面套一层 <code>Mutex</code>。</p>
+<p>错误方向往往像这样：</p>
+<pre><code class="highlight rust"><span class="comment">// 通常没有必要</span>
+Arc&lt;Mutex&lt;PgPool&gt;&gt;</code></pre>
+
+<p>这会平白增加锁竞争，还破坏连接池本身的设计初衷。</p>
+<hr>
+<h2 id="四、handler、service、repository-到底怎么分层？"><a href="#四、handler、service、repository-到底怎么分层？" class="headerlink" title="四、handler、service、repository 到底怎么分层？"></a>四、handler、service、repository 到底怎么分层？</h2><p>这是 axum + sqlx 实战里最关键的设计问题之一。</p>
+<p>很多人一开始会问：</p>
+<blockquote>
+<p>我是不是一定要严格三层架构？</p>
+</blockquote>
+<p>答案不是绝对的。</p>
+<p>更重要的问题其实是：</p>
+<blockquote>
+<p>哪些职责应该分开，哪些不用一上来就拆得过细？</p>
+</blockquote>
+<p>一个很实用、也很适合中小项目的划分方式通常是：</p>
+<h3 id="4-1-handler-层"><a href="#4-1-handler-层" class="headerlink" title="4.1 handler 层"></a>4.1 handler 层</h3><p>负责：</p>
+<ul>
+<li>接收 HTTP 请求</li>
+<li>提取 Path &#x2F; Query &#x2F; Json &#x2F; State</li>
+<li>调用 service</li>
+<li>返回 HTTP 响应</li>
+</ul>
+<p>不适合负责：</p>
+<ul>
+<li>大量业务判断</li>
+<li>复杂 SQL 拼装</li>
+<li>事务编排</li>
+</ul>
+<h3 id="4-2-service-层"><a href="#4-2-service-层" class="headerlink" title="4.2 service 层"></a>4.2 service 层</h3><p>负责：</p>
+<ul>
+<li>承载业务逻辑</li>
+<li>编排多个数据操作</li>
+<li>决定事务边界</li>
+<li>返回业务错误</li>
+</ul>
+<h3 id="4-3-repository-层"><a href="#4-3-repository-层" class="headerlink" title="4.3 repository 层"></a>4.3 repository 层</h3><p>负责：</p>
+<ul>
+<li>和数据库直接交互</li>
+<li>查询、插入、更新、删除</li>
+<li>把数据映射成领域对象或 DTO</li>
+</ul>
+<p>这三层不是为了“看起来高级”，而是为了避免 handler 变成混合怪。</p>
+<p>一旦某个接口稍微复杂一点，你就会明显感觉到分层的价值。</p>
+<hr>
+<h2 id="五、一个更像真实项目的目录和结构"><a href="#五、一个更像真实项目的目录和结构" class="headerlink" title="五、一个更像真实项目的目录和结构"></a>五、一个更像真实项目的目录和结构</h2><p>先给一个很常见、也比较稳妥的项目结构示意：</p>
+<pre><code class="highlight text">src/
+  main.rs
+  app_state.rs
+  error.rs
+  response.rs
+  user/
+    mod.rs
+    handler.rs
+    service.rs
+    repository.rs
+    model.rs</code></pre>
+
+<p>大致分工可以是：</p>
+<ul>
+<li><code>main.rs</code>：启动应用、初始化连接池、组装路由</li>
+<li><code>app_state.rs</code>：定义 <code>AppState</code></li>
+<li><code>error.rs</code>：统一错误类型</li>
+<li><code>response.rs</code>：统一响应结构</li>
+<li><code>user/handler.rs</code>：用户相关 HTTP 入口</li>
+<li><code>user/service.rs</code>：用户业务逻辑</li>
+<li><code>user/repository.rs</code>：用户数据库访问</li>
+<li><code>user/model.rs</code>：请求&#x2F;响应对象和数据库模型</li>
+</ul>
+<p>当然，小项目不必强行拆得这么细，但这个方向通常比“所有东西都塞进 main.rs”健康得多。</p>
+<hr>
+<h2 id="六、先搭一个完整示例：用户查询与创建接口"><a href="#六、先搭一个完整示例：用户查询与创建接口" class="headerlink" title="六、先搭一个完整示例：用户查询与创建接口"></a>六、先搭一个完整示例：用户查询与创建接口</h2><p>下面给一个稍微完整一点的例子，把查询、创建、错误处理和状态注入都串起来。</p>
+<h3 id="6-1-依赖"><a href="#6-1-依赖" class="headerlink" title="6.1 依赖"></a>6.1 依赖</h3><p>先看 <code>Cargo.toml</code>：</p>
+<pre><code class="highlight toml"><span class="section">[dependencies]</span>
+<span class="attr">axum</span> = <span class="string">&quot;0.8&quot;</span>
+<span class="attr">tokio</span> = &#123; version = <span class="string">&quot;1&quot;</span>, features = [<span class="string">&quot;full&quot;</span>] &#125;
+<span class="attr">serde</span> = &#123; version = <span class="string">&quot;1&quot;</span>, features = [<span class="string">&quot;derive&quot;</span>] &#125;
+<span class="attr">serde_json</span> = <span class="string">&quot;1&quot;</span>
+<span class="attr">sqlx</span> = &#123; version = <span class="string">&quot;0.8&quot;</span>, features = [<span class="string">&quot;runtime-tokio-rustls&quot;</span>, <span class="string">&quot;postgres&quot;</span>] &#125;
+<span class="attr">tracing</span> = <span class="string">&quot;0.1&quot;</span>
+<span class="attr">tracing-subscriber</span> = <span class="string">&quot;0.3&quot;</span></code></pre>
+
+<h3 id="6-2-完整示例代码"><a href="#6-2-完整示例代码" class="headerlink" title="6.2 完整示例代码"></a>6.2 完整示例代码</h3><pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+    extract::&#123;Path, State&#125;,
+    http::StatusCode,
+    response::&#123;IntoResponse, Response&#125;,
+    routing::&#123;get, post&#125;,
+    Json, Router,
+&#125;;
+<span class="keyword">use</span> serde::&#123;Deserialize, Serialize&#125;;
+<span class="keyword">use</span> sqlx::PgPool;
+<span class="keyword">use</span> std::sync::Arc;
+
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+    user_service: Arc&lt;UserService&gt;,
+&#125;
+
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">UserService</span> &#123;
+    repo: UserRepository,
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">UserService</span> &#123;
+    <span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">get_user</span>(&amp;<span class="keyword">self</span>, id: <span class="type">i64</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;UserDto, AppError&gt; &#123;
+        <span class="keyword">self</span>.repo.<span class="title function_ invoke__">find_by_id</span>(id).<span class="keyword">await</span>
+    &#125;
+
+    <span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">create_user</span>(&amp;<span class="keyword">self</span>, input: CreateUserRequest) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;UserDto, AppError&gt; &#123;
+        <span class="keyword">if</span> input.name.<span class="title function_ invoke__">trim</span>().<span class="title function_ invoke__">is_empty</span>() &#123;
+            <span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(AppError::<span class="title function_ invoke__">BadRequest</span>(<span class="string">&quot;name cannot be empty&quot;</span>.<span class="title function_ invoke__">to_string</span>()));
+        &#125;
+
+        <span class="keyword">if</span> input.email.<span class="title function_ invoke__">trim</span>().<span class="title function_ invoke__">is_empty</span>() &#123;
+            <span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(AppError::<span class="title function_ invoke__">BadRequest</span>(<span class="string">&quot;email cannot be empty&quot;</span>.<span class="title function_ invoke__">to_string</span>()));
+        &#125;
+
+        <span class="keyword">self</span>.repo.<span class="title function_ invoke__">insert</span>(input).<span class="keyword">await</span>
+    &#125;
+&#125;
+
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">UserRepository</span> &#123;
+    db: PgPool,
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">UserRepository</span> &#123;
+    <span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">find_by_id</span>(&amp;<span class="keyword">self</span>, id: <span class="type">i64</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;UserDto, AppError&gt; &#123;
+        <span class="keyword">let</span> <span class="variable">row</span> = sqlx::query_as::&lt;_, (<span class="type">i64</span>, <span class="type">String</span>, <span class="type">String</span>)&gt;(
+            <span class="string">&quot;select id, name, email from users where id = $1&quot;</span>
+        )
+        .<span class="title function_ invoke__">bind</span>(id)
+        .<span class="title function_ invoke__">fetch_optional</span>(&amp;<span class="keyword">self</span>.db)
+        .<span class="keyword">await</span>
+        .<span class="title function_ invoke__">map_err</span>(|err| &#123;
+            tracing::error!(error = %err, <span class="string">&quot;query user by id failed&quot;</span>);
+            AppError::<span class="title function_ invoke__">Internal</span>(<span class="string">&quot;internal server error&quot;</span>.<span class="title function_ invoke__">to_string</span>())
+        &#125;)?;
+
+        <span class="keyword">let</span> <span class="variable">row</span> = row.<span class="title function_ invoke__">ok_or_else</span>(|| AppError::<span class="title function_ invoke__">NotFound</span>(<span class="string">&quot;user not found&quot;</span>.<span class="title function_ invoke__">to_string</span>()))?;
+
+        <span class="title function_ invoke__">Ok</span>(UserDto &#123;
+            id: row.<span class="number">0</span>,
+            name: row.<span class="number">1</span>,
+            email: row.<span class="number">2</span>,
+        &#125;)
+    &#125;
+
+    <span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">insert</span>(&amp;<span class="keyword">self</span>, input: CreateUserRequest) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;UserDto, AppError&gt; &#123;
+        <span class="keyword">let</span> <span class="variable">row</span> = sqlx::query_as::&lt;_, (<span class="type">i64</span>, <span class="type">String</span>, <span class="type">String</span>)&gt;(
+            <span class="string">&quot;insert into users (name, email) values ($1, $2) returning id, name, email&quot;</span>
+        )
+        .<span class="title function_ invoke__">bind</span>(&amp;input.name)
+        .<span class="title function_ invoke__">bind</span>(&amp;input.email)
+        .<span class="title function_ invoke__">fetch_one</span>(&amp;<span class="keyword">self</span>.db)
+        .<span class="keyword">await</span>
+        .<span class="title function_ invoke__">map_err</span>(|err| &#123;
+            tracing::error!(error = %err, <span class="string">&quot;insert user failed&quot;</span>);
+            AppError::<span class="title function_ invoke__">Internal</span>(<span class="string">&quot;internal server error&quot;</span>.<span class="title function_ invoke__">to_string</span>())
+        &#125;)?;
+
+        <span class="title function_ invoke__">Ok</span>(UserDto &#123;
+            id: row.<span class="number">0</span>,
+            name: row.<span class="number">1</span>,
+            email: row.<span class="number">2</span>,
+        &#125;)
+    &#125;
+&#125;
+
+<span class="meta">#[derive(Serialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">ApiResponse</span>&lt;T&gt; &#123;
+    code: <span class="type">i32</span>,
+    message: <span class="type">String</span>,
+    data: <span class="type">Option</span>&lt;T&gt;,
+&#125;
+
+<span class="keyword">impl</span>&lt;T&gt; ApiResponse&lt;T&gt; &#123;
+    <span class="keyword">fn</span> <span class="title function_">success</span>(data: T) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123;
+        <span class="keyword">Self</span> &#123;
+            code: <span class="number">0</span>,
+            message: <span class="string">&quot;ok&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+            data: <span class="title function_ invoke__">Some</span>(data),
+        &#125;
+    &#125;
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">ApiResponse</span>&lt;()&gt; &#123;
+    <span class="keyword">fn</span> <span class="title function_">error</span>(code: <span class="type">i32</span>, message: <span class="type">String</span>) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123;
+        <span class="keyword">Self</span> &#123;
+            code,
+            message,
+            data: <span class="literal">None</span>,
+        &#125;
+    &#125;
+&#125;
+
+<span class="keyword">enum</span> <span class="title class_">AppError</span> &#123;
+    <span class="title function_ invoke__">BadRequest</span>(<span class="type">String</span>),
+    <span class="title function_ invoke__">NotFound</span>(<span class="type">String</span>),
+    <span class="title function_ invoke__">Internal</span>(<span class="type">String</span>),
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">IntoResponse</span> <span class="keyword">for</span> <span class="title class_">AppError</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">into_response</span>(<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> Response &#123;
+        <span class="keyword">let</span> (status, code, message) = <span class="keyword">match</span> <span class="keyword">self</span> &#123;
+            AppError::<span class="title function_ invoke__">BadRequest</span>(message) =&gt; (StatusCode::BAD_REQUEST, <span class="number">40001</span>, message),
+            AppError::<span class="title function_ invoke__">NotFound</span>(message) =&gt; (StatusCode::NOT_FOUND, <span class="number">40401</span>, message),
+            AppError::<span class="title function_ invoke__">Internal</span>(message) =&gt; &#123;
+                (StatusCode::INTERNAL_SERVER_ERROR, <span class="number">50001</span>, message)
+            &#125;
+        &#125;;
+
+        <span class="keyword">let</span> <span class="variable">body</span> = ApiResponse::&lt;()&gt;::<span class="title function_ invoke__">error</span>(code, message);
+        (status, <span class="title function_ invoke__">Json</span>(body)).<span class="title function_ invoke__">into_response</span>()
+    &#125;
+&#125;
+
+<span class="meta">#[derive(Serialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">UserDto</span> &#123;
+    id: <span class="type">i64</span>,
+    name: <span class="type">String</span>,
+    email: <span class="type">String</span>,
+&#125;
+
+<span class="meta">#[derive(Deserialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">CreateUserRequest</span> &#123;
+    name: <span class="type">String</span>,
+    email: <span class="type">String</span>,
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">get_user</span>(
+    <span class="title function_ invoke__">State</span>(state): State&lt;AppState&gt;,
+    <span class="title function_ invoke__">Path</span>(id): Path&lt;<span class="type">i64</span>&gt;,
+) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;Json&lt;ApiResponse&lt;UserDto&gt;&gt;, AppError&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">user</span> = state.user_service.<span class="title function_ invoke__">get_user</span>(id).<span class="keyword">await</span>?;
+    <span class="title function_ invoke__">Ok</span>(<span class="title function_ invoke__">Json</span>(ApiResponse::<span class="title function_ invoke__">success</span>(user)))
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">create_user</span>(
+    <span class="title function_ invoke__">State</span>(state): State&lt;AppState&gt;,
+    <span class="title function_ invoke__">Json</span>(payload): Json&lt;CreateUserRequest&gt;,
+) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;(StatusCode, Json&lt;ApiResponse&lt;UserDto&gt;&gt;), AppError&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">user</span> = state.user_service.<span class="title function_ invoke__">create_user</span>(payload).<span class="keyword">await</span>?;
+    <span class="title function_ invoke__">Ok</span>((StatusCode::CREATED, <span class="title function_ invoke__">Json</span>(ApiResponse::<span class="title function_ invoke__">success</span>(user))))
+&#125;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    tracing_subscriber::fmt::<span class="title function_ invoke__">init</span>();
+
+    <span class="keyword">let</span> <span class="variable">db</span> = PgPool::<span class="title function_ invoke__">connect</span>(<span class="string">&quot;postgres://postgres:postgres@localhost/app&quot;</span>)
+        .<span class="keyword">await</span>
+        .<span class="title function_ invoke__">unwrap</span>();
+
+    <span class="keyword">let</span> <span class="variable">repo</span> = UserRepository &#123; db &#125;;
+    <span class="keyword">let</span> <span class="variable">service</span> = UserService &#123; repo &#125;;
+
+    <span class="keyword">let</span> <span class="variable">state</span> = AppState &#123;
+        user_service: Arc::<span class="title function_ invoke__">new</span>(service),
+    &#125;;
+
+    <span class="keyword">let</span> <span class="variable">app</span> = Router::<span class="title function_ invoke__">new</span>()
+        .<span class="title function_ invoke__">route</span>(<span class="string">&quot;/users/&#123;id&#125;&quot;</span>, <span class="title function_ invoke__">get</span>(get_user))
+        .<span class="title function_ invoke__">route</span>(<span class="string">&quot;/users&quot;</span>, <span class="title function_ invoke__">post</span>(create_user))
+        .<span class="title function_ invoke__">with_state</span>(state);
+
+    <span class="keyword">let</span> <span class="variable">listener</span> = tokio::net::TcpListener::<span class="title function_ invoke__">bind</span>(<span class="string">&quot;0.0.0.0:3000&quot;</span>)
+        .<span class="keyword">await</span>
+        .<span class="title function_ invoke__">unwrap</span>();
+
+    axum::<span class="title function_ invoke__">serve</span>(listener, app).<span class="keyword">await</span>.<span class="title function_ invoke__">unwrap</span>();
+&#125;</code></pre>
+
+<p>这个例子虽然不大，但已经把一条比较健康的主线串起来了：</p>
+<ul>
+<li><code>AppState</code> 放共享 service</li>
+<li>handler 只处理 HTTP 层</li>
+<li>service 做业务校验</li>
+<li>repository 负责 SQL 与数据库交互</li>
+<li><code>AppError</code> 统一对外错误模型</li>
+</ul>
+<p>这比把所有逻辑都写在一个 handler 里稳定得多。</p>
+<hr>
+<h2 id="七、为什么不建议一开始就在-handler-里写大量-SQL？"><a href="#七、为什么不建议一开始就在-handler-里写大量-SQL？" class="headerlink" title="七、为什么不建议一开始就在 handler 里写大量 SQL？"></a>七、为什么不建议一开始就在 handler 里写大量 SQL？</h2><p>不是说绝对不能写，而是随着项目变大，它几乎一定会带来下面这些问题：</p>
+<ul>
+<li>handler 同时处理 HTTP、SQL、错误映射、业务逻辑</li>
+<li>代码复用变差</li>
+<li>测试边界不清楚</li>
+<li>SQL 调整时要在多个 handler 里同步修改</li>
+</ul>
+<p>一个小接口里，直接在 handler 写一两条 SQL 还能接受；但只要出现下面这些情况，就应该考虑抽出去：</p>
+<ul>
+<li>同一类查询被多个接口复用</li>
+<li>有非平凡业务校验</li>
+<li>需要事务</li>
+<li>需要组合多个数据操作</li>
+</ul>
+<p>所以更稳妥的经验是：</p>
+<blockquote>
+<p>handler 可以很薄，但不要过度薄；SQL 可以先直写，但一旦开始重复，就该收进 repository。</p>
+</blockquote>
+<hr>
+<h2 id="八、service-层到底有什么价值？"><a href="#八、service-层到底有什么价值？" class="headerlink" title="八、service 层到底有什么价值？"></a>八、service 层到底有什么价值？</h2><p>很多人一开始会觉得 service 层像“为了分层而分层”。</p>
+<p>其实不是。</p>
+<p>它真正的价值主要体现在两个地方：</p>
+<h3 id="8-1-承载业务规则"><a href="#8-1-承载业务规则" class="headerlink" title="8.1 承载业务规则"></a>8.1 承载业务规则</h3><p>例如：</p>
+<ul>
+<li>名字不能为空</li>
+<li>邮箱必须唯一</li>
+<li>订单创建前要先校验库存</li>
+<li>删除用户前要先检查关联资源</li>
+</ul>
+<p>这些都不是纯 HTTP 逻辑，也不是纯 SQL 逻辑，最适合放在 service 层。</p>
+<h3 id="8-2-编排多个数据操作"><a href="#8-2-编排多个数据操作" class="headerlink" title="8.2 编排多个数据操作"></a>8.2 编排多个数据操作</h3><p>例如创建订单时可能需要：</p>
+<ol>
+<li>创建订单记录</li>
+<li>扣减库存</li>
+<li>写审计日志</li>
+</ol>
+<p>这类逻辑明显不是一个 repository 方法能优雅承载的。</p>
+<p>而 service 层正好适合做这种编排。</p>
+<hr>
+<h2 id="九、事务应该放在哪一层？"><a href="#九、事务应该放在哪一层？" class="headerlink" title="九、事务应该放在哪一层？"></a>九、事务应该放在哪一层？</h2><p>这是 <code>axum + sqlx</code> 实战里很值得单独讲的一点。</p>
+<p>结论先说：</p>
+<blockquote>
+<p>事务边界通常更适合由 service 层决定，而不是 handler 层或单个 repository 层硬编码。</p>
+</blockquote>
+<p>原因很简单。</p>
+<p>事务本质上是在描述：</p>
+<blockquote>
+<p>一组业务操作要么全部成功，要么全部失败。</p>
+</blockquote>
+<p>这显然更接近业务编排问题，而不是 HTTP 问题。</p>
+<p>例如创建订单时：</p>
+<ul>
+<li>插入订单</li>
+<li>插入订单项</li>
+<li>扣减库存</li>
+</ul>
+<p>这三步要不要放在同一个事务里，不是 handler 能决定得最清楚的，而是 service 更清楚。</p>
+<h3 id="9-1-一个事务示意例子"><a href="#9-1-一个事务示意例子" class="headerlink" title="9.1 一个事务示意例子"></a>9.1 一个事务示意例子</h3><p>下面给个简化版示意：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> sqlx::&#123;PgPool, Postgres, Transaction&#125;;
+
+<span class="keyword">struct</span> <span class="title class_">OrderService</span> &#123;
+    db: PgPool,
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">OrderService</span> &#123;
+    <span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">create_order</span>(&amp;<span class="keyword">self</span>, input: CreateOrderInput) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;(), AppError&gt; &#123;
+        <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">tx</span> = <span class="keyword">self</span>.db.<span class="title function_ invoke__">begin</span>().<span class="keyword">await</span>.<span class="title function_ invoke__">map_err</span>(|err| &#123;
+            tracing::error!(error = %err, <span class="string">&quot;begin transaction failed&quot;</span>);
+            AppError::<span class="title function_ invoke__">Internal</span>(<span class="string">&quot;internal server error&quot;</span>.<span class="title function_ invoke__">to_string</span>())
+        &#125;)?;
+
+        <span class="title function_ invoke__">insert_order</span>(&amp;<span class="keyword">mut</span> tx, &amp;input).<span class="keyword">await</span>?;
+        <span class="title function_ invoke__">insert_order_items</span>(&amp;<span class="keyword">mut</span> tx, &amp;input).<span class="keyword">await</span>?;
+        <span class="title function_ invoke__">decrease_stock</span>(&amp;<span class="keyword">mut</span> tx, &amp;input).<span class="keyword">await</span>?;
+
+        tx.<span class="title function_ invoke__">commit</span>().<span class="keyword">await</span>.<span class="title function_ invoke__">map_err</span>(|err| &#123;
+            tracing::error!(error = %err, <span class="string">&quot;commit transaction failed&quot;</span>);
+            AppError::<span class="title function_ invoke__">Internal</span>(<span class="string">&quot;internal server error&quot;</span>.<span class="title function_ invoke__">to_string</span>())
+        &#125;)?;
+
+        <span class="title function_ invoke__">Ok</span>(())
+    &#125;
+&#125;
+
+<span class="keyword">struct</span> <span class="title class_">CreateOrderInput</span>;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">insert_order</span>(
+    _tx: &amp;<span class="keyword">mut</span> Transaction&lt;<span class="symbol">&#x27;_</span>, Postgres&gt;,
+    _input: &amp;CreateOrderInput,
+) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;(), AppError&gt; &#123;
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">insert_order_items</span>(
+    _tx: &amp;<span class="keyword">mut</span> Transaction&lt;<span class="symbol">&#x27;_</span>, Postgres&gt;,
+    _input: &amp;CreateOrderInput,
+) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;(), AppError&gt; &#123;
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">decrease_stock</span>(
+    _tx: &amp;<span class="keyword">mut</span> Transaction&lt;<span class="symbol">&#x27;_</span>, Postgres&gt;,
+    _input: &amp;CreateOrderInput,
+) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;(), AppError&gt; &#123;
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;</code></pre>
+
+<p>这个例子最重要的不是语法，而是边界：</p>
+<ul>
+<li>service 决定事务起止</li>
+<li>repository 或底层数据函数在事务上下文里执行具体 SQL</li>
+</ul>
+<p>这通常比“handler 开事务”或者“每个 repository 自己偷偷开事务”更清晰。</p>
+<hr>
+<h2 id="十、查询接口和写入接口，有哪些设计差异？"><a href="#十、查询接口和写入接口，有哪些设计差异？" class="headerlink" title="十、查询接口和写入接口，有哪些设计差异？"></a>十、查询接口和写入接口，有哪些设计差异？</h2><p>很多人写第一个 CRUD 项目时，会把查询和写入用完全一样的思路处理。</p>
+<p>这当然不是完全不行，但实际上它们关注点并不完全相同。</p>
+<h3 id="10-1-查询接口更关注"><a href="#10-1-查询接口更关注" class="headerlink" title="10.1 查询接口更关注"></a>10.1 查询接口更关注</h3><ul>
+<li>路径参数和查询参数提取</li>
+<li>列表分页</li>
+<li>结果映射</li>
+<li>资源不存在如何处理</li>
+</ul>
+<h3 id="10-2-写入接口更关注"><a href="#10-2-写入接口更关注" class="headerlink" title="10.2 写入接口更关注"></a>10.2 写入接口更关注</h3><ul>
+<li>JSON 请求体校验</li>
+<li>幂等性</li>
+<li>冲突处理</li>
+<li>事务</li>
+<li>创建成功后返回 201 或 204</li>
+</ul>
+<p>这意味着在实际设计里：</p>
+<ul>
+<li>查询接口通常重点是“怎么拿到数据”</li>
+<li>写入接口通常重点是“怎么安全、清晰地修改数据”</li>
+</ul>
+<p>所以别把所有接口都按一个模板硬套。</p>
+<hr>
+<h2 id="十一、sqlx-查询方式该怎么选？"><a href="#十一、sqlx-查询方式该怎么选？" class="headerlink" title="十一、sqlx 查询方式该怎么选？"></a>十一、sqlx 查询方式该怎么选？</h2><p>在 sqlx 里，你会很快碰到几种常见方式：</p>
+<ul>
+<li><code>query()</code></li>
+<li><code>query_as()</code></li>
+<li><code>query!()</code></li>
+<li><code>query_as!()</code></li>
+</ul>
+<p>如果先用一个工程上够用的视角来理解，可以这样看：</p>
+<h3 id="11-1-query"><a href="#11-1-query" class="headerlink" title="11.1 query()"></a>11.1 <code>query()</code></h3><p>适合：</p>
+<ul>
+<li>自己手动取列</li>
+<li>对映射控制比较细</li>
+</ul>
+<h3 id="11-2-query-as"><a href="#11-2-query-as" class="headerlink" title="11.2 query_as()"></a>11.2 <code>query_as()</code></h3><p>适合：</p>
+<ul>
+<li>想直接把结果映射成元组或结构体</li>
+<li>让 repository 代码更整洁</li>
+</ul>
+<p>例如上面大量示例里用的就是 <code>query_as()</code>。</p>
+<h3 id="11-3-query-query-as"><a href="#11-3-query-query-as" class="headerlink" title="11.3 query!() &#x2F; query_as!()"></a>11.3 <code>query!()</code> &#x2F; <code>query_as!()</code></h3><p>适合：</p>
+<ul>
+<li>想要更强的编译期校验</li>
+<li>项目愿意配合 sqlx 的数据库模式校验流程</li>
+</ul>
+<p>在教程或通用示例里，我通常不会一开始就把重点放到 <code>query!</code> 宏上，因为它会把注意力拉到环境准备和编译期校验配置上；但在真实项目里，它确实是值得考虑的增强方向。</p>
+<hr>
+<h2 id="十二、错误处理该怎么和数据库访问结合？"><a href="#十二、错误处理该怎么和数据库访问结合？" class="headerlink" title="十二、错误处理该怎么和数据库访问结合？"></a>十二、错误处理该怎么和数据库访问结合？</h2><p>如果你前面已经写过统一错误处理，这里其实就是把它落到数据库场景里。</p>
+<p>一个比较稳妥的思路通常是：</p>
+<ol>
+<li>repository 层捕获底层数据库错误</li>
+<li>记录内部日志</li>
+<li>转换成更稳定的 <code>AppError</code> 或 service 错误</li>
+<li>最终由 HTTP 层统一转成响应</li>
+</ol>
+<p>例如：</p>
+<pre><code class="highlight rust">.<span class="keyword">await</span>
+.<span class="title function_ invoke__">map_err</span>(|err| &#123;
+    tracing::error!(error = %err, <span class="string">&quot;query user failed&quot;</span>);
+    AppError::<span class="title function_ invoke__">Internal</span>(<span class="string">&quot;internal server error&quot;</span>.<span class="title function_ invoke__">to_string</span>())
+&#125;)?</code></pre>
+
+<p>这里的关键点不是“少写几行”，而是：</p>
+<blockquote>
+<p>不要把数据库底层错误字符串原样暴露给客户端。</p>
+</blockquote>
+<p>客户端需要的是稳定、可消费的错误语义，不是内部 SQL 细节。</p>
+<hr>
+<h2 id="十三、axum-sqlx-实战里最常见的几个坑"><a href="#十三、axum-sqlx-实战里最常见的几个坑" class="headerlink" title="十三、axum + sqlx 实战里最常见的几个坑"></a>十三、axum + sqlx 实战里最常见的几个坑</h2><h3 id="13-1-把连接池包进-Mutex"><a href="#13-1-把连接池包进-Mutex" class="headerlink" title="13.1 把连接池包进 Mutex"></a>13.1 把连接池包进 <code>Mutex</code></h3><p>通常没必要，而且会影响并发能力。</p>
+<h3 id="13-2-handler-里直接写太多-SQL"><a href="#13-2-handler-里直接写太多-SQL" class="headerlink" title="13.2 handler 里直接写太多 SQL"></a>13.2 handler 里直接写太多 SQL</h3><p>小 demo 可以接受，项目一大就会变成维护灾难。</p>
+<h3 id="13-3-所有层都直接返回-StatusCode"><a href="#13-3-所有层都直接返回-StatusCode" class="headerlink" title="13.3 所有层都直接返回 StatusCode"></a>13.3 所有层都直接返回 <code>StatusCode</code></h3><p>这会让 service 和 repository 层开始依赖 HTTP 语义，分层会越来越模糊。</p>
+<h3 id="13-4-事务边界乱放"><a href="#13-4-事务边界乱放" class="headerlink" title="13.4 事务边界乱放"></a>13.4 事务边界乱放</h3><p>如果事务逻辑散在 handler 或多个 repository 内部，后续很难维护。</p>
+<h3 id="13-5-原样暴露数据库错误"><a href="#13-5-原样暴露数据库错误" class="headerlink" title="13.5 原样暴露数据库错误"></a>13.5 原样暴露数据库错误</h3><p>不稳定、不安全，也不利于前端处理。</p>
+<h3 id="13-6-为了“架构规范”过度拆层"><a href="#13-6-为了“架构规范”过度拆层" class="headerlink" title="13.6 为了“架构规范”过度拆层"></a>13.6 为了“架构规范”过度拆层</h3><p>小项目一上来就十几层抽象，通常不是成熟，而是负担。</p>
+<p>更实际的做法是：</p>
+<ul>
+<li>从清晰边界出发</li>
+<li>先有 handler &#x2F; service &#x2F; repository 这类核心分层</li>
+<li>需要时再继续细化</li>
+</ul>
+<hr>
+<h2 id="十四、如何判断你的-axum-sqlx-结构是不是健康？"><a href="#十四、如何判断你的-axum-sqlx-结构是不是健康？" class="headerlink" title="十四、如何判断你的 axum + sqlx 结构是不是健康？"></a>十四、如何判断你的 axum + sqlx 结构是不是健康？</h2><p>我自己通常会用下面几个问题快速判断：</p>
+<ol>
+<li>handler 是否主要只处理 HTTP 输入输出，而不是写满业务细节和 SQL</li>
+<li>数据库连接池是否作为应用状态共享，而不是被奇怪地加锁</li>
+<li>service 是否真正承载了业务校验和事务编排</li>
+<li>repository 是否专注数据库交互，而不是关心 HTTP 响应</li>
+<li>错误是否有统一模型，而不是到处手写 <code>StatusCode</code> 和字符串</li>
+<li>新增一个接口时，代码是否能自然落到既有结构中，而不是不断往 <code>main.rs</code> 里堆</li>
+</ol>
+<p>如果这些问题大多能回答“是”，那这个项目结构通常已经比较稳了。</p>
+<hr>
+<h2 id="十五、总结"><a href="#十五、总结" class="headerlink" title="十五、总结"></a>十五、总结</h2><p><code>axum + sqlx</code> 之所以是一个非常适合 Rust Web API 的组合，不只是因为它们流行，而是因为它们在职责上天然互补：</p>
+<ul>
+<li>axum 擅长 HTTP 层</li>
+<li>sqlx 擅长数据库层</li>
+<li>中间的业务编排交给你自己的 service 层</li>
+</ul>
+<p>如果把这篇文章压缩成最重要的几个结论，大概就是这些：</p>
+<ol>
+<li>数据库连接池非常适合放进 <code>State</code> 作为应用级共享依赖</li>
+<li>handler、service、repository 分层不是形式主义，而是为了把 HTTP、业务和数据访问职责分开</li>
+<li>小项目不必过度设计，但也不要把所有逻辑都塞进 handler</li>
+<li>事务边界通常更适合由 service 层决定</li>
+<li>数据库错误应该记录内部日志，并统一映射成稳定的外部错误模型</li>
+<li>连接池通常不该再额外套 <code>Mutex</code></li>
+<li>一个健康的 axum + sqlx 项目，新增接口时应该能很自然地落到既有分层里</li>
+</ol>
+<p>如果你已经把前面的提取器、状态管理、错误处理、认证和 tower 原理串起来，那么这一篇实际上就是在把这些能力真正落到“一个能做事的 API 服务”上。</p>
+<p>再往后继续写，一个非常自然的方向就是 axum 请求生命周期全流程。因为到这个阶段，你已经分别理解了：</p>
+<ul>
+<li>请求怎么进入路由</li>
+<li>参数怎么被提取</li>
+<li>中间件怎么包装服务</li>
+<li>状态怎么注入</li>
+<li>错误怎么变成响应</li>
+<li>数据又怎么从数据库里取出来</li>
+</ul>
+<p>这时候再回头讲“一个请求在 axum 里到底经历了什么”，读者会很容易把所有知识点串成一整条链路。</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
