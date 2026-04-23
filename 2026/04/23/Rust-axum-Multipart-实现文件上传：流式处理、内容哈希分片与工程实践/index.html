@@ -1,0 +1,735 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust axum Multipart 实现文件上传：流式处理、内容哈希分片与工程实践</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust axum Multipart 实现文件上传：流式处理、内容哈希分片与工程实践</h1><div class="time">2026-04-23</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><h2 id="引言"><a href="#引言" class="headerlink" title="引言"></a>引言</h2><p>前面几篇 axum 文章，我们已经把一条 Web 请求链路里最核心的部分基本串起来了：</p>
+<ul>
+<li>中间件怎么介入请求处理</li>
+<li>Extractor 怎么把请求数据提取为 handler 参数</li>
+<li><code>State&lt;T&gt;</code> 怎么承载共享依赖</li>
+<li>错误如何统一转换成 HTTP 响应</li>
+<li>一个请求在 axum 里到底按什么顺序执行</li>
+</ul>
+<p>但只要开始做真正的 Web 服务，就很快会遇到一个很现实的话题：</p>
+<blockquote>
+<p>文件上传到底应该怎么做，才能既能跑，又不把服务写得很脆弱？</p>
+</blockquote>
+<p>很多人第一次接触上传接口，容易先写出一个“能跑的版本”：</p>
+<ul>
+<li>前端把文件通过 <code>multipart/form-data</code> 传上来</li>
+<li>后端提取 <code>Multipart</code></li>
+<li>把文件读进内存</li>
+<li>直接写到某个目录</li>
+</ul>
+<p>这个起点没有问题，但它通常也会很快暴露几个严重问题：</p>
+<ul>
+<li>大文件一上传，内存占用迅速变高</li>
+<li>文件名直接拿来落盘，存在安全风险</li>
+<li>同一个文件被重复上传很多次，磁盘重复存储</li>
+<li>文件太多都堆在一个目录里，目录性能越来越差</li>
+<li>上传成功之后，文件路径和元数据组织得很混乱</li>
+</ul>
+<p>这些问题说明，文件上传不是“把字节保存一下”这么简单。</p>
+<p>在工程上，一个更合理的上传设计通常至少要回答下面几个问题：</p>
+<ol>
+<li><code>multipart/form-data</code> 在 HTTP 层到底是什么</li>
+<li>为什么上传接口不能默认把整个文件一次性读进内存</li>
+<li>axum 里的 <code>Multipart</code> 应该怎样和状态、错误处理配合</li>
+<li>文件应该如何安全落盘</li>
+<li>为什么适合用文件内容哈希作为存储键</li>
+<li>如何基于哈希构建目录树，避免单目录下文件过多</li>
+<li>上传接口在安全性和可维护性上有哪些坑</li>
+</ol>
+<p>这篇文章就围绕这些问题展开。</p>
+<p>目标不是只给你一个 demo，而是给出一个在真实项目里也能继续演进的实现思路。</p>
+<hr>
+<h2 id="一、先回答根问题：什么是-multipart-form-data？"><a href="#一、先回答根问题：什么是-multipart-form-data？" class="headerlink" title="一、先回答根问题：什么是 multipart/form-data？"></a>一、先回答根问题：什么是 <code>multipart/form-data</code>？</h2><p>我们平时发 JSON 请求时，一个请求体通常就是一整段 JSON 文本；但文件上传场景往往不止一份数据。</p>
+<p>例如一个上传接口，除了文件本身，可能还要同时传：</p>
+<ul>
+<li>文件所属业务类型</li>
+<li>上传者 ID</li>
+<li>文件描述</li>
+<li>是否公开</li>
+</ul>
+<p>这时候如果还强行用普通 JSON，就会很不自然。因为二进制文件并不适合直接塞进 JSON。</p>
+<p>所以浏览器和后端之间，文件上传最常见的协议形态就是：</p>
+<blockquote>
+<p><code>multipart/form-data</code>。</p>
+</blockquote>
+<p>它可以把一个请求体拆成多个 part，每个 part 都有自己的 header 和内容。</p>
+<p>一个典型请求大致可以理解成：</p>
+<pre><code class="highlight text">POST /upload
+Content-Type: multipart/form-data; boundary=----abcd
+
+------abcd
+Content-Disposition: form-data; name=&quot;biz&quot;
+
+avatar
+------abcd
+Content-Disposition: form-data; name=&quot;file&quot;; filename=&quot;cat.png&quot;
+Content-Type: image/png
+
+...binary bytes...
+------abcd--</code></pre>
+
+<p>也就是说，multipart 的本质不是“一个文件”，而是：</p>
+<blockquote>
+<p>一个请求体里包含多个字段，其中某些字段是普通文本，某些字段是二进制文件。</p>
+</blockquote>
+<p>这件事放回前面 Extractor 那篇去看，会非常自然：</p>
+<ul>
+<li><code>Json&lt;T&gt;</code> 是把整个 body 当成一份 JSON 来解析</li>
+<li><code>Multipart</code> 是把整个 body 解析成多个 part，再逐个读取</li>
+</ul>
+<p>因此这两者都属于“消费请求体”的提取器，它们不能同时随意混用。</p>
+<hr>
+<h2 id="二、axum-里的-Multipart-到底处于哪一层？"><a href="#二、axum-里的-Multipart-到底处于哪一层？" class="headerlink" title="二、axum 里的 Multipart 到底处于哪一层？"></a>二、axum 里的 <code>Multipart</code> 到底处于哪一层？</h2><p>如果你已经看过前一篇“请求生命周期”，这里结论会很清楚。</p>
+<p>一次上传请求大致会经历：</p>
+<pre><code class="highlight text">客户端上传请求
+  -&gt; 外层中间件
+  -&gt; Router 路由匹配
+  -&gt; 路由中间件
+  -&gt; Multipart Extractor 解析 body
+  -&gt; handler 逐个读取 field
+  -&gt; 写入文件系统 / 对象存储
+  -&gt; 返回响应</code></pre>
+
+<p>所以 <code>Multipart</code> 的角色本质上是一个 body extractor。</p>
+<p>这意味着两个直接结论：</p>
+<ol>
+<li>它发生在路由匹配之后、handler 真正执行之前</li>
+<li>它会消费请求体，因此和其他消费 body 的 extractor 有边界冲突</li>
+</ol>
+<p>比如下面这种写法就不成立：</p>
+<pre><code class="highlight rust"><span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">wrong_handler</span>(
+	multipart: Multipart,
+	<span class="title function_ invoke__">Json</span>(payload): Json&lt;CreateFileRequest&gt;,
+) &#123;
+	<span class="comment">// ...</span>
+&#125;</code></pre>
+
+<p>原因不是语法，而是语义：</p>
+<ul>
+<li><code>Multipart</code> 要读 body</li>
+<li><code>Json&lt;T&gt;</code> 也要读 body</li>
+<li>body 不能被两个提取器各读一次</li>
+</ul>
+<p>如果上传接口还需要业务字段，正确方式通常是：</p>
+<ul>
+<li>把业务字段也放在 multipart 的普通文本 field 里</li>
+<li>或者把“先上传文件”和“再提交业务 JSON”拆成两个接口</li>
+</ul>
+<p>后者在复杂业务里往往更稳，因为文件上传和业务写库通常是两个不同的可靠性问题。</p>
+<hr>
+<h2 id="三、为什么上传接口不能默认把文件一次性读进内存？"><a href="#三、为什么上传接口不能默认把文件一次性读进内存？" class="headerlink" title="三、为什么上传接口不能默认把文件一次性读进内存？"></a>三、为什么上传接口不能默认把文件一次性读进内存？</h2><p>很多 demo 会这样写：</p>
+<pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">data</span> = field.<span class="title function_ invoke__">bytes</span>().<span class="keyword">await</span>?;
+tokio::fs::<span class="title function_ invoke__">write</span>(<span class="string">&quot;./uploads/test.bin&quot;</span>, data).<span class="keyword">await</span>?;</code></pre>
+
+<p>对于小文件，这当然能跑。</p>
+<p>但它有一个明显问题：</p>
+<blockquote>
+<p>你是先把整个文件完整读进内存，再落盘。</p>
+</blockquote>
+<p>如果上传的是：</p>
+<ul>
+<li>10KB 的头像</li>
+<li>100KB 的文档</li>
+</ul>
+<p>那么问题不大。</p>
+<p>但如果是：</p>
+<ul>
+<li>30MB 的视频片段</li>
+<li>100MB 的压缩包</li>
+<li>多个并发上传请求同时进来</li>
+</ul>
+<p>那么内存压力就会迅速放大。</p>
+<p>所以更稳妥的实现方式通常是：</p>
+<blockquote>
+<p>一边从 multipart field 读取字节块，一边写入目标文件，同时顺手计算哈希。</p>
+</blockquote>
+<p>这个思路有三个明显好处：</p>
+<ul>
+<li>不需要把整个文件一次性放进内存</li>
+<li>可以在写入过程中统计大小</li>
+<li>可以同步计算 SHA-256 等内容摘要，作为后续存储键</li>
+</ul>
+<p>这就是文件上传里非常重要的“流式处理”思路。</p>
+<hr>
+<h2 id="四、为什么适合用“文件内容哈希”作为存储键？"><a href="#四、为什么适合用“文件内容哈希”作为存储键？" class="headerlink" title="四、为什么适合用“文件内容哈希”作为存储键？"></a>四、为什么适合用“文件内容哈希”作为存储键？</h2><p>很多初学者第一反应是直接用原始文件名落盘，例如：</p>
+<pre><code class="highlight text">uploads/avatar.png
+uploads/report.pdf</code></pre>
+
+<p>这样做的问题其实很多：</p>
+<h3 id="4-1-文件名不可靠"><a href="#4-1-文件名不可靠" class="headerlink" title="4.1 文件名不可靠"></a>4.1 文件名不可靠</h3><p>上传方给的文件名只是一个“客户端声明”，它并不可信。</p>
+<p>它可能存在：</p>
+<ul>
+<li>重名覆盖</li>
+<li>特殊字符问题</li>
+<li>路径穿越风险</li>
+<li>扩展名和实际内容不一致</li>
+</ul>
+<h3 id="4-2-无法天然去重"><a href="#4-2-无法天然去重" class="headerlink" title="4.2 无法天然去重"></a>4.2 无法天然去重</h3><p>如果两个用户上传的是完全相同的文件：</p>
+<ul>
+<li>用随机文件名存储，会保存两份</li>
+<li>用原始文件名存储，也无法识别内容相同</li>
+</ul>
+<h3 id="4-3-难以做内容寻址"><a href="#4-3-难以做内容寻址" class="headerlink" title="4.3 难以做内容寻址"></a>4.3 难以做内容寻址</h3><p>如果一个文件的身份依赖“它叫什么名字”，那么名字变了，文件身份也跟着变。</p>
+<p>但对于存储系统来说，更稳的识别方式往往是：</p>
+<blockquote>
+<p>文件是什么内容，而不是文件叫什么名字。</p>
+</blockquote>
+<p>因此很多系统会采用内容哈希，例如 SHA-256：</p>
+<pre><code class="highlight text">2cf24dba5fb0a30e26e83b2ac5b9e29e...</code></pre>
+
+<p>它带来的直接好处是：</p>
+<ul>
+<li>相同内容天然得到相同键</li>
+<li>可以方便做去重</li>
+<li>路径命名稳定，不依赖客户端文件名</li>
+<li>后续做缓存、校验、对象存储映射都更自然</li>
+</ul>
+<p>这就是典型的内容寻址存储思路。</p>
+<hr>
+<h2 id="五、为什么还要基于哈希构建目录树？"><a href="#五、为什么还要基于哈希构建目录树？" class="headerlink" title="五、为什么还要基于哈希构建目录树？"></a>五、为什么还要基于哈希构建目录树？</h2><p>如果你已经决定用哈希作为文件名，下一个常见设计就是：</p>
+<blockquote>
+<p>文件应该直接平铺在一个目录里，还是继续分层？</p>
+</blockquote>
+<p>假设我们把所有文件都扔进：</p>
+<pre><code class="highlight text">uploads/</code></pre>
+
+<p>短期内当然没问题。</p>
+<p>但如果文件数量达到几十万甚至更多，单目录下文件过多通常会带来：</p>
+<ul>
+<li>遍历和管理不方便</li>
+<li>某些文件系统下目录操作性能下降</li>
+<li>人工排查非常难看</li>
+</ul>
+<p>所以更常见的做法是按哈希前缀做目录分片。</p>
+<p>例如一个 SHA-256：</p>
+<pre><code class="highlight text">2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824</code></pre>
+
+<p>可以拆成：</p>
+<pre><code class="highlight text">uploads/2c/f2/2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824</code></pre>
+
+<p>也就是：</p>
+<ul>
+<li>第一层目录取前 2 位</li>
+<li>第二层目录取接下来 2 位</li>
+<li>文件名使用完整哈希</li>
+</ul>
+<p>这样做的效果是：</p>
+<ul>
+<li>顶层目录不会过于拥挤</li>
+<li>单个子目录中文件数更分散</li>
+<li>路径仍然是可推导的，不需要额外索引才能定位文件</li>
+</ul>
+<p>这是很多存储系统都很常见的设计。</p>
+<p>如果未来量更大，还可以继续扩展为 3 级甚至更多级目录，但多数 Web 服务里，两级前缀分片已经足够实用。</p>
+<hr>
+<h2 id="六、先给一个最小可用方向：axum-上传接口需要哪些依赖？"><a href="#六、先给一个最小可用方向：axum-上传接口需要哪些依赖？" class="headerlink" title="六、先给一个最小可用方向：axum 上传接口需要哪些依赖？"></a>六、先给一个最小可用方向：axum 上传接口需要哪些依赖？</h2><p>如果你要在 axum 中使用 multipart 上传，首先要启用对应 feature。</p>
+<p>一个典型依赖如下：</p>
+<pre><code class="highlight toml"><span class="section">[dependencies]</span>
+<span class="attr">axum</span> = &#123; version = <span class="string">&quot;0.8&quot;</span>, features = [<span class="string">&quot;multipart&quot;</span>] &#125;
+<span class="attr">tokio</span> = &#123; version = <span class="string">&quot;1&quot;</span>, features = [<span class="string">&quot;full&quot;</span>] &#125;
+<span class="attr">serde</span> = &#123; version = <span class="string">&quot;1&quot;</span>, features = [<span class="string">&quot;derive&quot;</span>] &#125;
+<span class="attr">serde_json</span> = <span class="string">&quot;1&quot;</span>
+<span class="attr">sha2</span> = <span class="string">&quot;0.10&quot;</span>
+<span class="attr">hex</span> = <span class="string">&quot;0.4&quot;</span>
+<span class="attr">uuid</span> = &#123; version = <span class="string">&quot;1&quot;</span>, features = [<span class="string">&quot;v4&quot;</span>] &#125;</code></pre>
+
+<p>这里每个依赖大致承担的职责是：</p>
+<ul>
+<li><code>axum</code>：Web 路由和 <code>Multipart</code> extractor</li>
+<li><code>tokio</code>：异步文件操作</li>
+<li><code>sha2</code>：计算文件内容哈希</li>
+<li><code>hex</code>：把摘要编码成十六进制字符串</li>
+<li><code>uuid</code>：生成临时文件名，避免并发写同一中间文件</li>
+</ul>
+<p>注意，这里我没有引入数据库依赖。</p>
+<p>因为这一篇先聚焦上传链路本身：</p>
+<ul>
+<li>提取 multipart</li>
+<li>流式写盘</li>
+<li>计算哈希</li>
+<li>构建目录树</li>
+<li>返回响应</li>
+</ul>
+<p>如果后续要接数据库，把文件元数据持久化到表里即可。</p>
+<hr>
+<h2 id="七、一个更像工程代码的实现"><a href="#七、一个更像工程代码的实现" class="headerlink" title="七、一个更像工程代码的实现"></a>七、一个更像工程代码的实现</h2><p>下面给一个单文件示例，重点演示三件事：</p>
+<ol>
+<li>通过 <code>State&lt;AppState&gt;</code> 注入上传根目录</li>
+<li>对 multipart 中的文件字段做流式读取和写盘</li>
+<li>用 SHA-256 结果构造目录树并实现简单去重</li>
+</ol>
+<pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+	extract::&#123;DefaultBodyLimit, Multipart, State&#125;,
+	http::StatusCode,
+	response::&#123;IntoResponse, Response&#125;,
+	routing::post,
+	Json, Router,
+&#125;;
+<span class="keyword">use</span> serde::Serialize;
+<span class="keyword">use</span> sha2::&#123;Digest, Sha256&#125;;
+<span class="keyword">use</span> std::&#123;path::&#123;Path, PathBuf&#125;, sync::Arc&#125;;
+<span class="keyword">use</span> tokio::&#123;
+	fs,
+	io::AsyncWriteExt,
+&#125;;
+<span class="keyword">use</span> uuid::Uuid;
+
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+	upload_root: Arc&lt;PathBuf&gt;,
+&#125;
+
+<span class="meta">#[derive(Serialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">UploadResponse</span> &#123;
+	field_name: <span class="type">String</span>,
+	original_file_name: <span class="type">Option</span>&lt;<span class="type">String</span>&gt;,
+	sha256: <span class="type">String</span>,
+	size: <span class="type">u64</span>,
+	relative_path: <span class="type">String</span>,
+&#125;
+
+<span class="meta">#[derive(Debug)]</span>
+<span class="keyword">enum</span> <span class="title class_">AppError</span> &#123;
+	<span class="title function_ invoke__">BadRequest</span>(<span class="type">String</span>),
+	<span class="title function_ invoke__">Internal</span>(<span class="type">String</span>),
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">IntoResponse</span> <span class="keyword">for</span> <span class="title class_">AppError</span> &#123;
+	<span class="keyword">fn</span> <span class="title function_">into_response</span>(<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> Response &#123;
+		<span class="keyword">match</span> <span class="keyword">self</span> &#123;
+			AppError::<span class="title function_ invoke__">BadRequest</span>(message) =&gt; &#123;
+				(StatusCode::BAD_REQUEST, message).<span class="title function_ invoke__">into_response</span>()
+			&#125;
+			AppError::<span class="title function_ invoke__">Internal</span>(message) =&gt; &#123;
+				(StatusCode::INTERNAL_SERVER_ERROR, message).<span class="title function_ invoke__">into_response</span>()
+			&#125;
+		&#125;
+	&#125;
+&#125;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+	<span class="keyword">let</span> <span class="variable">upload_root</span> = PathBuf::<span class="title function_ invoke__">from</span>(<span class="string">&quot;./uploads&quot;</span>);
+
+	fs::<span class="title function_ invoke__">create_dir_all</span>(&amp;upload_root)
+		.<span class="keyword">await</span>
+		.<span class="title function_ invoke__">expect</span>(<span class="string">&quot;create upload root failed&quot;</span>);
+
+	<span class="keyword">let</span> <span class="variable">state</span> = AppState &#123;
+		upload_root: Arc::<span class="title function_ invoke__">new</span>(upload_root),
+	&#125;;
+
+	<span class="keyword">let</span> <span class="variable">app</span> = Router::<span class="title function_ invoke__">new</span>()
+		.<span class="title function_ invoke__">route</span>(<span class="string">&quot;/upload&quot;</span>, <span class="title function_ invoke__">post</span>(upload_file))
+		.<span class="title function_ invoke__">with_state</span>(state)
+		.<span class="title function_ invoke__">layer</span>(DefaultBodyLimit::<span class="title function_ invoke__">max</span>(<span class="number">20</span> * <span class="number">1024</span> * <span class="number">1024</span>));
+
+	<span class="keyword">let</span> <span class="variable">listener</span> = tokio::net::TcpListener::<span class="title function_ invoke__">bind</span>(<span class="string">&quot;0.0.0.0:3000&quot;</span>)
+		.<span class="keyword">await</span>
+		.<span class="title function_ invoke__">expect</span>(<span class="string">&quot;bind failed&quot;</span>);
+
+	axum::<span class="title function_ invoke__">serve</span>(listener, app).<span class="keyword">await</span>.<span class="title function_ invoke__">expect</span>(<span class="string">&quot;server failed&quot;</span>);
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">upload_file</span>(
+	<span class="title function_ invoke__">State</span>(state): State&lt;AppState&gt;,
+	<span class="keyword">mut</span> multipart: Multipart,
+) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;Json&lt;<span class="type">Vec</span>&lt;UploadResponse&gt;&gt;, AppError&gt; &#123;
+	<span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">uploaded</span> = <span class="type">Vec</span>::<span class="title function_ invoke__">new</span>();
+
+	<span class="keyword">while</span> <span class="keyword">let</span> <span class="variable">Some</span>(field) = multipart
+		.<span class="title function_ invoke__">next_field</span>()
+		.<span class="keyword">await</span>
+		.<span class="title function_ invoke__">map_err</span>(|err| AppError::<span class="title function_ invoke__">BadRequest</span>(err.<span class="title function_ invoke__">to_string</span>()))?
+	&#123;
+		<span class="keyword">let</span> <span class="variable">Some</span>(field_name) = field.<span class="title function_ invoke__">name</span>().<span class="title function_ invoke__">map</span>(<span class="type">str</span>::to_string) <span class="keyword">else</span> &#123;
+			<span class="keyword">continue</span>;
+		&#125;;
+
+		<span class="keyword">if</span> field_name != <span class="string">&quot;file&quot;</span> &#123;
+			<span class="keyword">continue</span>;
+		&#125;
+
+		<span class="keyword">let</span> <span class="variable">original_file_name</span> = field.<span class="title function_ invoke__">file_name</span>().<span class="title function_ invoke__">map</span>(<span class="type">str</span>::to_string);
+
+		<span class="keyword">let</span> <span class="variable">saved</span> = <span class="title function_ invoke__">save_field_to_storage</span>(&amp;state.upload_root, field_name, original_file_name, field).<span class="keyword">await</span>?;
+		uploaded.<span class="title function_ invoke__">push</span>(saved);
+	&#125;
+
+	<span class="keyword">if</span> uploaded.<span class="title function_ invoke__">is_empty</span>() &#123;
+		<span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(AppError::<span class="title function_ invoke__">BadRequest</span>(<span class="string">&quot;missing file field&quot;</span>.<span class="title function_ invoke__">to_string</span>()));
+	&#125;
+
+	<span class="title function_ invoke__">Ok</span>(<span class="title function_ invoke__">Json</span>(uploaded))
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">save_field_to_storage</span>(
+	upload_root: &amp;Path,
+	field_name: <span class="type">String</span>,
+	original_file_name: <span class="type">Option</span>&lt;<span class="type">String</span>&gt;,
+	<span class="keyword">mut</span> field: axum::extract::multipart::Field&lt;<span class="symbol">&#x27;_</span>&gt;,
+) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;UploadResponse, AppError&gt; &#123;
+	<span class="keyword">let</span> <span class="variable">temp_dir</span> = upload_root.<span class="title function_ invoke__">join</span>(<span class="string">&quot;_tmp&quot;</span>);
+	fs::<span class="title function_ invoke__">create_dir_all</span>(&amp;temp_dir)
+		.<span class="keyword">await</span>
+		.<span class="title function_ invoke__">map_err</span>(internal_err)?;
+
+	<span class="keyword">let</span> <span class="variable">temp_path</span> = temp_dir.<span class="title function_ invoke__">join</span>(Uuid::<span class="title function_ invoke__">new_v4</span>().<span class="title function_ invoke__">to_string</span>());
+	<span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">temp_file</span> = fs::File::<span class="title function_ invoke__">create</span>(&amp;temp_path)
+		.<span class="keyword">await</span>
+		.<span class="title function_ invoke__">map_err</span>(internal_err)?;
+
+	<span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">hasher</span> = Sha256::<span class="title function_ invoke__">new</span>();
+	<span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">size</span> = <span class="number">0_u64</span>;
+
+	<span class="keyword">while</span> <span class="keyword">let</span> <span class="variable">Some</span>(chunk) = field
+		.<span class="title function_ invoke__">chunk</span>()
+		.<span class="keyword">await</span>
+		.<span class="title function_ invoke__">map_err</span>(|err| AppError::<span class="title function_ invoke__">BadRequest</span>(err.<span class="title function_ invoke__">to_string</span>()))?
+	&#123;
+		size += chunk.<span class="title function_ invoke__">len</span>() <span class="keyword">as</span> <span class="type">u64</span>;
+		hasher.<span class="title function_ invoke__">update</span>(&amp;chunk);
+		temp_file.<span class="title function_ invoke__">write_all</span>(&amp;chunk).<span class="keyword">await</span>.<span class="title function_ invoke__">map_err</span>(internal_err)?;
+	&#125;
+
+	temp_file.<span class="title function_ invoke__">flush</span>().<span class="keyword">await</span>.<span class="title function_ invoke__">map_err</span>(internal_err)?;
+
+	<span class="keyword">let</span> <span class="variable">sha256</span> = hex::<span class="title function_ invoke__">encode</span>(hasher.<span class="title function_ invoke__">finalize</span>());
+	<span class="keyword">let</span> <span class="variable">relative_path</span> = <span class="title function_ invoke__">hashed_relative_path</span>(&amp;sha256);
+	<span class="keyword">let</span> <span class="variable">final_path</span> = upload_root.<span class="title function_ invoke__">join</span>(&amp;relative_path);
+
+	<span class="keyword">if</span> <span class="keyword">let</span> <span class="variable">Some</span>(parent) = final_path.<span class="title function_ invoke__">parent</span>() &#123;
+		fs::<span class="title function_ invoke__">create_dir_all</span>(parent).<span class="keyword">await</span>.<span class="title function_ invoke__">map_err</span>(internal_err)?;
+	&#125;
+
+	<span class="keyword">if</span> fs::<span class="title function_ invoke__">try_exists</span>(&amp;final_path).<span class="keyword">await</span>.<span class="title function_ invoke__">map_err</span>(internal_err)? &#123;
+		fs::<span class="title function_ invoke__">remove_file</span>(&amp;temp_path).<span class="keyword">await</span>.<span class="title function_ invoke__">map_err</span>(internal_err)?;
+	&#125; <span class="keyword">else</span> &#123;
+		fs::<span class="title function_ invoke__">rename</span>(&amp;temp_path, &amp;final_path).<span class="keyword">await</span>.<span class="title function_ invoke__">map_err</span>(internal_err)?;
+	&#125;
+
+	<span class="title function_ invoke__">Ok</span>(UploadResponse &#123;
+		field_name,
+		original_file_name,
+		sha256,
+		size,
+		relative_path: relative_path.<span class="title function_ invoke__">to_string_lossy</span>().<span class="title function_ invoke__">to_string</span>(),
+	&#125;)
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">hashed_relative_path</span>(sha256: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> PathBuf &#123;
+	<span class="keyword">let</span> <span class="variable">first</span> = &amp;sha256[<span class="number">0</span>..<span class="number">2</span>];
+	<span class="keyword">let</span> <span class="variable">second</span> = &amp;sha256[<span class="number">2</span>..<span class="number">4</span>];
+	PathBuf::<span class="title function_ invoke__">from</span>(first).<span class="title function_ invoke__">join</span>(second).<span class="title function_ invoke__">join</span>(sha256)
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">internal_err</span>(err: <span class="keyword">impl</span> <span class="title class_">std</span>::fmt::Display) <span class="punctuation">-&gt;</span> AppError &#123;
+	AppError::<span class="title function_ invoke__">Internal</span>(err.<span class="title function_ invoke__">to_string</span>())
+&#125;</code></pre>
+
+<p>这个版本虽然不算完整文件系统服务，但已经有了比较关键的工程特征：</p>
+<ul>
+<li>不一次性把整个文件读入内存</li>
+<li>允许多文件上传</li>
+<li>基于内容哈希落盘</li>
+<li>用临时文件 + 原子重命名避免中途失败留下半成品目标文件</li>
+<li>同内容文件重复上传时直接复用已存在文件</li>
+</ul>
+<p>这个示例默认允许零字节文件上传。如果你的业务不接受空文件，可以在 <code>size == 0</code> 时主动返回 <code>400 Bad Request</code>。</p>
+<p>这和“读 bytes 再 write”的 demo 已经不是一个级别的稳定性。</p>
+<hr>
+<h2 id="八、这段代码到底做了什么？"><a href="#八、这段代码到底做了什么？" class="headerlink" title="八、这段代码到底做了什么？"></a>八、这段代码到底做了什么？</h2><p>如果只看代码，不一定能立刻抓到设计重点。下面把关键动作拆开说。</p>
+<h3 id="8-1-State-负责注入上传根目录"><a href="#8-1-State-负责注入上传根目录" class="headerlink" title="8.1 State&lt;AppState&gt; 负责注入上传根目录"></a>8.1 <code>State&lt;AppState&gt;</code> 负责注入上传根目录</h3><p>这和前面的状态管理篇是一致的。</p>
+<p>上传根目录、对象存储客户端、元数据服务这类“应用启动后长期复用的依赖”，都适合放进 <code>AppState</code>。</p>
+<p>所以这里写成：</p>
+<pre><code class="highlight rust"><span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+	upload_root: Arc&lt;PathBuf&gt;,
+&#125;</code></pre>
+
+<p>这里用 <code>Arc&lt;PathBuf&gt;</code>，本质上是为了让状态克隆成本很低。</p>
+<p>在更真实的项目里，这个状态可能会扩展成：</p>
+<pre><code class="highlight rust"><span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+	upload_root: Arc&lt;PathBuf&gt;,
+	file_repo: FileRepository,
+	audit_service: AuditService,
+&#125;</code></pre>
+
+<p>这就和前面 <code>axum + sqlx</code> 那篇的状态组织方式完全一致了。</p>
+<h3 id="8-2-Multipart-是逐个-field-读取的，不是直接给你一个完整文件列表"><a href="#8-2-Multipart-是逐个-field-读取的，不是直接给你一个完整文件列表" class="headerlink" title="8.2 Multipart 是逐个 field 读取的，不是直接给你一个完整文件列表"></a>8.2 <code>Multipart</code> 是逐个 field 读取的，不是直接给你一个完整文件列表</h3><pre><code class="highlight rust"><span class="keyword">while</span> <span class="keyword">let</span> <span class="variable">Some</span>(field) = multipart.<span class="title function_ invoke__">next_field</span>().<span class="keyword">await</span>? &#123;
+	<span class="comment">// ...</span>
+&#125;</code></pre>
+
+<p>这个写法本身就在提醒你：</p>
+<blockquote>
+<p>multipart 请求本质上是一个字段流，不是一个预先组装好的 Vec<File>。</p>
+</blockquote>
+<p>这意味着你在 handler 里通常要自己判断：</p>
+<ul>
+<li>当前 field 是普通文本字段还是文件字段</li>
+<li><code>name</code> 是否等于你预期的 <code>file</code></li>
+<li>是否允许多个同名文件字段</li>
+</ul>
+<p>如果接口更复杂，例如还要接收 <code>biz</code>、<code>scene</code>、<code>uploader_id</code>，也可以在这个循环里顺手解析文本字段。</p>
+<h3 id="8-3-真正的关键不在-next-field，而在-field-chunk"><a href="#8-3-真正的关键不在-next-field，而在-field-chunk" class="headerlink" title="8.3 真正的关键不在 next_field，而在 field.chunk()"></a>8.3 真正的关键不在 <code>next_field</code>，而在 <code>field.chunk()</code></h3><pre><code class="highlight rust"><span class="keyword">while</span> <span class="keyword">let</span> <span class="variable">Some</span>(chunk) = field.<span class="title function_ invoke__">chunk</span>().<span class="keyword">await</span>? &#123;
+	size += chunk.<span class="title function_ invoke__">len</span>() <span class="keyword">as</span> <span class="type">u64</span>;
+	hasher.<span class="title function_ invoke__">update</span>(&amp;chunk);
+	temp_file.<span class="title function_ invoke__">write_all</span>(&amp;chunk).<span class="keyword">await</span>?;
+&#125;</code></pre>
+
+<p>这是整篇里最核心的一段。</p>
+<p>它体现了上传处理最重要的工程原则：</p>
+<blockquote>
+<p>边读、边算、边写。</p>
+</blockquote>
+<p>具体来说：</p>
+<ul>
+<li><code>field.chunk()</code>：每次取一块字节</li>
+<li><code>size += ...</code>：顺手统计文件大小</li>
+<li><code>hasher.update(...)</code>：同步累计内容哈希</li>
+<li><code>write_all(...)</code>：立即落到临时文件</li>
+</ul>
+<p>这样做的内存占用与 chunk 大小相关，而不是与整个文件大小线性绑定。</p>
+<h3 id="8-4-为什么先写临时文件，再决定最终路径？"><a href="#8-4-为什么先写临时文件，再决定最终路径？" class="headerlink" title="8.4 为什么先写临时文件，再决定最终路径？"></a>8.4 为什么先写临时文件，再决定最终路径？</h3><p>因为最终路径依赖哈希，而哈希只有把完整文件读完后才能确定。</p>
+<p>所以整个流程自然变成：</p>
+<ol>
+<li>先写到临时文件</li>
+<li>同时计算 SHA-256</li>
+<li>读完后得到最终哈希</li>
+<li>根据哈希构造最终路径</li>
+<li>将临时文件重命名到目标位置</li>
+</ol>
+<p>这也是内容寻址上传里非常常见的模式。</p>
+<h3 id="8-5-为什么重复内容上传时可以直接去重？"><a href="#8-5-为什么重复内容上传时可以直接去重？" class="headerlink" title="8.5 为什么重复内容上传时可以直接去重？"></a>8.5 为什么重复内容上传时可以直接去重？</h3><p>如果最终路径由完整 SHA-256 唯一决定，那么相同内容一定映射到相同路径。</p>
+<p>所以这里的逻辑是：</p>
+<pre><code class="highlight rust"><span class="keyword">if</span> fs::<span class="title function_ invoke__">try_exists</span>(&amp;final_path).<span class="keyword">await</span>? &#123;
+	fs::<span class="title function_ invoke__">remove_file</span>(&amp;temp_path).<span class="keyword">await</span>?;
+&#125; <span class="keyword">else</span> &#123;
+	fs::<span class="title function_ invoke__">rename</span>(&amp;temp_path, &amp;final_path).<span class="keyword">await</span>?;
+&#125;</code></pre>
+
+<p>也就是：</p>
+<ul>
+<li>如果目标已经存在，说明内容已经存过了</li>
+<li>临时文件直接删掉</li>
+<li>响应里仍然返回同一个哈希路径</li>
+</ul>
+<p>这就是最基础的一层“物理去重”。</p>
+<hr>
+<h2 id="九、如果还想保留扩展名，应该怎么做？"><a href="#九、如果还想保留扩展名，应该怎么做？" class="headerlink" title="九、如果还想保留扩展名，应该怎么做？"></a>九、如果还想保留扩展名，应该怎么做？</h2><p>上面的示例里，最终文件名直接就是完整哈希，没有保留扩展名。</p>
+<p>这样做的优点是简单、稳定、完全不信任客户端文件名。</p>
+<p>但某些场景下你可能仍然希望保留扩展名，例如：</p>
+<ul>
+<li>方便人工排查</li>
+<li>某些静态资源服务按扩展名做处理</li>
+<li>对接已有文件访问链路</li>
+</ul>
+<p>这时一个比较克制的方案是：</p>
+<ol>
+<li>只把扩展名当成附属信息，不参与内容身份识别</li>
+<li>只从原始文件名中提取最后一个扩展名</li>
+<li>对扩展名做白名单或长度限制</li>
+</ol>
+<p>例如把最终路径变成：</p>
+<pre><code class="highlight text">uploads/2c/f2/2cf24dba5fb0a30e...9824.png</code></pre>
+
+<p>但这里要特别强调：</p>
+<blockquote>
+<p>扩展名只能作为展示或兼容信息，不能作为文件内容类型的安全判断依据。</p>
+</blockquote>
+<p>因为上传方完全可以把可执行文件改名成 <code>.png</code>。</p>
+<p>所以更稳的做法是：</p>
+<ul>
+<li>扩展名只做可选展示</li>
+<li>实际类型判断依赖服务端内容检测或业务白名单</li>
+</ul>
+<hr>
+<h2 id="十、上传接口真正该防的，不是“能不能上传”，而是这些工程问题"><a href="#十、上传接口真正该防的，不是“能不能上传”，而是这些工程问题" class="headerlink" title="十、上传接口真正该防的，不是“能不能上传”，而是这些工程问题"></a>十、上传接口真正该防的，不是“能不能上传”，而是这些工程问题</h2><p>文件上传很容易因为 demo 太顺利，而低估了真实环境里的问题。下面这些点，基本都值得在一开始就纳入设计。</p>
+<h3 id="10-1-请求体大小限制"><a href="#10-1-请求体大小限制" class="headerlink" title="10.1 请求体大小限制"></a>10.1 请求体大小限制</h3><p>如果没有限制，恶意或误操作请求可能直接把服务内存、磁盘或带宽打满。</p>
+<p>所以通常至少要做两层限制：</p>
+<ul>
+<li>HTTP 层限制请求体大小</li>
+<li>业务层限制单文件大小、文件数量、字段数量</li>
+</ul>
+<p>示例里这行代码就是 HTTP 层限制：</p>
+<pre><code class="highlight rust">.<span class="title function_ invoke__">layer</span>(DefaultBodyLimit::<span class="title function_ invoke__">max</span>(<span class="number">20</span> * <span class="number">1024</span> * <span class="number">1024</span>))</code></pre>
+
+<p>如果业务上只允许头像上传，还应该在 handler 里进一步校验：</p>
+<ul>
+<li>只能一张</li>
+<li>不能超过例如 2MB</li>
+<li>只能是图片类型</li>
+</ul>
+<h3 id="10-2-不要信任客户端文件名"><a href="#10-2-不要信任客户端文件名" class="headerlink" title="10.2 不要信任客户端文件名"></a>10.2 不要信任客户端文件名</h3><p>原始文件名最多只能用于展示。</p>
+<p>不要直接用它参与最终落盘路径，更不要把它直接拼成：</p>
+<pre><code class="highlight rust"><span class="built_in">format!</span>(<span class="string">&quot;./uploads/&#123;&#125;&quot;</span>, file_name)</code></pre>
+
+<p>否则容易踩到：</p>
+<ul>
+<li>路径穿越</li>
+<li>特殊字符</li>
+<li>Windows 和 Unix 文件名兼容性差异</li>
+<li>同名覆盖</li>
+</ul>
+<h3 id="10-3-不要只信任-Content-Type"><a href="#10-3-不要只信任-Content-Type" class="headerlink" title="10.3 不要只信任 Content-Type"></a>10.3 不要只信任 <code>Content-Type</code></h3><p>multipart part 里的 <code>Content-Type</code> 一样是客户端声明，不能完全当真。</p>
+<p>它更适合作为：</p>
+<ul>
+<li>前端提示信息</li>
+<li>一层初步过滤</li>
+</ul>
+<p>但如果你的业务对文件类型敏感，例如只允许 PDF、图片、音频，那么服务端最好结合内容检测做更严格校验。</p>
+<h3 id="10-4-失败清理要考虑完整"><a href="#10-4-失败清理要考虑完整" class="headerlink" title="10.4 失败清理要考虑完整"></a>10.4 失败清理要考虑完整</h3><p>上传过程中，任何一个步骤都可能失败：</p>
+<ul>
+<li>multipart 解析失败</li>
+<li>磁盘写入失败</li>
+<li>创建目录失败</li>
+<li>重命名失败</li>
+</ul>
+<p>所以尽量采用：</p>
+<ul>
+<li>临时文件目录</li>
+<li>明确的错误返回</li>
+<li>失败时清理临时文件</li>
+</ul>
+<p>上面示例已经做了“临时写入 + 最终重命名”，但在生产环境里还可以再加：</p>
+<ul>
+<li>后台定时清理长时间残留的 <code>_tmp</code> 文件</li>
+<li>更细粒度的错误码与日志</li>
+</ul>
+<h3 id="10-5-元数据和物理文件要分开管理"><a href="#10-5-元数据和物理文件要分开管理" class="headerlink" title="10.5 元数据和物理文件要分开管理"></a>10.5 元数据和物理文件要分开管理</h3><p>一个很常见的误区是把“上传成功”理解成“磁盘上有这个文件”。</p>
+<p>实际上很多系统里，你还需要记录文件元数据，例如：</p>
+<ul>
+<li>文件 ID</li>
+<li>SHA-256</li>
+<li>原始文件名</li>
+<li>文件大小</li>
+<li>内容类型</li>
+<li>上传人</li>
+<li>业务归属</li>
+<li>创建时间</li>
+</ul>
+<p>这类信息应该进入数据库，而不是只存在文件路径里。</p>
+<p>物理文件和元数据分开，是后续做：</p>
+<ul>
+<li>权限控制</li>
+<li>引用计数</li>
+<li>软删除</li>
+<li>审计日志</li>
+<li>媒体处理任务</li>
+</ul>
+<p>的基础。</p>
+<hr>
+<h2 id="十一、如果接数据库，上传模块应该怎么分层？"><a href="#十一、如果接数据库，上传模块应该怎么分层？" class="headerlink" title="十一、如果接数据库，上传模块应该怎么分层？"></a>十一、如果接数据库，上传模块应该怎么分层？</h2><p>结合前面的 <code>axum + sqlx</code> 那篇，一个比较顺手的分层方式通常是：</p>
+<pre><code class="highlight text">src/
+  main.rs
+  app_state.rs
+  error.rs
+  upload/
+	mod.rs
+	handler.rs
+	service.rs
+	storage.rs
+	repository.rs
+	model.rs</code></pre>
+
+<p>大致职责可以这样划分：</p>
+<h3 id="11-1-handler-层"><a href="#11-1-handler-层" class="headerlink" title="11.1 handler 层"></a>11.1 handler 层</h3><p>负责：</p>
+<ul>
+<li>提取 <code>Multipart</code></li>
+<li>提取认证用户</li>
+<li>调用上传 service</li>
+<li>返回 HTTP 响应</li>
+</ul>
+<h3 id="11-2-service-层"><a href="#11-2-service-层" class="headerlink" title="11.2 service 层"></a>11.2 service 层</h3><p>负责：</p>
+<ul>
+<li>解析业务字段</li>
+<li>协调文件存储和元数据写库</li>
+<li>定义事务边界</li>
+<li>处理“同内容已存在”这类业务逻辑</li>
+</ul>
+<h3 id="11-3-storage-层"><a href="#11-3-storage-层" class="headerlink" title="11.3 storage 层"></a>11.3 storage 层</h3><p>负责：</p>
+<ul>
+<li>流式写文件</li>
+<li>计算哈希</li>
+<li>生成目录树路径</li>
+<li>对接本地磁盘、S3、OSS、MinIO 等实际存储介质</li>
+</ul>
+<h3 id="11-4-repository-层"><a href="#11-4-repository-层" class="headerlink" title="11.4 repository 层"></a>11.4 repository 层</h3><p>负责：</p>
+<ul>
+<li>持久化文件元数据</li>
+<li>查询是否已有相同哈希记录</li>
+<li>维护引用关系</li>
+</ul>
+<p>这样拆分之后，HTTP 层、存储层、数据库层职责就会比较清楚。</p>
+<p>也就是说，真正成熟的上传模块，往往不是一个 handler 直接干完所有事，而是：</p>
+<blockquote>
+<p>handler 只负责接请求，真正的“上传逻辑”应该沉到 service 和 storage 层。</p>
+</blockquote>
+<hr>
+<h2 id="十二、一个更贴近业务的返回结构应该长什么样？"><a href="#十二、一个更贴近业务的返回结构应该长什么样？" class="headerlink" title="十二、一个更贴近业务的返回结构应该长什么样？"></a>十二、一个更贴近业务的返回结构应该长什么样？</h2><p>上面的示例返回了：</p>
+<ul>
+<li>原始字段名</li>
+<li>原始文件名</li>
+<li><code>sha256</code></li>
+<li><code>size</code></li>
+<li>相对路径</li>
+</ul>
+<p>这已经足够做 demo。</p>
+<p>但真实项目里，返回结构通常会更偏向“文件资源对象”，例如：</p>
+<pre><code class="highlight json"><span class="punctuation">&#123;</span>
+  <span class="attr">&quot;id&quot;</span><span class="punctuation">:</span> <span class="string">&quot;file_01JZ...&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;sha256&quot;</span><span class="punctuation">:</span> <span class="string">&quot;2cf24dba5fb0a30e26e83b2ac5b9e29e...&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;size&quot;</span><span class="punctuation">:</span> <span class="number">182736</span><span class="punctuation">,</span>
+  <span class="attr">&quot;content_type&quot;</span><span class="punctuation">:</span> <span class="string">&quot;image/png&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;original_file_name&quot;</span><span class="punctuation">:</span> <span class="string">&quot;avatar.png&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;url&quot;</span><span class="punctuation">:</span> <span class="string">&quot;/static/files/2c/f2/2cf24dba5fb0a30e...&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;created_at&quot;</span><span class="punctuation">:</span> <span class="string">&quot;2026-04-07T10:20:30Z&quot;</span>
+<span class="punctuation">&#125;</span></code></pre>
+
+<p>注意这里的 <code>url</code> 通常不应该直接等于物理磁盘路径。</p>
+<p>更好的方式是：</p>
+<ul>
+<li>存储层返回相对存储键</li>
+<li>资源层根据规则映射成可访问 URL</li>
+</ul>
+<p>这样未来你把本地磁盘切换到对象存储，外部接口就不会大改。</p>
+<hr>
+<h2 id="十三、常见误区总结"><a href="#十三、常见误区总结" class="headerlink" title="十三、常见误区总结"></a>十三、常见误区总结</h2><p>把这一篇收束一下，上传接口最常见的误区通常是下面这些：</p>
+<h3 id="13-1-把上传理解成“读完-bytes-再写文件”"><a href="#13-1-把上传理解成“读完-bytes-再写文件”" class="headerlink" title="13.1 把上传理解成“读完 bytes 再写文件”"></a>13.1 把上传理解成“读完 bytes 再写文件”</h3><p>这在小 demo 里能跑，但一旦文件稍大或并发稍高，就会暴露内存问题。</p>
+<p>更稳妥的方向是流式读取。</p>
+<h3 id="13-2-把客户端文件名当作可信路径"><a href="#13-2-把客户端文件名当作可信路径" class="headerlink" title="13.2 把客户端文件名当作可信路径"></a>13.2 把客户端文件名当作可信路径</h3><p>文件名最多是展示信息，不应该作为真正的存储主键。</p>
+<h3 id="13-3-不做大小限制"><a href="#13-3-不做大小限制" class="headerlink" title="13.3 不做大小限制"></a>13.3 不做大小限制</h3><p>没有大小限制的上传接口，本质上就是把资源消耗控制权交给了客户端。</p>
+<h3 id="13-4-只关心落盘，不关心元数据"><a href="#13-4-只关心落盘，不关心元数据" class="headerlink" title="13.4 只关心落盘，不关心元数据"></a>13.4 只关心落盘，不关心元数据</h3><p>如果没有元数据层，后续很多业务能力都会很难做。</p>
+<h3 id="13-5-目录结构设计过于草率"><a href="#13-5-目录结构设计过于草率" class="headerlink" title="13.5 目录结构设计过于草率"></a>13.5 目录结构设计过于草率</h3><p>开始时平铺所有文件很方便，但长期来看，基于哈希前缀做目录树通常更稳。</p>
+<hr>
+<h2 id="十四、最后把主线收住"><a href="#十四、最后把主线收住" class="headerlink" title="十四、最后把主线收住"></a>十四、最后把主线收住</h2><p>如果你把这篇和前面几篇 axum 文章连起来看，会发现文件上传其实是一个很典型的综合题：</p>
+<ul>
+<li><code>Multipart</code> 是 Extractor，所以它属于请求体提取阶段</li>
+<li>上传根目录或存储客户端适合放进 <code>State</code></li>
+<li>上传失败需要统一错误响应</li>
+<li>限流、大小控制、审计可以通过中间件和服务层配合完成</li>
+<li>最终整个请求仍然服从 axum 那条完整生命周期</li>
+</ul>
+<p>也就是说，文件上传并不是一个孤立技巧，而是前面那些概念在真实业务里的集中落地。</p>
+<p>如果只追求“能传上去”，实现当然可以很短；但如果你希望这个接口在后面还能承受：</p>
+<ul>
+<li>更大的文件</li>
+<li>更高的并发</li>
+<li>更清晰的文件组织</li>
+<li>更稳定的错误处理</li>
+<li>更自然的后续演进</li>
+</ul>
+<p>那么“流式处理 + 内容哈希 + 目录树分片 + 元数据分层”会是一个明显更稳的起点。</p>
+<p>对于本地文件系统场景，这已经是一条很实用的路线。</p>
+<p>而如果未来你要迁移到对象存储，其实也不会推翻这套思路，因为最关键的抽象并不是“写本地磁盘”，而是：</p>
+<blockquote>
+<p>用稳定的内容标识组织文件，用清晰的边界管理上传流程。</p>
+</blockquote>
+<p>这才是上传模块真正可维护的核心。</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
