@@ -1,0 +1,808 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust tracing 日志实践：结构化日志、span、请求链路追踪怎么做</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust tracing 日志实践：结构化日志、span、请求链路追踪怎么做</h1><div class="time">2026-04-24</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><h2 id="引言"><a href="#引言" class="headerlink" title="引言"></a>引言</h2><p>写 Rust 服务写到后面，很多人都会遇到一个很现实的问题：</p>
+<blockquote>
+<p>程序明明跑起来了，但一出问题，根本不知道它到底在做什么。</p>
+</blockquote>
+<p>刚开始写 demo 的时候，这个问题通常不明显。</p>
+<p>你可能只会写一些简单输出：</p>
+<pre><code class="highlight rust"><span class="built_in">println!</span>(<span class="string">&quot;server started&quot;</span>);
+<span class="built_in">println!</span>(<span class="string">&quot;query user id = &#123;&#125;&quot;</span>, user_id);
+<span class="built_in">println!</span>(<span class="string">&quot;db error: &#123;:?&#125;&quot;</span>, err);</code></pre>
+
+<p>在单文件 demo 里，这些输出看起来还能接受。</p>
+<p>但只要项目开始变得像一个真正的服务，问题马上就会暴露出来：</p>
+<ul>
+<li>请求一多，日志互相穿插，根本看不出哪条属于哪个请求</li>
+<li>异步任务切换之后，日志上下文丢失</li>
+<li>你能看到一句“查询失败”，但不知道是哪个接口、哪个用户、哪个 request id</li>
+<li>日志是一大段字符串，后续没法做检索、聚合和统计</li>
+<li>想看一条请求从入口到数据库调用的完整链路，非常费劲</li>
+</ul>
+<p>这些问题说明：</p>
+<blockquote>
+<p>真正有工程价值的日志，不是“打印了什么”，而是“是否携带了足够稳定的上下文”。</p>
+</blockquote>
+<p>这也正是 Rust 里 <code>tracing</code> 生态解决的问题。</p>
+<p>和传统的“只输出一行文本”不同，<code>tracing</code> 更强调三件事：</p>
+<ol>
+<li>结构化日志：日志不是纯文本拼接，而是带字段的事件</li>
+<li>span 上下文：一段操作可以带着上下文向下传递</li>
+<li>链路追踪：同一条请求在不同函数、不同任务中的日志能串起来</li>
+</ol>
+<p>如果你前面已经写过 axum、状态管理、中间件、错误处理，那么这一篇其实是一个非常自然的下一步：</p>
+<blockquote>
+<p>把“服务能跑”推进到“服务可观测、可排查、可维护”。</p>
+</blockquote>
+<p>这篇文章我会围绕下面几个问题展开：</p>
+<ol>
+<li><code>tracing</code> 和普通日志库到底差别在哪</li>
+<li>什么是结构化日志，为什么它适合服务端程序</li>
+<li><code>span</code> 到底是什么，和日志事件是什么关系</li>
+<li>如何在 axum 里做请求链路追踪</li>
+<li>如何把 request id、用户 id、handler、数据库操作放到同一条上下文里</li>
+<li>怎样写出一套“能跑、能看、后面还能接日志平台”的基础方案</li>
+</ol>
+<p>文章里会给出一套可运行代码，并尽量解释清楚每一层设计的理由。</p>
+<hr>
+<h2 id="一、先回答根问题：为什么-println-不够用？"><a href="#一、先回答根问题：为什么-println-不够用？" class="headerlink" title="一、先回答根问题：为什么 println! 不够用？"></a>一、先回答根问题：为什么 <code>println!</code> 不够用？</h2><p>很多人第一次接触日志，都不是从日志系统开始，而是从调试输出开始。</p>
+<p>这完全正常。</p>
+<p>例如：</p>
+<pre><code class="highlight rust"><span class="built_in">println!</span>(<span class="string">&quot;create user request arrived&quot;</span>);
+<span class="built_in">println!</span>(<span class="string">&quot;user id = &#123;&#125;&quot;</span>, user_id);
+<span class="built_in">println!</span>(<span class="string">&quot;insert user success&quot;</span>);</code></pre>
+
+<p>这在本地调试时非常直接。</p>
+<p>但一旦进入服务端场景，它会出现几个典型问题。</p>
+<h3 id="1-1-日志缺少统一格式"><a href="#1-1-日志缺少统一格式" class="headerlink" title="1.1 日志缺少统一格式"></a>1.1 日志缺少统一格式</h3><p>不同人、不同模块，输出风格通常完全不一样：</p>
+<ul>
+<li>有人写英文</li>
+<li>有人写中文</li>
+<li>有人只打一段文本</li>
+<li>有人自己拼时间、模块名、参数</li>
+</ul>
+<p>最后整个日志流既不整齐，也难以检索。</p>
+<h3 id="1-2-日志缺少稳定字段"><a href="#1-2-日志缺少稳定字段" class="headerlink" title="1.2 日志缺少稳定字段"></a>1.2 日志缺少稳定字段</h3><p>比如你想问：</p>
+<ul>
+<li>哪个 request 失败了</li>
+<li>哪个用户调用了这个接口</li>
+<li>这个错误来自哪个 handler</li>
+<li>这条日志属于哪一次数据库查询</li>
+</ul>
+<p>如果日志只是字符串，这些信息就只能靠肉眼猜。</p>
+<h3 id="1-3-异步程序天然更依赖上下文"><a href="#1-3-异步程序天然更依赖上下文" class="headerlink" title="1.3 异步程序天然更依赖上下文"></a>1.3 异步程序天然更依赖上下文</h3><p>在同步程序里，一段代码通常就是顺着往下执行。</p>
+<p>但在异步程序里：</p>
+<ul>
+<li>任务会切换</li>
+<li>future 会被挂起和恢复</li>
+<li>不同请求的日志会交错输出</li>
+</ul>
+<p>这时你最需要的不是“多打一条日志”，而是：</p>
+<blockquote>
+<p>让日志自动带着当前执行上下文一起流动。</p>
+</blockquote>
+<h3 id="1-4-日志不只是给人看，也是给系统读的"><a href="#1-4-日志不只是给人看，也是给系统读的" class="headerlink" title="1.4 日志不只是给人看，也是给系统读的"></a>1.4 日志不只是给人看，也是给系统读的</h3><p>如果后面你想接入：</p>
+<ul>
+<li>Loki</li>
+<li>Elasticsearch</li>
+<li>Datadog</li>
+<li>OpenTelemetry Collector</li>
+</ul>
+<p>那么纯文本日志的价值会很有限。</p>
+<p>机器更喜欢的是带字段的结构化日志，例如：</p>
+<pre><code class="highlight json"><span class="punctuation">&#123;</span>
+  <span class="attr">&quot;timestamp&quot;</span><span class="punctuation">:</span> <span class="string">&quot;2026-04-07T10:20:30Z&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;level&quot;</span><span class="punctuation">:</span> <span class="string">&quot;INFO&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;request_id&quot;</span><span class="punctuation">:</span> <span class="string">&quot;req_123&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;user_id&quot;</span><span class="punctuation">:</span> <span class="number">42</span><span class="punctuation">,</span>
+  <span class="attr">&quot;path&quot;</span><span class="punctuation">:</span> <span class="string">&quot;/users/42&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;message&quot;</span><span class="punctuation">:</span> <span class="string">&quot;query user success&quot;</span>
+<span class="punctuation">&#125;</span></code></pre>
+
+<p>这就是为什么工程里越来越倾向于结构化日志。</p>
+<hr>
+<h2 id="二、tracing-和传统日志的差别到底是什么？"><a href="#二、tracing-和传统日志的差别到底是什么？" class="headerlink" title="二、tracing 和传统日志的差别到底是什么？"></a>二、<code>tracing</code> 和传统日志的差别到底是什么？</h2><p>先给一个非常粗糙但实用的理解：</p>
+<ul>
+<li><code>log</code> 更像“打一条日志”</li>
+<li><code>tracing</code> 更像“在一个带上下文的执行过程里记录事件”</li>
+</ul>
+<p>也就是说，<code>tracing</code> 不只关心一条文本消息，还关心：</p>
+<ul>
+<li>当前在哪个 span 里</li>
+<li>当前 span 带了哪些字段</li>
+<li>这条事件是在什么上下文里发生的</li>
+<li>这个上下文能不能继续往下传递</li>
+</ul>
+<p>所以在 <code>tracing</code> 里，最核心的两个概念就是：</p>
+<ol>
+<li><code>event</code></li>
+<li><code>span</code></li>
+</ol>
+<h3 id="2-1-什么是-event？"><a href="#2-1-什么是-event？" class="headerlink" title="2.1 什么是 event？"></a>2.1 什么是 event？</h3><p>event 就是一条具体发生的事情。</p>
+<p>例如：</p>
+<pre><code class="highlight rust">tracing::info!(user_id = <span class="number">42</span>, <span class="string">&quot;query user success&quot;</span>);</code></pre>
+
+<p>这条信息里包含两部分：</p>
+<ul>
+<li>文本消息：<code>query user success</code></li>
+<li>结构化字段：<code>user_id = 42</code></li>
+</ul>
+<h3 id="2-2-什么是-span？"><a href="#2-2-什么是-span？" class="headerlink" title="2.2 什么是 span？"></a>2.2 什么是 span？</h3><p>span 表示一段带上下文的执行范围。</p>
+<p>例如：</p>
+<pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">span</span> = tracing::info_span!(<span class="string">&quot;http_request&quot;</span>, request_id = %request_id, path = %path);
+<span class="keyword">let</span> <span class="variable">_guard</span> = span.<span class="title function_ invoke__">enter</span>();</code></pre>
+
+<p>你可以先把它理解成：</p>
+<blockquote>
+<p>从这里开始，后续在这个范围内发生的日志，都自动带上 <code>request_id</code> 和 <code>path</code> 这类上下文。</p>
+</blockquote>
+<p>这就是 <code>tracing</code> 最有价值的地方：</p>
+<blockquote>
+<p>不是你手动给每一条日志都重复拼上 request id，而是上下文自动跟着执行过程往下走。</p>
+</blockquote>
+<h3 id="2-3-为什么-span-对-Web-服务特别重要？"><a href="#2-3-为什么-span-对-Web-服务特别重要？" class="headerlink" title="2.3 为什么 span 对 Web 服务特别重要？"></a>2.3 为什么 span 对 Web 服务特别重要？</h3><p>因为一次 HTTP 请求天然就是一个“范围”。</p>
+<p>例如一条请求会经历：</p>
+<ul>
+<li>进入路由</li>
+<li>参数提取</li>
+<li>调用 service</li>
+<li>查询数据库</li>
+<li>组装响应</li>
+</ul>
+<p>如果整条请求都有一个共同的 span，那么你在任何一层打日志，都能带上同一个 request id、path、method、user id。</p>
+<p>这就是请求链路追踪的基础。</p>
+<hr>
+<h2 id="三、先给一个最小可运行方案"><a href="#三、先给一个最小可运行方案" class="headerlink" title="三、先给一个最小可运行方案"></a>三、先给一个最小可运行方案</h2><p>下面先不讲太复杂的整合，先给一套可以直接跑起来的最小项目。</p>
+<p>这个示例做几件事：</p>
+<ol>
+<li>初始化 <code>tracing_subscriber</code></li>
+<li>启动一个 axum 服务</li>
+<li>给每条请求生成 request id</li>
+<li>为每个请求建立 span</li>
+<li>在 handler 和 service 里输出结构化日志</li>
+</ol>
+<h3 id="3-1-Cargo-toml"><a href="#3-1-Cargo-toml" class="headerlink" title="3.1 Cargo.toml"></a>3.1 <code>Cargo.toml</code></h3><pre><code class="highlight toml"><span class="section">[package]</span>
+<span class="attr">name</span> = <span class="string">&quot;tracing-demo&quot;</span>
+<span class="attr">version</span> = <span class="string">&quot;0.1.0&quot;</span>
+<span class="attr">edition</span> = <span class="string">&quot;2021&quot;</span>
+
+<span class="section">[dependencies]</span>
+<span class="attr">axum</span> = <span class="string">&quot;0.8&quot;</span>
+<span class="attr">tokio</span> = &#123; version = <span class="string">&quot;1&quot;</span>, features = [<span class="string">&quot;full&quot;</span>] &#125;
+<span class="attr">tracing</span> = <span class="string">&quot;0.1&quot;</span>
+<span class="attr">tracing-subscriber</span> = &#123; version = <span class="string">&quot;0.3&quot;</span>, features = [<span class="string">&quot;env-filter&quot;</span>, <span class="string">&quot;fmt&quot;</span>, <span class="string">&quot;json&quot;</span>] &#125;
+<span class="attr">uuid</span> = &#123; version = <span class="string">&quot;1&quot;</span>, features = [<span class="string">&quot;v4&quot;</span>] &#125;
+<span class="attr">serde</span> = &#123; version = <span class="string">&quot;1&quot;</span>, features = [<span class="string">&quot;derive&quot;</span>] &#125;
+<span class="attr">serde_json</span> = <span class="string">&quot;1&quot;</span></code></pre>
+
+<h3 id="3-2-src-main-rs"><a href="#3-2-src-main-rs" class="headerlink" title="3.2 src/main.rs"></a>3.2 <code>src/main.rs</code></h3><pre><code class="highlight rust"><span class="keyword">use</span> axum::&#123;
+    extract::&#123;MatchedPath, Request, State&#125;,
+    http::&#123;HeaderValue, StatusCode&#125;,
+    middleware::&#123;<span class="keyword">self</span>, Next&#125;,
+    response::&#123;IntoResponse, Response&#125;,
+    routing::get,
+    Json, Router,
+&#125;;
+<span class="keyword">use</span> serde::Serialize;
+<span class="keyword">use</span> std::&#123;net::SocketAddr, sync::Arc, time::Duration&#125;;
+<span class="keyword">use</span> tokio::time::sleep;
+<span class="keyword">use</span> tracing::&#123;error, info, info_span, Instrument&#125;;
+<span class="keyword">use</span> tracing_subscriber::&#123;fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter&#125;;
+<span class="keyword">use</span> uuid::Uuid;
+
+<span class="meta">#[derive(Clone)]</span>
+<span class="keyword">struct</span> <span class="title class_">AppState</span> &#123;
+    app_name: Arc&lt;<span class="type">String</span>&gt;,
+&#125;
+
+<span class="meta">#[derive(Serialize)]</span>
+<span class="keyword">struct</span> <span class="title class_">UserResponse</span> &#123;
+    id: <span class="type">u64</span>,
+    name: <span class="type">String</span>,
+&#125;
+
+<span class="meta">#[derive(Debug)]</span>
+<span class="keyword">enum</span> <span class="title class_">AppError</span> &#123;
+    NotFound,
+    Internal,
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">IntoResponse</span> <span class="keyword">for</span> <span class="title class_">AppError</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">into_response</span>(<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> Response &#123;
+        <span class="keyword">match</span> <span class="keyword">self</span> &#123;
+            AppError::NotFound =&gt; &#123;
+                (StatusCode::NOT_FOUND, <span class="string">&quot;user not found&quot;</span>).<span class="title function_ invoke__">into_response</span>()
+            &#125;
+            AppError::Internal =&gt; &#123;
+                (StatusCode::INTERNAL_SERVER_ERROR, <span class="string">&quot;internal error&quot;</span>).<span class="title function_ invoke__">into_response</span>()
+            &#125;
+        &#125;
+    &#125;
+&#125;
+
+<span class="meta">#[tokio::main]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="title function_ invoke__">init_tracing</span>();
+
+    <span class="keyword">let</span> <span class="variable">state</span> = AppState &#123;
+        app_name: Arc::<span class="title function_ invoke__">new</span>(<span class="string">&quot;tracing-demo&quot;</span>.<span class="title function_ invoke__">to_string</span>()),
+    &#125;;
+
+    <span class="keyword">let</span> <span class="variable">app</span> = Router::<span class="title function_ invoke__">new</span>()
+        .<span class="title function_ invoke__">route</span>(<span class="string">&quot;/ping&quot;</span>, <span class="title function_ invoke__">get</span>(ping))
+        .<span class="title function_ invoke__">route</span>(<span class="string">&quot;/users/&#123;id&#125;&quot;</span>, <span class="title function_ invoke__">get</span>(get_user))
+        .<span class="title function_ invoke__">with_state</span>(state)
+        .<span class="title function_ invoke__">layer</span>(middleware::<span class="title function_ invoke__">from_fn</span>(request_context_middleware));
+
+    <span class="keyword">let</span> <span class="variable">addr</span> = SocketAddr::<span class="title function_ invoke__">from</span>(([<span class="number">127</span>, <span class="number">0</span>, <span class="number">0</span>, <span class="number">1</span>], <span class="number">3000</span>));
+    info!(%addr, <span class="string">&quot;starting server&quot;</span>);
+
+    <span class="keyword">let</span> <span class="variable">listener</span> = tokio::net::TcpListener::<span class="title function_ invoke__">bind</span>(addr)
+        .<span class="keyword">await</span>
+        .<span class="title function_ invoke__">expect</span>(<span class="string">&quot;bind failed&quot;</span>);
+
+    axum::<span class="title function_ invoke__">serve</span>(listener, app).<span class="keyword">await</span>.<span class="title function_ invoke__">expect</span>(<span class="string">&quot;server failed&quot;</span>);
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">init_tracing</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">env_filter</span> = EnvFilter::<span class="title function_ invoke__">try_from_default_env</span>()
+        .<span class="title function_ invoke__">unwrap_or_else</span>(|_| EnvFilter::<span class="title function_ invoke__">new</span>(<span class="string">&quot;info,axum=info,tracing_demo=debug&quot;</span>));
+
+    tracing_subscriber::<span class="title function_ invoke__">registry</span>()
+        .<span class="title function_ invoke__">with</span>(env_filter)
+        .<span class="title function_ invoke__">with</span>(
+            fmt::<span class="title function_ invoke__">layer</span>()
+                .<span class="title function_ invoke__">with_target</span>(<span class="literal">true</span>)
+                .<span class="title function_ invoke__">with_thread_ids</span>(<span class="literal">true</span>)
+                .<span class="title function_ invoke__">with_thread_names</span>(<span class="literal">true</span>),
+        )
+        .<span class="title function_ invoke__">init</span>();
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">request_context_middleware</span>(<span class="keyword">mut</span> request: Request, next: Next) <span class="punctuation">-&gt;</span> Response &#123;
+    <span class="keyword">let</span> <span class="variable">request_id</span> = Uuid::<span class="title function_ invoke__">new_v4</span>().<span class="title function_ invoke__">to_string</span>();
+    <span class="keyword">let</span> <span class="variable">method</span> = request.<span class="title function_ invoke__">method</span>().<span class="title function_ invoke__">clone</span>();
+    <span class="keyword">let</span> <span class="variable">path</span> = request
+        .<span class="title function_ invoke__">extensions</span>()
+        .get::&lt;MatchedPath&gt;()
+        .<span class="title function_ invoke__">map</span>(|matched| matched.<span class="title function_ invoke__">as_str</span>().<span class="title function_ invoke__">to_string</span>())
+        .<span class="title function_ invoke__">unwrap_or_else</span>(|| request.<span class="title function_ invoke__">uri</span>().<span class="title function_ invoke__">path</span>().<span class="title function_ invoke__">to_string</span>());
+
+    request.<span class="title function_ invoke__">extensions_mut</span>().<span class="title function_ invoke__">insert</span>(<span class="title function_ invoke__">RequestId</span>(request_id.<span class="title function_ invoke__">clone</span>()));
+
+    <span class="keyword">let</span> <span class="variable">span</span> = info_span!(
+        <span class="string">&quot;http_request&quot;</span>,
+        request_id = %request_id,
+        method = %method,
+        path = %path,
+    );
+
+    <span class="keyword">async</span> <span class="keyword">move</span> &#123;
+        info!(<span class="string">&quot;request started&quot;</span>);
+
+        <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">response</span> = next.<span class="title function_ invoke__">run</span>(request).<span class="keyword">await</span>;
+        response.<span class="title function_ invoke__">headers_mut</span>().<span class="title function_ invoke__">insert</span>(
+            <span class="string">&quot;x-request-id&quot;</span>,
+            HeaderValue::<span class="title function_ invoke__">from_str</span>(&amp;request_id).<span class="title function_ invoke__">unwrap_or</span>(HeaderValue::<span class="title function_ invoke__">from_static</span>(<span class="string">&quot;invalid-request-id&quot;</span>)),
+        );
+
+        info!(status = %response.<span class="title function_ invoke__">status</span>(), <span class="string">&quot;request finished&quot;</span>);
+        response
+    &#125;
+    .<span class="title function_ invoke__">instrument</span>(span)
+    .<span class="keyword">await</span>
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">ping</span>(<span class="title function_ invoke__">State</span>(state): State&lt;AppState&gt;) <span class="punctuation">-&gt;</span> Json&lt;serde_json::Value&gt; &#123;
+    info!(app_name = %state.app_name.<span class="title function_ invoke__">as_ref</span>(), <span class="string">&quot;ping called&quot;</span>);
+    <span class="title function_ invoke__">Json</span>(serde_json::json!(&#123; <span class="string">&quot;message&quot;</span>: <span class="string">&quot;pong&quot;</span> &#125;))
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">get_user</span>(
+    <span class="title function_ invoke__">State</span>(_state): State&lt;AppState&gt;,
+    axum::extract::<span class="title function_ invoke__">Path</span>(id): axum::extract::Path&lt;<span class="type">u64</span>&gt;,
+    request_id: RequestId,
+) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;Json&lt;UserResponse&gt;, AppError&gt; &#123;
+    info!(user_id = id, request_id = %request_id.<span class="number">0</span>, <span class="string">&quot;handler received request&quot;</span>);
+
+    <span class="keyword">let</span> <span class="variable">user</span> = <span class="title function_ invoke__">find_user</span>(id)
+        .<span class="title function_ invoke__">instrument</span>(info_span!(<span class="string">&quot;find_user&quot;</span>, user_id = id))
+        .<span class="keyword">await</span>?;
+
+    info!(user_id = user.id, user_name = %user.name, <span class="string">&quot;handler returning user&quot;</span>);
+    <span class="title function_ invoke__">Ok</span>(<span class="title function_ invoke__">Json</span>(user))
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">find_user</span>(id: <span class="type">u64</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;UserResponse, AppError&gt; &#123;
+    info!(user_id = id, <span class="string">&quot;query user from service layer&quot;</span>);
+
+    <span class="title function_ invoke__">sleep</span>(Duration::<span class="title function_ invoke__">from_millis</span>(<span class="number">80</span>)).<span class="keyword">await</span>;
+
+    <span class="keyword">if</span> id == <span class="number">404</span> &#123;
+        error!(user_id = id, <span class="string">&quot;user not found in service layer&quot;</span>);
+        <span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(AppError::NotFound);
+    &#125;
+
+    <span class="keyword">if</span> id == <span class="number">500</span> &#123;
+        error!(user_id = id, <span class="string">&quot;unexpected database failure&quot;</span>);
+        <span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(AppError::Internal);
+    &#125;
+
+    <span class="title function_ invoke__">Ok</span>(UserResponse &#123;
+        id,
+        name: <span class="built_in">format!</span>(<span class="string">&quot;user-&#123;&#125;&quot;</span>, id),
+    &#125;)
+&#125;
+
+<span class="meta">#[derive(Clone, Debug)]</span>
+<span class="keyword">struct</span> <span class="title class_">RequestId</span>(<span class="type">String</span>);
+
+<span class="keyword">impl</span>&lt;S&gt; axum::extract::FromRequestParts&lt;S&gt; <span class="keyword">for</span> <span class="title class_">RequestId</span>
+<span class="keyword">where</span>
+    S: <span class="built_in">Send</span> + <span class="built_in">Sync</span>,
+&#123;
+    <span class="keyword">type</span> <span class="title class_">Rejection</span> = AppError;
+
+    <span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">from_request_parts</span>(
+        parts: &amp;<span class="keyword">mut</span> axum::http::request::Parts,
+        _state: &amp;S,
+    ) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="keyword">Self</span>, <span class="keyword">Self</span>::Rejection&gt; &#123;
+        parts
+            .extensions
+            .get::&lt;RequestId&gt;()
+            .<span class="title function_ invoke__">cloned</span>()
+            .<span class="title function_ invoke__">ok_or</span>(AppError::Internal)
+    &#125;
+&#125;</code></pre>
+
+<h3 id="3-3-如何运行"><a href="#3-3-如何运行" class="headerlink" title="3.3 如何运行"></a>3.3 如何运行</h3><pre><code class="highlight bash">cargo run</code></pre>
+
+<p>然后用另一个终端请求：</p>
+<pre><code class="highlight bash">curl http://127.0.0.1:3000/ping
+curl http://127.0.0.1:3000/users/1
+curl http://127.0.0.1:3000/users/404
+curl http://127.0.0.1:3000/users/500</code></pre>
+
+<p>你会看到类似这样的日志：</p>
+<pre><code class="highlight text">INFO http_request&#123;request_id=6bc1... method=GET path=/users/&#123;id&#125;&#125;: request started
+INFO http_request&#123;request_id=6bc1... method=GET path=/users/&#123;id&#125;&#125;: handler received request user_id=1 request_id=6bc1...
+INFO http_request&#123;request_id=6bc1... method=GET path=/users/&#123;id&#125;&#125;:find_user&#123;user_id=1&#125;: query user from service layer
+INFO http_request&#123;request_id=6bc1... method=GET path=/users/&#123;id&#125;&#125;: handler returning user user_id=1 user_name=user-1
+INFO http_request&#123;request_id=6bc1... method=GET path=/users/&#123;id&#125;&#125;: request finished status=200 OK</code></pre>
+
+<p>注意这里最关键的一点：</p>
+<blockquote>
+<p>同一条请求里的日志，已经自动挂在同一个 <code>http_request</code> span 下了。</p>
+</blockquote>
+<hr>
+<h2 id="四、先别急着背-API，先理解这套代码到底解决了什么"><a href="#四、先别急着背-API，先理解这套代码到底解决了什么" class="headerlink" title="四、先别急着背 API，先理解这套代码到底解决了什么"></a>四、先别急着背 API，先理解这套代码到底解决了什么</h2><p>如果你只是照着把代码抄下来，确实也能跑。但这篇真正重要的不是“把 subscriber 初始化一下”，而是理解每一层设计在解决什么问题。</p>
+<h3 id="4-1-tracing-subscriber-负责把“记录行为”真正输出出来"><a href="#4-1-tracing-subscriber-负责把“记录行为”真正输出出来" class="headerlink" title="4.1 tracing_subscriber 负责把“记录行为”真正输出出来"></a>4.1 <code>tracing_subscriber</code> 负责把“记录行为”真正输出出来</h3><p><code>tracing</code> 只是定义了一套事件和 span 的接口。</p>
+<p>真正决定日志如何输出的是 subscriber。</p>
+<p>这段代码：</p>
+<pre><code class="highlight rust">tracing_subscriber::<span class="title function_ invoke__">registry</span>()
+    .<span class="title function_ invoke__">with</span>(env_filter)
+    .<span class="title function_ invoke__">with</span>(fmt::<span class="title function_ invoke__">layer</span>())
+    .<span class="title function_ invoke__">init</span>();</code></pre>
+
+<p>可以粗略理解成：</p>
+<ul>
+<li><code>registry()</code>：作为整个订阅器根节点</li>
+<li><code>EnvFilter</code>：决定哪些级别、哪些模块要输出</li>
+<li><code>fmt::layer()</code>：决定怎样把事件格式化到终端</li>
+</ul>
+<p>如果你没有初始化 subscriber，那么即使代码里写了 <code>info!</code>、<code>warn!</code>、<code>error!</code>，很多时候你也看不到任何输出。</p>
+<h3 id="4-2-info-不是“拼字符串”，而是在记录字段"><a href="#4-2-info-不是“拼字符串”，而是在记录字段" class="headerlink" title="4.2 info! 不是“拼字符串”，而是在记录字段"></a>4.2 <code>info!</code> 不是“拼字符串”，而是在记录字段</h3><p>例如：</p>
+<pre><code class="highlight rust">info!(user_id = id, user_name = %user.name, <span class="string">&quot;handler returning user&quot;</span>);</code></pre>
+
+<p>这里要注意两点：</p>
+<ul>
+<li><code>&quot;handler returning user&quot;</code> 是人类看的消息</li>
+<li><code>user_id = id</code>、<code>user_name = %user.name</code> 是结构化字段</li>
+</ul>
+<p>也就是说，日志不再只是：</p>
+<pre><code class="highlight text">handler returning user: user-1</code></pre>
+
+<p>而是一个带明确键值的事件。</p>
+<p>这会直接影响后续：</p>
+<ul>
+<li>日志可读性</li>
+<li>日志检索能力</li>
+<li>对接 JSON 日志平台的便利程度</li>
+</ul>
+<h3 id="4-3-middleware-建立的是“请求级-span”"><a href="#4-3-middleware-建立的是“请求级-span”" class="headerlink" title="4.3 middleware 建立的是“请求级 span”"></a>4.3 middleware 建立的是“请求级 span”</h3><p>这段代码是整篇最核心的地方之一：</p>
+<pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">span</span> = info_span!(
+    <span class="string">&quot;http_request&quot;</span>,
+    request_id = %request_id,
+    method = %method,
+    path = %path,
+);</code></pre>
+
+<p>它的含义不是“打印一行请求开始”。</p>
+<p>它真正做的是：</p>
+<blockquote>
+<p>为当前请求建立一个统一的上下文范围。</p>
+</blockquote>
+<p>后续这个请求里的日志，只要发生在这个 span 内部，就会自动携带：</p>
+<ul>
+<li><code>request_id</code></li>
+<li><code>method</code></li>
+<li><code>path</code></li>
+</ul>
+<p>这比你在每一条日志里手动拼接这些字段，要稳得多。</p>
+<h3 id="4-4-RequestId-extractor-体现了“上下文注入”的完整链路"><a href="#4-4-RequestId-extractor-体现了“上下文注入”的完整链路" class="headerlink" title="4.4 RequestId extractor 体现了“上下文注入”的完整链路"></a>4.4 <code>RequestId</code> extractor 体现了“上下文注入”的完整链路</h3><p>前面你已经写过 Extractor 和 Middleware，这里其实是一个非常典型的组合：</p>
+<ol>
+<li>中间件生成 request id</li>
+<li>把它塞进 request extensions</li>
+<li>handler 通过自定义 extractor 提取它</li>
+</ol>
+<p>也就是说：</p>
+<blockquote>
+<p>middleware 负责生成上下文，extractor 负责把上下文交给业务函数使用。</p>
+</blockquote>
+<p>这套设计和前面认证文章里“中间件注入用户上下文”的思路几乎完全一致。</p>
+<hr>
+<h2 id="五、什么是结构化日志，为什么它比“整句日志”更适合工程？"><a href="#五、什么是结构化日志，为什么它比“整句日志”更适合工程？" class="headerlink" title="五、什么是结构化日志，为什么它比“整句日志”更适合工程？"></a>五、什么是结构化日志，为什么它比“整句日志”更适合工程？</h2><p>“结构化日志”这个词听起来有点抽象，但其实很简单。</p>
+<p>先看两种写法的差别。</p>
+<h3 id="5-1-纯文本日志"><a href="#5-1-纯文本日志" class="headerlink" title="5.1 纯文本日志"></a>5.1 纯文本日志</h3><pre><code class="highlight rust"><span class="built_in">println!</span>(<span class="string">&quot;query user success, id=&#123;&#125;, name=&#123;&#125;&quot;</span>, user.id, user.name);</code></pre>
+
+<p>输出看起来可能是：</p>
+<pre><code class="highlight text">query user success, id=1, name=user-1</code></pre>
+
+<p>人眼能看懂，但机器很难稳定解析。</p>
+<h3 id="5-2-结构化日志"><a href="#5-2-结构化日志" class="headerlink" title="5.2 结构化日志"></a>5.2 结构化日志</h3><pre><code class="highlight rust">info!(user_id = user.id, user_name = %user.name, <span class="string">&quot;query user success&quot;</span>);</code></pre>
+
+<p>输出看起来也许还是一行文本，但底层语义已经不同了：</p>
+<ul>
+<li>消息是消息</li>
+<li>字段是字段</li>
+</ul>
+<p>后面你如果改成 JSON 输出，效果会更明显：</p>
+<pre><code class="highlight json"><span class="punctuation">&#123;</span>
+  <span class="attr">&quot;timestamp&quot;</span><span class="punctuation">:</span> <span class="string">&quot;2026-04-07T10:20:30Z&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;level&quot;</span><span class="punctuation">:</span> <span class="string">&quot;INFO&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;fields&quot;</span><span class="punctuation">:</span> <span class="punctuation">&#123;</span>
+    <span class="attr">&quot;message&quot;</span><span class="punctuation">:</span> <span class="string">&quot;query user success&quot;</span><span class="punctuation">,</span>
+    <span class="attr">&quot;user_id&quot;</span><span class="punctuation">:</span> <span class="number">1</span><span class="punctuation">,</span>
+    <span class="attr">&quot;user_name&quot;</span><span class="punctuation">:</span> <span class="string">&quot;user-1&quot;</span>
+  <span class="punctuation">&#125;</span>
+<span class="punctuation">&#125;</span></code></pre>
+
+<h3 id="5-3-结构化日志真正带来的价值"><a href="#5-3-结构化日志真正带来的价值" class="headerlink" title="5.3 结构化日志真正带来的价值"></a>5.3 结构化日志真正带来的价值</h3><p>它至少解决三件事：</p>
+<ol>
+<li>字段统一</li>
+</ol>
+<p>你可以稳定地用：</p>
+<ul>
+<li><code>request_id</code></li>
+<li><code>user_id</code></li>
+<li><code>path</code></li>
+<li><code>status</code></li>
+</ul>
+<p>而不是每个地方自己随手起名字。</p>
+<ol start="2">
+<li>方便检索和聚合</li>
+</ol>
+<p>例如后面接日志平台时，你就可以直接查询：</p>
+<ul>
+<li><code>request_id = xxx</code></li>
+<li><code>status &gt;= 500</code></li>
+<li><code>user_id = 42</code></li>
+</ul>
+<ol start="3">
+<li>机器比人更容易消费</li>
+</ol>
+<p>很多时候日志的最终消费者不是开发者本人，而是：</p>
+<ul>
+<li>告警系统</li>
+<li>日志检索系统</li>
+<li>可观测性平台</li>
+</ul>
+<p>所以“字段化”非常重要。</p>
+<hr>
+<h2 id="六、span-到底应该怎么用？"><a href="#六、span-到底应该怎么用？" class="headerlink" title="六、span 到底应该怎么用？"></a>六、span 到底应该怎么用？</h2><p>很多人第一次学 <code>tracing</code>，最大的疑问通常不是 <code>info!</code>，而是：</p>
+<blockquote>
+<p>span 到底什么时候该建，建多大，建几层？</p>
+</blockquote>
+<p>这里有个非常实用的经验：</p>
+<blockquote>
+<p>span 应该围绕“有独立上下文价值的一段操作”来建。</p>
+</blockquote>
+<p>在 Web 服务里，最常见的几类 span 通常是：</p>
+<h3 id="6-1-请求级-span"><a href="#6-1-请求级-span" class="headerlink" title="6.1 请求级 span"></a>6.1 请求级 span</h3><p>例如：</p>
+<ul>
+<li>request id</li>
+<li>method</li>
+<li>path</li>
+<li>user id</li>
+</ul>
+<p>这类字段适合放在最外层请求 span 上。</p>
+<h3 id="6-2-业务操作级-span"><a href="#6-2-业务操作级-span" class="headerlink" title="6.2 业务操作级 span"></a>6.2 业务操作级 span</h3><p>例如：</p>
+<ul>
+<li><code>create_order</code></li>
+<li><code>find_user</code></li>
+<li><code>refresh_token</code></li>
+</ul>
+<p>这类 span 适合包裹某个明确业务动作。</p>
+<h3 id="6-3-外部依赖调用-span"><a href="#6-3-外部依赖调用-span" class="headerlink" title="6.3 外部依赖调用 span"></a>6.3 外部依赖调用 span</h3><p>例如：</p>
+<ul>
+<li>数据库查询</li>
+<li>Redis 调用</li>
+<li>第三方 HTTP 请求</li>
+</ul>
+<p>这类 span 适合定位性能瓶颈和失败点。</p>
+<p>所以一个比较健康的层次通常是：</p>
+<pre><code class="highlight text">http_request
+  -&gt; service_operation
+    -&gt; db_query</code></pre>
+
+<p>这会比只有一层大 span，或者到处乱建 span，更容易看懂。</p>
+<h3 id="6-4-instrument-非常适合给异步函数挂-span"><a href="#6-4-instrument-非常适合给异步函数挂-span" class="headerlink" title="6.4 instrument 非常适合给异步函数挂 span"></a>6.4 <code>instrument</code> 非常适合给异步函数挂 span</h3><p>在异步 Rust 里，一个非常常见的写法是：</p>
+<pre><code class="highlight rust"><span class="title function_ invoke__">find_user</span>(id)
+    .<span class="title function_ invoke__">instrument</span>(info_span!(<span class="string">&quot;find_user&quot;</span>, user_id = id))
+    .<span class="keyword">await</span>?;</code></pre>
+
+<p>这行代码的含义是：</p>
+<blockquote>
+<p>把这个 future 的执行过程放进 <code>find_user</code> 这个 span 里。</p>
+</blockquote>
+<p>这是异步场景下非常自然、也非常推荐的写法。</p>
+<p>它比手动 <code>enter()</code> 再管理 guard 更不容易出错。</p>
+<hr>
+<h2 id="七、请求链路追踪到底在追什么？"><a href="#七、请求链路追踪到底在追什么？" class="headerlink" title="七、请求链路追踪到底在追什么？"></a>七、请求链路追踪到底在追什么？</h2><p>很多人说“链路追踪”，容易直接想到分布式系统、OpenTelemetry、Jaeger。</p>
+<p>这些当然都和 tracing 有关系，但如果只从本地服务实践出发，先理解一个更朴素的版本就够了：</p>
+<blockquote>
+<p>请求链路追踪，本质上是让同一条请求路径上的关键日志能够被稳定串起来。</p>
+</blockquote>
+<p>例如一个最常见的问题排查流程可能是：</p>
+<ol>
+<li>某个接口返回 500</li>
+<li>你先拿到 <code>x-request-id</code></li>
+<li>根据 <code>request_id</code> 检索日志</li>
+<li>看到该请求进入了哪个 handler</li>
+<li>看到调用了哪个 service</li>
+<li>看到在哪一步报错</li>
+</ol>
+<p>这就是最基本的链路追踪价值。</p>
+<h3 id="7-1-为什么-request-id-很重要？"><a href="#7-1-为什么-request-id-很重要？" class="headerlink" title="7.1 为什么 request id 很重要？"></a>7.1 为什么 request id 很重要？</h3><p>因为它是同一条请求最稳定的外部标识。</p>
+<p>即使你暂时没有完整接入分布式 trace id，光有 request id 也已经足够解决大量排查问题。</p>
+<p>所以通常建议：</p>
+<ul>
+<li>每条请求都有 request id</li>
+<li>响应 header 回传 <code>x-request-id</code></li>
+<li>关键日志都能挂上 request id</li>
+</ul>
+<p>这样前端、后端、测试同学排查问题时会方便很多。</p>
+<h3 id="7-2-路径最好记录“匹配路由”而不是原始-URI"><a href="#7-2-路径最好记录“匹配路由”而不是原始-URI" class="headerlink" title="7.2 路径最好记录“匹配路由”而不是原始 URI"></a>7.2 路径最好记录“匹配路由”而不是原始 URI</h3><p>例如：</p>
+<ul>
+<li>原始路径：<code>/users/42</code></li>
+<li>匹配路由：<code>/users/&#123;id&#125;</code></li>
+</ul>
+<p>为什么后者更重要？</p>
+<p>因为你做日志统计和聚合时，更希望知道：</p>
+<blockquote>
+<p>是哪个接口模板出了问题，而不是某个具体参数值。</p>
+</blockquote>
+<p>所以示例里用了 <code>MatchedPath</code>。</p>
+<p>这会让日志在观察层面更稳定。</p>
+<hr>
+<h2 id="八、如何切换到-JSON-日志输出？"><a href="#八、如何切换到-JSON-日志输出？" class="headerlink" title="八、如何切换到 JSON 日志输出？"></a>八、如何切换到 JSON 日志输出？</h2><p>开发阶段我们通常更喜欢人眼易读的文本格式。</p>
+<p>但如果准备接日志平台，JSON 输出通常更合适。</p>
+<p>在 <code>tracing_subscriber</code> 里切换也很直接：</p>
+<pre><code class="highlight rust">tracing_subscriber::<span class="title function_ invoke__">registry</span>()
+    .<span class="title function_ invoke__">with</span>(env_filter)
+    .<span class="title function_ invoke__">with</span>(fmt::<span class="title function_ invoke__">layer</span>().<span class="title function_ invoke__">json</span>())
+    .<span class="title function_ invoke__">init</span>();</code></pre>
+
+<p>这样日志就会更接近：</p>
+<pre><code class="highlight json"><span class="punctuation">&#123;</span>
+  <span class="attr">&quot;timestamp&quot;</span><span class="punctuation">:</span> <span class="string">&quot;2026-04-07T10:20:30.123456Z&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;level&quot;</span><span class="punctuation">:</span> <span class="string">&quot;INFO&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;target&quot;</span><span class="punctuation">:</span> <span class="string">&quot;tracing_demo&quot;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;span&quot;</span><span class="punctuation">:</span> <span class="punctuation">&#123;</span>
+    <span class="attr">&quot;name&quot;</span><span class="punctuation">:</span> <span class="string">&quot;http_request&quot;</span><span class="punctuation">,</span>
+    <span class="attr">&quot;request_id&quot;</span><span class="punctuation">:</span> <span class="string">&quot;6bc1...&quot;</span><span class="punctuation">,</span>
+    <span class="attr">&quot;method&quot;</span><span class="punctuation">:</span> <span class="string">&quot;GET&quot;</span><span class="punctuation">,</span>
+    <span class="attr">&quot;path&quot;</span><span class="punctuation">:</span> <span class="string">&quot;/users/&#123;id&#125;&quot;</span>
+  <span class="punctuation">&#125;</span><span class="punctuation">,</span>
+  <span class="attr">&quot;fields&quot;</span><span class="punctuation">:</span> <span class="punctuation">&#123;</span>
+    <span class="attr">&quot;message&quot;</span><span class="punctuation">:</span> <span class="string">&quot;handler returning user&quot;</span><span class="punctuation">,</span>
+    <span class="attr">&quot;user_id&quot;</span><span class="punctuation">:</span> <span class="number">1</span><span class="punctuation">,</span>
+    <span class="attr">&quot;user_name&quot;</span><span class="punctuation">:</span> <span class="string">&quot;user-1&quot;</span>
+  <span class="punctuation">&#125;</span>
+<span class="punctuation">&#125;</span></code></pre>
+
+<p>这类日志后续接收集系统时就会非常自然。</p>
+<p>通常工程上可以这样做：</p>
+<ul>
+<li>本地开发：pretty 文本输出</li>
+<li>测试&#x2F;生产：JSON 输出</li>
+</ul>
+<p>甚至可以通过环境变量控制。</p>
+<hr>
+<h2 id="九、如果想让-handler-自动带-span，可以怎么做？"><a href="#九、如果想让-handler-自动带-span，可以怎么做？" class="headerlink" title="九、如果想让 handler 自动带 span，可以怎么做？"></a>九、如果想让 handler 自动带 span，可以怎么做？</h2><p>除了手动用 <code>info_span!</code> 和 <code>instrument(...)</code>，<code>tracing</code> 生态里还常见一种写法：</p>
+<pre><code class="highlight rust"><span class="meta">#[tracing::instrument(skip(state))]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">get_user</span>(
+    <span class="title function_ invoke__">State</span>(state): State&lt;AppState&gt;,
+    <span class="title function_ invoke__">Path</span>(id): Path&lt;<span class="type">u64</span>&gt;,
+) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;Json&lt;UserResponse&gt;, AppError&gt; &#123;
+    <span class="comment">// ...</span>
+&#125;</code></pre>
+
+<p>这会自动为函数建立 span，并记录参数。</p>
+<p>它很方便，但要注意几个点：</p>
+<h3 id="9-1-不是所有参数都适合自动记录"><a href="#9-1-不是所有参数都适合自动记录" class="headerlink" title="9.1 不是所有参数都适合自动记录"></a>9.1 不是所有参数都适合自动记录</h3><p>例如这些通常不适合直接打出来：</p>
+<ul>
+<li>密码</li>
+<li>token</li>
+<li>大对象</li>
+<li>整个请求体</li>
+</ul>
+<p>所以常见写法是用 <code>skip(...)</code> 跳过某些参数。</p>
+<h3 id="9-2-自动记录不等于自动设计好字段"><a href="#9-2-自动记录不等于自动设计好字段" class="headerlink" title="9.2 自动记录不等于自动设计好字段"></a>9.2 自动记录不等于自动设计好字段</h3><p><code>instrument</code> 能帮你省一点样板代码，但字段命名、span 边界、日志粒度，仍然要自己设计。</p>
+<p>也就是说：</p>
+<blockquote>
+<p>工程化日志的重点从来不是“有没有宏”，而是“上下文设计是否合理”。</p>
+</blockquote>
+<hr>
+<h2 id="十、日志级别到底该怎么选？"><a href="#十、日志级别到底该怎么选？" class="headerlink" title="十、日志级别到底该怎么选？"></a>十、日志级别到底该怎么选？</h2><p>如果日志级别没有设计好，最后通常会出现两种极端：</p>
+<ul>
+<li>要么全是 <code>info!</code>，噪音巨大</li>
+<li>要么出了问题也没有足够信息</li>
+</ul>
+<p>一个比较稳妥的经验是：</p>
+<h3 id="10-1-error"><a href="#10-1-error" class="headerlink" title="10.1 error!"></a>10.1 <code>error!</code></h3><p>用于：</p>
+<ul>
+<li>当前操作明确失败</li>
+<li>需要重点关注</li>
+<li>可能触发告警</li>
+</ul>
+<p>例如：</p>
+<ul>
+<li>数据库连接失败</li>
+<li>下游服务返回不可恢复错误</li>
+<li>请求处理最终返回 500</li>
+</ul>
+<h3 id="10-2-warn"><a href="#10-2-warn" class="headerlink" title="10.2 warn!"></a>10.2 <code>warn!</code></h3><p>用于：</p>
+<ul>
+<li>不完全正常，但未必是系统故障</li>
+<li>值得关注但不一定报警</li>
+</ul>
+<p>例如：</p>
+<ul>
+<li>非法参数</li>
+<li>限流触发</li>
+<li>可预期但频繁出现的失败</li>
+</ul>
+<h3 id="10-3-info"><a href="#10-3-info" class="headerlink" title="10.3 info!"></a>10.3 <code>info!</code></h3><p>用于：</p>
+<ul>
+<li>重要业务动作</li>
+<li>请求入口、请求结束</li>
+<li>对排查问题有帮助，但不算异常</li>
+</ul>
+<h3 id="10-4-debug"><a href="#10-4-debug" class="headerlink" title="10.4 debug!"></a>10.4 <code>debug!</code></h3><p>用于：</p>
+<ul>
+<li>更细节的过程信息</li>
+<li>开发阶段排查很有用</li>
+<li>生产环境通常按需打开</li>
+</ul>
+<h3 id="10-5-trace"><a href="#10-5-trace" class="headerlink" title="10.5 trace!"></a>10.5 <code>trace!</code></h3><p>用于：</p>
+<ul>
+<li>非常高频、非常细粒度的底层细节</li>
+</ul>
+<p>多数业务代码其实很少需要写到这个级别。</p>
+<hr>
+<h2 id="十一、常见误区"><a href="#十一、常见误区" class="headerlink" title="十一、常见误区"></a>十一、常见误区</h2><p>写到这里，再把 <code>tracing</code> 最容易踩的坑收束一下。</p>
+<h3 id="11-1-把-tracing-继续当成“高级版-println”"><a href="#11-1-把-tracing-继续当成“高级版-println”" class="headerlink" title="11.1 把 tracing 继续当成“高级版 println”"></a>11.1 把 <code>tracing</code> 继续当成“高级版 println”</h3><p>如果你只是把：</p>
+<pre><code class="highlight rust"><span class="built_in">println!</span>(<span class="string">&quot;user id = &#123;&#125;&quot;</span>, id)</code></pre>
+
+<p>改成：</p>
+<pre><code class="highlight rust">info!(<span class="string">&quot;user id = &#123;&#125;&quot;</span>, id)</code></pre>
+
+<p>那其实只换了一个宏，没有真正用到结构化日志和 span 的价值。</p>
+<p>更合理的写法应该是：</p>
+<pre><code class="highlight rust">info!(user_id = id, <span class="string">&quot;query user&quot;</span>);</code></pre>
+
+<h3 id="11-2-到处打日志，但没有字段规范"><a href="#11-2-到处打日志，但没有字段规范" class="headerlink" title="11.2 到处打日志，但没有字段规范"></a>11.2 到处打日志，但没有字段规范</h3><p>如果有人写 <code>uid</code>，有人写 <code>user_id</code>，有人写 <code>id</code>，后面检索会非常痛苦。</p>
+<p>所以字段命名尽量统一。</p>
+<h3 id="11-3-span-建得过大或过碎"><a href="#11-3-span-建得过大或过碎" class="headerlink" title="11.3 span 建得过大或过碎"></a>11.3 span 建得过大或过碎</h3><p>如果整个程序只有一个超大 span，上下文会很模糊。</p>
+<p>如果每一行代码都建一个 span，又会非常嘈杂。</p>
+<p>最稳的办法还是围绕：</p>
+<ul>
+<li>请求</li>
+<li>业务操作</li>
+<li>外部依赖调用</li>
+</ul>
+<p>这几个层级去建。</p>
+<h3 id="11-4-直接把敏感信息打进日志"><a href="#11-4-直接把敏感信息打进日志" class="headerlink" title="11.4 直接把敏感信息打进日志"></a>11.4 直接把敏感信息打进日志</h3><p>例如：</p>
+<ul>
+<li>token</li>
+<li>密码</li>
+<li>身份证号</li>
+<li>完整手机号</li>
+</ul>
+<p>这些信息进入日志后，后续风险会非常高。</p>
+<p>所以日志设计其实也是安全设计的一部分。</p>
+<h3 id="11-5-只打“开始了”，不打“结果如何”"><a href="#11-5-只打“开始了”，不打“结果如何”" class="headerlink" title="11.5 只打“开始了”，不打“结果如何”"></a>11.5 只打“开始了”，不打“结果如何”</h3><p>很多日志系统的问题不是没日志，而是日志只有开头，没有收尾。</p>
+<p>例如你知道：</p>
+<ul>
+<li>请求进来了</li>
+<li>数据库查了</li>
+</ul>
+<p>但最后到底是成功、失败、耗时多久，没有记录。</p>
+<p>所以通常建议：</p>
+<ul>
+<li>请求入口有日志</li>
+<li>请求结束有日志</li>
+<li>关键操作有结果日志</li>
+</ul>
+<p>这样信息链才完整。</p>
+<hr>
+<h2 id="十二、如果后面要接-OpenTelemetry，该怎么看待-tracing？"><a href="#十二、如果后面要接-OpenTelemetry，该怎么看待-tracing？" class="headerlink" title="十二、如果后面要接 OpenTelemetry，该怎么看待 tracing？"></a>十二、如果后面要接 OpenTelemetry，该怎么看待 <code>tracing</code>？</h2><p>很多人一看到 <code>tracing</code>，会马上问：</p>
+<blockquote>
+<p>那它和 OpenTelemetry、Jaeger、Zipkin 是什么关系？</p>
+</blockquote>
+<p>可以先用一句话理解：</p>
+<blockquote>
+<p><code>tracing</code> 是你在 Rust 应用内记录事件和上下文的方式，OpenTelemetry 更像是把这些观测数据导出到外部系统的标准。</p>
+</blockquote>
+<p>也就是说，这篇文章里的实践主要解决的是：</p>
+<ul>
+<li>应用内部怎么把日志和上下文组织好</li>
+<li>本地和服务端日志怎么输出得更像工程项目</li>
+</ul>
+<p>而如果后面你要做更完整的分布式 trace：</p>
+<ul>
+<li>跨服务 trace id 传播</li>
+<li>trace 可视化</li>
+<li>span duration 统计</li>
+</ul>
+<p>那就可以继续往 OpenTelemetry 方向接。</p>
+<p>但这里有个很重要的现实建议：</p>
+<blockquote>
+<p>不要一上来就把问题抬到分布式链路平台，先把单服务内的 request id、结构化日志、请求 span 做扎实。</p>
+</blockquote>
+<p>这一步做好了，后面的扩展才会顺。</p>
+<hr>
+<h2 id="十三、最后把主线收住"><a href="#十三、最后把主线收住" class="headerlink" title="十三、最后把主线收住"></a>十三、最后把主线收住</h2><p>如果把整篇压缩成一句话，那就是：</p>
+<blockquote>
+<p><code>tracing</code> 的核心价值，不是“换个日志宏”，而是让日志从离散文本变成带上下文的可观察事件流。</p>
+</blockquote>
+<p>在 Web 服务里，这件事尤其重要，因为一次请求天然就是一条完整链路：</p>
+<ul>
+<li>请求进入</li>
+<li>路由命中</li>
+<li>handler 执行</li>
+<li>service 调用</li>
+<li>数据库或外部依赖访问</li>
+<li>响应返回</li>
+</ul>
+<p>如果这些步骤都没有稳定上下文，排查问题就会非常痛苦。</p>
+<p>而一旦你建立了：</p>
+<ul>
+<li>结构化字段</li>
+<li>请求级 span</li>
+<li>业务级 span</li>
+<li>request id 回传</li>
+</ul>
+<p>那么日志就不再只是“程序说了几句话”，而会变成一个真正能支撑排查、统计、观测和后续平台接入的基础设施。</p>
+<p>这也是为什么 <code>tracing</code> 非常值得在 Rust 服务里尽早建立起来。</p>
+<p>从实践上讲，一个足够稳妥的起点通常就是这四步：</p>
+<ol>
+<li>初始化 <code>tracing_subscriber</code></li>
+<li>用结构化字段替代纯文本拼接</li>
+<li>为每条请求建立统一 span</li>
+<li>用 request id 把入口、业务和响应串起来</li>
+</ol>
+<p>做到这一步，你的日志体系就已经和“只会 <code>println!</code> 的 demo”有了本质区别。</p>
+<p>后面不管是继续扩展到：</p>
+<ul>
+<li>JSON 日志</li>
+<li>Loki &#x2F; ELK</li>
+<li>OpenTelemetry</li>
+<li>分布式 trace</li>
+</ul>
+<p>都会顺很多。</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
