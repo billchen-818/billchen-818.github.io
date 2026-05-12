@@ -1,0 +1,590 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust workspace 多 crate 项目组织实战：什么时候拆包，怎么拆才合理</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust workspace 多 crate 项目组织实战：什么时候拆包，怎么拆才合理</h1><div class="time">2026-05-13</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><h2 id="引言"><a href="#引言" class="headerlink" title="引言"></a>引言</h2><p>很多人写 Rust 项目写到一段时间后，都会碰到一个很别扭的问题：</p>
+<blockquote>
+<p>代码还没大到失控，但已经开始觉得“所有东西都塞在一个 crate 里有点挤了”。</p>
+</blockquote>
+<p>这时候通常会出现两种相反的倾向。</p>
+<p>第一种是完全不拆。</p>
+<p>于是项目会慢慢变成这样：</p>
+<ul>
+<li><code>main.rs</code> 越来越大</li>
+<li><code>mod service</code>、<code>mod db</code>、<code>mod http</code>、<code>mod config</code> 一层套一层</li>
+<li>内部模块越来越多，但边界其实很模糊</li>
+<li>想复用一部分能力时，只能复制代码</li>
+</ul>
+<p>第二种是拆得过早、拆得过碎。</p>
+<p>比如项目刚起步，就先拆出：</p>
+<ul>
+<li><code>common</code></li>
+<li><code>utils</code></li>
+<li><code>core</code></li>
+<li><code>model</code></li>
+<li><code>infra</code></li>
+<li><code>application</code></li>
+</ul>
+<p>最后 crate 名字看起来很专业，但真正的依赖关系反而更乱，新增一个字段都要改三四个包。</p>
+<p>这说明：</p>
+<blockquote>
+<p>Rust workspace 的重点，不是“把一个项目拆成多个 crate”，而是“在真正有边界的地方建立边界”。</p>
+</blockquote>
+<p>这一篇我会围绕几个最核心的问题展开：</p>
+<ol>
+<li>Rust workspace 到底解决什么问题</li>
+<li>什么时候应该继续放在一个 crate 里，什么时候该拆</li>
+<li>拆包时最稳妥的边界应该怎么找</li>
+<li>多 crate 项目应该怎样组织目录和依赖方向</li>
+<li>怎么避免把 workspace 拆成一套看起来高级、实际很难维护的结构</li>
+</ol>
+<p>文章最后会给一套可以直接运行的示例工程，目录在 <a href="workspaces/workspace-demo">workspaces&#x2F;workspace-demo</a>。</p>
+<hr>
+<h2 id="一、先回答根问题：workspace-解决的到底是什么？"><a href="#一、先回答根问题：workspace-解决的到底是什么？" class="headerlink" title="一、先回答根问题：workspace 解决的到底是什么？"></a>一、先回答根问题：workspace 解决的到底是什么？</h2><p>很多人第一次接触 Rust workspace，会把它理解成“一个大仓库里放多个 crate”。</p>
+<p>这当然没错，但还不够。</p>
+<p>从工程角度看，workspace 主要解决的是下面几类问题。</p>
+<h3 id="1-1-让多个-crate-共享同一套构建上下文"><a href="#1-1-让多个-crate-共享同一套构建上下文" class="headerlink" title="1.1 让多个 crate 共享同一套构建上下文"></a>1.1 让多个 crate 共享同一套构建上下文</h3><p>比如：</p>
+<ul>
+<li>共用一个 <code>Cargo.lock</code></li>
+<li>共用一个 <code>target/</code></li>
+<li>统一执行 <code>cargo check</code>、<code>cargo test</code>、<code>cargo fmt</code></li>
+</ul>
+<p>这意味着：</p>
+<blockquote>
+<p>你可以把项目拆成多个 crate，但仍然像管理一个项目一样管理它们。</p>
+</blockquote>
+<h3 id="1-2-让边界从“目录约定”变成“编译器约束”"><a href="#1-2-让边界从“目录约定”变成“编译器约束”" class="headerlink" title="1.2 让边界从“目录约定”变成“编译器约束”"></a>1.2 让边界从“目录约定”变成“编译器约束”</h3><p>如果你只有一个 crate，那么很多所谓的“层次边界”其实只是目录约定。</p>
+<p>例如：</p>
+<ul>
+<li><code>service</code> 不应该直接依赖 <code>http</code></li>
+<li><code>domain</code> 不应该读环境变量</li>
+<li>业务模型不应该依赖具体数据库库</li>
+</ul>
+<p>但在单 crate 里，这些边界很多时候只是靠自觉。</p>
+<p>而一旦拆成不同 crate，边界会变成真正的依赖关系：</p>
+<ul>
+<li>某个 crate 有没有权限依赖另一个 crate</li>
+<li>哪些类型能被复用</li>
+<li>哪些实现细节不会泄漏出去</li>
+</ul>
+<p>这些都会由编译器帮你守住。</p>
+<h3 id="1-3-让“可复用部分”和“组装部分”分开"><a href="#1-3-让“可复用部分”和“组装部分”分开" class="headerlink" title="1.3 让“可复用部分”和“组装部分”分开"></a>1.3 让“可复用部分”和“组装部分”分开</h3><p>项目里通常会同时存在两种东西：</p>
+<ol>
+<li>稳定、可复用、和运行入口无关的能力</li>
+<li>负责把配置、日志、存储、HTTP、CLI 这些东西真正组装起来的入口代码</li>
+</ol>
+<p>把这两类东西混在一起时，代码会越来越难维护。</p>
+<p>而 workspace 很适合把它们拆开：</p>
+<ul>
+<li>库 crate 存放稳定能力</li>
+<li>二进制 crate 存放启动和组装逻辑</li>
+</ul>
+<hr>
+<h2 id="二、什么时候不该拆？"><a href="#二、什么时候不该拆？" class="headerlink" title="二、什么时候不该拆？"></a>二、什么时候不该拆？</h2><p>这部分很重要。</p>
+<p>因为很多人看完 workspace 介绍之后，最容易犯的错不是“不会拆”，而是“什么都想拆”。</p>
+<p>下面这些场景，通常还不值得上多 crate。</p>
+<h3 id="2-1-项目规模还很小，而且边界非常稳定地集中在一个地方"><a href="#2-1-项目规模还很小，而且边界非常稳定地集中在一个地方" class="headerlink" title="2.1 项目规模还很小，而且边界非常稳定地集中在一个地方"></a>2.1 项目规模还很小，而且边界非常稳定地集中在一个地方</h3><p>如果你的项目当前就是：</p>
+<ul>
+<li>一个二进制程序</li>
+<li>模块数不多</li>
+<li>只有一个运行入口</li>
+<li>没有明确的复用需求</li>
+</ul>
+<p>那先保持单 crate 往往更合适。</p>
+<p>因为这时候最大的成本通常不是“crate 太少”，而是“业务本身还在快速变化”。</p>
+<p>过早拆包会让你在结构上投入太多精力。</p>
+<h3 id="2-2-只是为了“看起来更架构化”而拆"><a href="#2-2-只是为了“看起来更架构化”而拆" class="headerlink" title="2.2 只是为了“看起来更架构化”而拆"></a>2.2 只是为了“看起来更架构化”而拆</h3><p>如果拆包理由只是：</p>
+<ul>
+<li>想让目录看起来更专业</li>
+<li>想模仿某个大型项目</li>
+<li>想先把分层框架搭满</li>
+</ul>
+<p>那大概率会适得其反。</p>
+<p>Rust 的 crate 边界是强边界，不是轻量目录。</p>
+<p>一旦拆了，后面每次调整依赖、移动类型、改公共接口，成本都是真的。</p>
+<h3 id="2-3-你还说不清每个-crate-的职责是什么"><a href="#2-3-你还说不清每个-crate-的职责是什么" class="headerlink" title="2.3 你还说不清每个 crate 的职责是什么"></a>2.3 你还说不清每个 crate 的职责是什么</h3><p>一个非常直接的判断标准是：</p>
+<blockquote>
+<p>如果你不能用一句话说清这个 crate 的职责，那通常还不该拆。</p>
+</blockquote>
+<p>例如：</p>
+<ul>
+<li><code>task-domain</code>：定义任务领域模型和业务规则</li>
+<li><code>task-store</code>：提供任务仓储的内存实现</li>
+<li><code>task-cli</code>：负责应用启动和命令行输出</li>
+</ul>
+<p>这是清楚的。</p>
+<p>而像下面这些名字，通常风险就比较高：</p>
+<ul>
+<li><code>common</code></li>
+<li><code>core</code></li>
+<li><code>base</code></li>
+<li><code>utils</code></li>
+</ul>
+<p>它们太容易变成“什么都往里塞”的垃圾桶 crate。</p>
+<hr>
+<h2 id="三、什么时候值得拆？"><a href="#三、什么时候值得拆？" class="headerlink" title="三、什么时候值得拆？"></a>三、什么时候值得拆？</h2><p>真正值得拆包的时机，通常来自这几个信号。</p>
+<h3 id="3-1-有明确的复用边界"><a href="#3-1-有明确的复用边界" class="headerlink" title="3.1 有明确的复用边界"></a>3.1 有明确的复用边界</h3><p>比如：</p>
+<ul>
+<li>领域模型想同时给 HTTP 服务和 CLI 工具复用</li>
+<li>一套协议类型需要被 client 和 server 共用</li>
+<li>一套核心计算逻辑不应该依赖具体运行入口</li>
+</ul>
+<p>这时把可复用部分抽成独立库 crate 就很自然。</p>
+<h3 id="3-2-有明确的依赖方向需要被保护"><a href="#3-2-有明确的依赖方向需要被保护" class="headerlink" title="3.2 有明确的依赖方向需要被保护"></a>3.2 有明确的依赖方向需要被保护</h3><p>例如你希望：</p>
+<ul>
+<li>领域层不依赖存储实现</li>
+<li>业务逻辑不依赖 CLI 或 HTTP 细节</li>
+<li>公共协议不依赖运行时框架</li>
+</ul>
+<p>这种时候，crate 是非常强的边界工具。</p>
+<h3 id="3-3-二进制入口已经明显承担了过多职责"><a href="#3-3-二进制入口已经明显承担了过多职责" class="headerlink" title="3.3 二进制入口已经明显承担了过多职责"></a>3.3 二进制入口已经明显承担了过多职责</h3><p>如果一个 <code>main.rs</code> 已经同时负责：</p>
+<ul>
+<li>配置加载</li>
+<li>路由注册</li>
+<li>业务逻辑</li>
+<li>存储初始化</li>
+<li>定时任务</li>
+</ul>
+<p>那通常说明你至少应该把“可复用逻辑”和“程序入口”分开。</p>
+<h3 id="3-4-不同部分的变化频率已经明显不同"><a href="#3-4-不同部分的变化频率已经明显不同" class="headerlink" title="3.4 不同部分的变化频率已经明显不同"></a>3.4 不同部分的变化频率已经明显不同</h3><p>这是一个很实用的判断方式。</p>
+<p>例如：</p>
+<ul>
+<li>领域模型变化较慢</li>
+<li>存储实现可能会改</li>
+<li>运行入口和组装代码变化更频繁</li>
+</ul>
+<p>如果把这些东西塞在一起，改动会互相污染。</p>
+<p>而拆成 crate 之后，不同变化频率的代码就能更自然地隔离开。</p>
+<hr>
+<h2 id="四、拆包时最应该看什么：不是“层数”，而是边界"><a href="#四、拆包时最应该看什么：不是“层数”，而是边界" class="headerlink" title="四、拆包时最应该看什么：不是“层数”，而是边界"></a>四、拆包时最应该看什么：不是“层数”，而是边界</h2><p>很多人第一次拆 Rust 项目，会优先按“经典分层”来拆：</p>
+<ul>
+<li>controller</li>
+<li>service</li>
+<li>repository</li>
+<li>model</li>
+</ul>
+<p>这并不是绝对错误，但经常会拆得太教科书。</p>
+<p>更稳妥的思路通常是看下面三件事：</p>
+<h3 id="4-1-这部分代码是否需要独立复用？"><a href="#4-1-这部分代码是否需要独立复用？" class="headerlink" title="4.1 这部分代码是否需要独立复用？"></a>4.1 这部分代码是否需要独立复用？</h3><p>如果答案是“会”，那就有成为独立 crate 的潜力。</p>
+<h3 id="4-2-这部分代码是否应该独立演化？"><a href="#4-2-这部分代码是否应该独立演化？" class="headerlink" title="4.2 这部分代码是否应该独立演化？"></a>4.2 这部分代码是否应该独立演化？</h3><p>如果某部分的改动频率、依赖关系、测试方式和其他代码显著不同，也很适合拆开。</p>
+<h3 id="4-3-这部分代码的依赖是否应该被严格限制？"><a href="#4-3-这部分代码的依赖是否应该被严格限制？" class="headerlink" title="4.3 这部分代码的依赖是否应该被严格限制？"></a>4.3 这部分代码的依赖是否应该被严格限制？</h3><p>例如领域模型就很适合保持“向内收敛”，尽量少依赖外部实现细节。</p>
+<p>所以比起“先按名词分层”，更推荐的思路是：</p>
+<blockquote>
+<p>按职责边界、依赖方向和变化频率拆，而不是按流行术语拆。</p>
+</blockquote>
+<hr>
+<h2 id="五、一个更实用的拆法：二进制-crate-领域-crate-基础设施-crate"><a href="#五、一个更实用的拆法：二进制-crate-领域-crate-基础设施-crate" class="headerlink" title="五、一个更实用的拆法：二进制 crate + 领域 crate + 基础设施 crate"></a>五、一个更实用的拆法：二进制 crate + 领域 crate + 基础设施 crate</h2><p>为了把这个问题讲清楚，我们直接看一套具体示例。</p>
+<p>完整目录在 <a href="workspaces/workspace-demo">workspaces&#x2F;workspace-demo</a>。</p>
+<p>这个示例包含 3 个 crate：</p>
+<ol>
+<li><code>task-cli</code>：二进制入口，负责组装程序</li>
+<li><code>task-domain</code>：领域模型、仓储接口、业务规则</li>
+<li><code>task-store</code>：基于内存的仓储实现</li>
+</ol>
+<p>目录结构如下：</p>
+<pre><code class="highlight text">workspace-demo/
+├── Cargo.toml
+├── apps/
+│   └── task-cli/
+│       ├── Cargo.toml
+│       └── src/
+│           └── main.rs
+└── crates/
+    ├── task-domain/
+    │   ├── Cargo.toml
+    │   ├── src/
+    │   │   ├── error.rs
+    │   │   ├── lib.rs
+    │   │   ├── repository.rs
+    │   │   ├── service.rs
+    │   │   └── task.rs
+    │   └── tests/
+    │       └── task_flow.rs
+    └── task-store/
+        ├── Cargo.toml
+        └── src/
+            └── lib.rs</code></pre>
+
+<p>这套结构背后有几个很关键的判断：</p>
+<ul>
+<li>运行入口和业务规则分开</li>
+<li>领域逻辑不依赖具体存储实现</li>
+<li>存储实现依赖领域接口，而不是反过来</li>
+</ul>
+<p>这比“随便拆几个名字很大但职责含糊的 crate”更稳。</p>
+<hr>
+<h2 id="六、先看-workspace-根配置"><a href="#六、先看-workspace-根配置" class="headerlink" title="六、先看 workspace 根配置"></a>六、先看 workspace 根配置</h2><h3 id="6-1-根-Cargo-toml"><a href="#6-1-根-Cargo-toml" class="headerlink" title="6.1 根 Cargo.toml"></a>6.1 根 <code>Cargo.toml</code></h3><pre><code class="highlight toml"><span class="section">[workspace]</span>
+<span class="attr">members</span> = [
+    <span class="string">&quot;apps/task-cli&quot;</span>,
+    <span class="string">&quot;crates/task-domain&quot;</span>,
+    <span class="string">&quot;crates/task-store&quot;</span>,
+]
+<span class="attr">resolver</span> = <span class="string">&quot;2&quot;</span>
+
+<span class="section">[workspace.package]</span>
+<span class="attr">edition</span> = <span class="string">&quot;2021&quot;</span>
+<span class="attr">version</span> = <span class="string">&quot;0.1.0&quot;</span>
+
+<span class="section">[workspace.dependencies]</span>
+<span class="attr">task-domain</span> = &#123; path = <span class="string">&quot;crates/task-domain&quot;</span> &#125;
+<span class="attr">task-store</span> = &#123; path = <span class="string">&quot;crates/task-store&quot;</span> &#125;</code></pre>
+
+<p>这里有几个重点。</p>
+<h3 id="6-2-members-决定工作空间包含哪些-crate"><a href="#6-2-members-决定工作空间包含哪些-crate" class="headerlink" title="6.2 members 决定工作空间包含哪些 crate"></a>6.2 <code>members</code> 决定工作空间包含哪些 crate</h3><p>所有子 crate 都在这里统一声明。</p>
+<p>这样你就可以在 workspace 根目录直接执行：</p>
+<pre><code class="highlight bash">cargo check
+cargo <span class="built_in">test</span>
+cargo run -p task-cli</code></pre>
+
+<h3 id="6-3-workspace-dependencies-可以减少依赖重复声明"><a href="#6-3-workspace-dependencies-可以减少依赖重复声明" class="headerlink" title="6.3 workspace.dependencies 可以减少依赖重复声明"></a>6.3 <code>workspace.dependencies</code> 可以减少依赖重复声明</h3><p>这样做的好处是：</p>
+<ul>
+<li>子 crate 引用内部依赖更统一</li>
+<li>版本和路径集中管理</li>
+<li>后续改动不需要到处同步</li>
+</ul>
+<hr>
+<h2 id="七、领域-crate-该放什么，不该放什么？"><a href="#七、领域-crate-该放什么，不该放什么？" class="headerlink" title="七、领域 crate 该放什么，不该放什么？"></a>七、领域 crate 该放什么，不该放什么？</h2><p>这个问题几乎决定了整个 workspace 后面会不会越长越歪。</p>
+<p>在这个示例里，<code>task-domain</code> 放的是三类东西：</p>
+<ol>
+<li>领域实体 <code>Task</code></li>
+<li>领域错误 <code>DomainError</code></li>
+<li>业务接口 <code>TaskRepository</code> 和 <code>TaskService</code></li>
+</ol>
+<p>它不放这些东西：</p>
+<ul>
+<li>CLI 输出逻辑</li>
+<li>具体数据库实现</li>
+<li>环境变量读取</li>
+<li>框架初始化代码</li>
+</ul>
+<p>也就是说：</p>
+<blockquote>
+<p>领域 crate 负责表达“任务系统应该怎么工作”，而不是“程序今天怎么启动”。</p>
+</blockquote>
+<h3 id="7-1-task-domain-src-task-rs"><a href="#7-1-task-domain-src-task-rs" class="headerlink" title="7.1 task-domain/src/task.rs"></a>7.1 <code>task-domain/src/task.rs</code></h3><pre><code class="highlight rust"><span class="keyword">use</span> crate::error::DomainError;
+
+<span class="meta">#[derive(Debug, Clone, PartialEq, Eq)]</span>
+<span class="keyword">pub</span> <span class="keyword">enum</span> <span class="title class_">TaskStatus</span> &#123;
+    Pending,
+    Done,
+&#125;
+
+<span class="meta">#[derive(Debug, Clone, PartialEq, Eq)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">Task</span> &#123;
+    id: <span class="type">u64</span>,
+    title: <span class="type">String</span>,
+    status: TaskStatus,
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">Task</span> &#123;
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">new</span>(id: <span class="type">u64</span>, title: <span class="keyword">impl</span> <span class="title class_">Into</span>&lt;<span class="type">String</span>&gt;) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="keyword">Self</span>, DomainError&gt; &#123;
+        <span class="keyword">let</span> <span class="variable">title</span> = title.<span class="title function_ invoke__">into</span>();
+        <span class="keyword">let</span> <span class="variable">title</span> = title.<span class="title function_ invoke__">trim</span>();
+
+        <span class="keyword">if</span> title.<span class="title function_ invoke__">is_empty</span>() &#123;
+            <span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(DomainError::EmptyTitle);
+        &#125;
+
+        <span class="title function_ invoke__">Ok</span>(<span class="keyword">Self</span> &#123;
+            id,
+            title: title.<span class="title function_ invoke__">to_string</span>(),
+            status: TaskStatus::Pending,
+        &#125;)
+    &#125;
+
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">complete</span>(&amp;<span class="keyword">mut</span> <span class="keyword">self</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;(), DomainError&gt; &#123;
+        <span class="keyword">if</span> <span class="keyword">self</span>.status == TaskStatus::Done &#123;
+            <span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(DomainError::TaskAlreadyDone &#123; id: <span class="keyword">self</span>.id &#125;);
+        &#125;
+
+        <span class="keyword">self</span>.status = TaskStatus::Done;
+        <span class="title function_ invoke__">Ok</span>(())
+    &#125;
+
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">id</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> <span class="type">u64</span> &#123;
+        <span class="keyword">self</span>.id
+    &#125;
+
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">title</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> &amp;<span class="type">str</span> &#123;
+        &amp;<span class="keyword">self</span>.title
+    &#125;
+
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">status</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> &amp;TaskStatus &#123;
+        &amp;<span class="keyword">self</span>.status
+    &#125;
+&#125;</code></pre>
+
+<p>这里的重点不是代码本身复杂，而是它保持了非常干净的依赖：</p>
+<ul>
+<li>只依赖标准库和本 crate 的错误类型</li>
+<li>不知道存储细节</li>
+<li>不知道 CLI、HTTP、数据库</li>
+</ul>
+<p>这种代码天然更容易测试和复用。</p>
+<h3 id="7-2-task-domain-src-repository-rs"><a href="#7-2-task-domain-src-repository-rs" class="headerlink" title="7.2 task-domain/src/repository.rs"></a>7.2 <code>task-domain/src/repository.rs</code></h3><pre><code class="highlight rust"><span class="keyword">use</span> crate::&#123;error::DomainError, task::Task&#125;;
+
+<span class="keyword">pub</span> <span class="keyword">trait</span> <span class="title class_">TaskRepository</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">next_id</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> <span class="type">u64</span>;
+    <span class="keyword">fn</span> <span class="title function_">insert</span>(&amp;<span class="keyword">mut</span> <span class="keyword">self</span>, task: Task);
+    <span class="keyword">fn</span> <span class="title function_">get</span>(&amp;<span class="keyword">self</span>, id: <span class="type">u64</span>) <span class="punctuation">-&gt;</span> <span class="type">Option</span>&lt;Task&gt;;
+    <span class="keyword">fn</span> <span class="title function_">update</span>(&amp;<span class="keyword">mut</span> <span class="keyword">self</span>, task: Task) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;(), DomainError&gt;;
+    <span class="keyword">fn</span> <span class="title function_">list</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> <span class="type">Vec</span>&lt;Task&gt;;
+&#125;</code></pre>
+
+<p>这个接口非常关键。</p>
+<p>它表达的是：</p>
+<blockquote>
+<p>领域服务需要一个能存取任务的仓储，但并不关心仓储具体是内存、文件还是数据库。</p>
+</blockquote>
+<p>这就是很典型、也很适合放在领域 crate 里的抽象。</p>
+<h3 id="7-3-task-domain-src-service-rs"><a href="#7-3-task-domain-src-service-rs" class="headerlink" title="7.3 task-domain/src/service.rs"></a>7.3 <code>task-domain/src/service.rs</code></h3><pre><code class="highlight rust"><span class="keyword">use</span> crate::&#123;error::DomainError, repository::TaskRepository, task::Task&#125;;
+
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">TaskService</span>&lt;R&gt; &#123;
+    repository: R,
+&#125;
+
+<span class="keyword">impl</span>&lt;R&gt; TaskService&lt;R&gt;
+<span class="keyword">where</span>
+    R: TaskRepository,
+&#123;
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">new</span>(repository: R) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123;
+        <span class="keyword">Self</span> &#123; repository &#125;
+    &#125;
+
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">create_task</span>(&amp;<span class="keyword">mut</span> <span class="keyword">self</span>, title: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;Task, DomainError&gt; &#123;
+        <span class="keyword">let</span> <span class="variable">id</span> = <span class="keyword">self</span>.repository.<span class="title function_ invoke__">next_id</span>();
+        <span class="keyword">let</span> <span class="variable">task</span> = Task::<span class="title function_ invoke__">new</span>(id, title)?;
+        <span class="keyword">self</span>.repository.<span class="title function_ invoke__">insert</span>(task.<span class="title function_ invoke__">clone</span>());
+        <span class="title function_ invoke__">Ok</span>(task)
+    &#125;
+
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">complete_task</span>(&amp;<span class="keyword">mut</span> <span class="keyword">self</span>, id: <span class="type">u64</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;Task, DomainError&gt; &#123;
+        <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">task</span> = <span class="keyword">self</span>
+            .repository
+            .<span class="title function_ invoke__">get</span>(id)
+            .<span class="title function_ invoke__">ok_or</span>(DomainError::TaskNotFound &#123; id &#125;)?;
+
+        task.<span class="title function_ invoke__">complete</span>()?;
+        <span class="keyword">self</span>.repository.<span class="title function_ invoke__">update</span>(task.<span class="title function_ invoke__">clone</span>())?;
+        <span class="title function_ invoke__">Ok</span>(task)
+    &#125;
+
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">list_tasks</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> <span class="type">Vec</span>&lt;Task&gt; &#123;
+        <span class="keyword">self</span>.repository.<span class="title function_ invoke__">list</span>()
+    &#125;
+&#125;</code></pre>
+
+<p>这里业务规则就被稳定收口在领域 crate 里了。</p>
+<p>后面你无论是：</p>
+<ul>
+<li>写 CLI</li>
+<li>接 HTTP</li>
+<li>换成数据库实现</li>
+</ul>
+<p>都不用改这些核心规则。</p>
+<hr>
+<h2 id="八、基础设施-crate-为什么依赖领域，而不是领域依赖基础设施？"><a href="#八、基础设施-crate-为什么依赖领域，而不是领域依赖基础设施？" class="headerlink" title="八、基础设施 crate 为什么依赖领域，而不是领域依赖基础设施？"></a>八、基础设施 crate 为什么依赖领域，而不是领域依赖基础设施？</h2><p>这是多 crate 设计里最重要的依赖方向之一。</p>
+<p>在示例里，<code>task-store</code> 是这样定义的：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> std::collections::BTreeMap;
+<span class="keyword">use</span> task_domain::&#123;DomainError, Task, TaskRepository&#125;;
+
+<span class="meta">#[derive(Debug, Default)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">InMemoryTaskRepository</span> &#123;
+    next_id: <span class="type">u64</span>,
+    tasks: BTreeMap&lt;<span class="type">u64</span>, Task&gt;,
+&#125;</code></pre>
+
+<p>它实现了 <code>TaskRepository</code>，但接口定义本身仍然在 <code>task-domain</code> 里。</p>
+<p>这意味着依赖方向是：</p>
+<p><code>task-cli -&gt; task-store -&gt; task-domain</code></p>
+<p>而不是：</p>
+<p><code>task-domain -&gt; task-store</code></p>
+<p>为什么这个方向更合理？</p>
+<p>因为领域规则应该尽量稳定、尽量靠内层。</p>
+<p>而基础设施实现：</p>
+<ul>
+<li>更容易变化</li>
+<li>更接近外部世界</li>
+<li>更可能被替换</li>
+</ul>
+<p>所以更自然的方式就是：</p>
+<blockquote>
+<p>外层依赖内层，具体实现依赖抽象，而不是抽象依赖实现。</p>
+</blockquote>
+<hr>
+<h2 id="九、二进制-crate-负责什么？"><a href="#九、二进制-crate-负责什么？" class="headerlink" title="九、二进制 crate 负责什么？"></a>九、二进制 crate 负责什么？</h2><p><code>task-cli</code> 是示例里唯一的二进制 crate。</p>
+<p>它的职责非常明确：</p>
+<ol>
+<li>创建具体仓储实现</li>
+<li>组装 <code>TaskService</code></li>
+<li>调用业务能力</li>
+<li>把结果输出给用户</li>
+</ol>
+<h3 id="9-1-apps-task-cli-src-main-rs"><a href="#9-1-apps-task-cli-src-main-rs" class="headerlink" title="9.1 apps/task-cli/src/main.rs"></a>9.1 <code>apps/task-cli/src/main.rs</code></h3><pre><code class="highlight rust"><span class="keyword">use</span> task_domain::&#123;TaskService, TaskStatus&#125;;
+<span class="keyword">use</span> task_store::InMemoryTaskRepository;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">repository</span> = InMemoryTaskRepository::<span class="title function_ invoke__">new</span>();
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">service</span> = TaskService::<span class="title function_ invoke__">new</span>(repository);
+
+    <span class="keyword">let</span> <span class="variable">first</span> = service.<span class="title function_ invoke__">create_task</span>(<span class="string">&quot;write workspace article&quot;</span>).<span class="title function_ invoke__">unwrap</span>();
+    <span class="keyword">let</span> <span class="variable">second</span> = service.<span class="title function_ invoke__">create_task</span>(<span class="string">&quot;extract stable domain crate&quot;</span>).<span class="title function_ invoke__">unwrap</span>();
+    <span class="keyword">let</span> <span class="variable">done</span> = service.<span class="title function_ invoke__">complete_task</span>(first.<span class="title function_ invoke__">id</span>()).<span class="title function_ invoke__">unwrap</span>();
+
+    <span class="built_in">println!</span>(<span class="string">&quot;created task #&#123;&#125;, title=&#123;&#125;&quot;</span>, second.<span class="title function_ invoke__">id</span>(), second.<span class="title function_ invoke__">title</span>());
+    <span class="built_in">println!</span>(<span class="string">&quot;completed task #&#123;&#125;, status=&#123;:?&#125;&quot;</span>, done.<span class="title function_ invoke__">id</span>(), done.<span class="title function_ invoke__">status</span>());
+
+    <span class="keyword">for</span> <span class="variable">task</span> <span class="keyword">in</span> service.<span class="title function_ invoke__">list_tasks</span>() &#123;
+        <span class="keyword">let</span> <span class="variable">status</span> = <span class="keyword">match</span> task.<span class="title function_ invoke__">status</span>() &#123;
+            TaskStatus::Pending =&gt; <span class="string">&quot;pending&quot;</span>,
+            TaskStatus::Done =&gt; <span class="string">&quot;done&quot;</span>,
+        &#125;;
+
+        <span class="built_in">println!</span>(<span class="string">&quot;task #&#123;&#125;, title=&#123;&#125;, status=&#123;&#125;&quot;</span>, task.<span class="title function_ invoke__">id</span>(), task.<span class="title function_ invoke__">title</span>(), status);
+    &#125;
+&#125;</code></pre>
+
+<p>你会发现这里没有什么“核心规则”。</p>
+<p>因为入口 crate 的重点本来就不应该是业务规则，而是组装和调用。</p>
+<p>这正是把二进制 crate 单独拿出来的意义。</p>
+<hr>
+<h2 id="十、这套结构为什么比“一个超大-crate”更稳？"><a href="#十、这套结构为什么比“一个超大-crate”更稳？" class="headerlink" title="十、这套结构为什么比“一个超大 crate”更稳？"></a>十、这套结构为什么比“一个超大 crate”更稳？</h2><p>先说结论：</p>
+<blockquote>
+<p>它不是因为 crate 变多了而更好，而是因为边界终于变得可验证了。</p>
+</blockquote>
+<p>具体来说，至少有这几个收益。</p>
+<h3 id="10-1-业务规则被独立保护起来了"><a href="#10-1-业务规则被独立保护起来了" class="headerlink" title="10.1 业务规则被独立保护起来了"></a>10.1 业务规则被独立保护起来了</h3><p><code>task-domain</code> 不需要知道：</p>
+<ul>
+<li>程序从命令行启动还是 HTTP 启动</li>
+<li>仓储是内存版还是数据库版</li>
+<li>输出打到终端还是日志系统</li>
+</ul>
+<p>所以它更容易保持稳定。</p>
+<h3 id="10-2-外层实现可以替换"><a href="#10-2-外层实现可以替换" class="headerlink" title="10.2 外层实现可以替换"></a>10.2 外层实现可以替换</h3><p>今天你用 <code>task-store</code> 的内存实现，明天你完全可以再加一个：</p>
+<ul>
+<li><code>task-store-sqlite</code></li>
+<li><code>task-store-postgres</code></li>
+</ul>
+<p>只要它们实现相同的 <code>TaskRepository</code> 接口，领域服务就不用重写。</p>
+<h3 id="10-3-测试粒度更清晰"><a href="#10-3-测试粒度更清晰" class="headerlink" title="10.3 测试粒度更清晰"></a>10.3 测试粒度更清晰</h3><p>领域 crate 可以单独测试业务规则。</p>
+<p>例如示例里就在 <a href="workspaces/workspace-demo/crates/task-domain/tests/task_flow.rs">workspaces&#x2F;workspace-demo&#x2F;crates&#x2F;task-domain&#x2F;tests&#x2F;task_flow.rs</a> 里对任务流转做了测试。</p>
+<p>这类测试非常快，也非常稳定。</p>
+<h3 id="10-4-构建和阅读入口都更清楚"><a href="#10-4-构建和阅读入口都更清楚" class="headerlink" title="10.4 构建和阅读入口都更清楚"></a>10.4 构建和阅读入口都更清楚</h3><p>新人看到这个 workspace 时，通常很容易建立心智模型：</p>
+<ul>
+<li><code>task-cli</code> 是入口</li>
+<li><code>task-domain</code> 是核心规则</li>
+<li><code>task-store</code> 是具体实现</li>
+</ul>
+<p>这比一大堆目录互相 import 更容易理解。</p>
+<hr>
+<h2 id="十一、几个很常见的错误拆法"><a href="#十一、几个很常见的错误拆法" class="headerlink" title="十一、几个很常见的错误拆法"></a>十一、几个很常见的错误拆法</h2><p>这一节通常比“如何拆”更重要。</p>
+<h3 id="11-1-错误拆法一：先造一个-common-crate"><a href="#11-1-错误拆法一：先造一个-common-crate" class="headerlink" title="11.1 错误拆法一：先造一个 common crate"></a>11.1 错误拆法一：先造一个 <code>common</code> crate</h3><p>这是最常见的问题之一。</p>
+<p>很多项目刚开始拆包，就先建一个 <code>common</code> 或 <code>utils</code>。</p>
+<p>短期看它很方便，长期几乎一定会出现这些情况：</p>
+<ul>
+<li>什么都往里塞</li>
+<li>依赖方向越来越混乱</li>
+<li>crate 名字看起来通用，职责却越来越不清楚</li>
+</ul>
+<p>如果一个 crate 的职责无法被一句话说清，通常就有问题。</p>
+<h3 id="11-2-错误拆法二：按目录名机械拆，而不是按边界拆"><a href="#11-2-错误拆法二：按目录名机械拆，而不是按边界拆" class="headerlink" title="11.2 错误拆法二：按目录名机械拆，而不是按边界拆"></a>11.2 错误拆法二：按目录名机械拆，而不是按边界拆</h3><p>例如：</p>
+<ul>
+<li><code>model</code> crate</li>
+<li><code>service</code> crate</li>
+<li><code>repository</code> crate</li>
+</ul>
+<p>如果这些 crate 之间的关系高度耦合，改一个字段就要全部联动，那拆出来的收益往往不大。</p>
+<h3 id="11-3-错误拆法三：把所有公共类型都过早抽出去"><a href="#11-3-错误拆法三：把所有公共类型都过早抽出去" class="headerlink" title="11.3 错误拆法三：把所有公共类型都过早抽出去"></a>11.3 错误拆法三：把所有公共类型都过早抽出去</h3><p>不是所有“被两个地方用到的类型”都值得独立成 crate。</p>
+<p>判断关键在于：</p>
+<ul>
+<li>它是否有稳定语义</li>
+<li>是否确实形成独立复用边界</li>
+<li>抽出去后依赖是否更清楚</li>
+</ul>
+<p>否则很容易把代码变成“四处引用公共包，但谁都不敢改”。</p>
+<h3 id="11-4-错误拆法四：让内层-crate-依赖外层-crate"><a href="#11-4-错误拆法四：让内层-crate-依赖外层-crate" class="headerlink" title="11.4 错误拆法四：让内层 crate 依赖外层 crate"></a>11.4 错误拆法四：让内层 crate 依赖外层 crate</h3><p>例如：</p>
+<ul>
+<li><code>domain</code> 依赖 <code>http</code></li>
+<li><code>domain</code> 依赖具体数据库库</li>
+<li><code>protocol</code> 依赖服务启动层</li>
+</ul>
+<p>这种依赖方向一旦形成，后面整个结构会越来越难救。</p>
+<hr>
+<h2 id="十二、怎么判断一个-crate-拆得是否合理？"><a href="#十二、怎么判断一个-crate-拆得是否合理？" class="headerlink" title="十二、怎么判断一个 crate 拆得是否合理？"></a>十二、怎么判断一个 crate 拆得是否合理？</h2><p>这里给几个很实用的检查问题。</p>
+<p>如果大部分都能回答得比较清楚，通常说明拆得还算合理。</p>
+<ol>
+<li>能不能用一句话说明每个 crate 的职责？</li>
+<li>crate 之间的依赖方向是不是单向而清楚？</li>
+<li>去掉某个具体实现 crate，核心业务是否还能成立？</li>
+<li>新增一个运行入口时，能否复用已有领域能力？</li>
+<li>你是不是在反复把类型从一个 crate 搬到另一个 crate？</li>
+</ol>
+<p>如果第 5 条经常发生，通常说明当前边界还没找准。</p>
+<hr>
+<h2 id="十三、如何运行这个示例-workspace"><a href="#十三、如何运行这个示例-workspace" class="headerlink" title="十三、如何运行这个示例 workspace"></a>十三、如何运行这个示例 workspace</h2><p>示例目录在 <a href="workspaces/workspace-demo">workspaces&#x2F;workspace-demo</a>。</p>
+<h3 id="13-1-运行-CLI-示例"><a href="#13-1-运行-CLI-示例" class="headerlink" title="13.1 运行 CLI 示例"></a>13.1 运行 CLI 示例</h3><pre><code class="highlight bash"><span class="built_in">cd</span> workspaces/workspace-demo
+cargo run -p task-cli</code></pre>
+
+<h3 id="13-2-跑整个-workspace-的测试"><a href="#13-2-跑整个-workspace-的测试" class="headerlink" title="13.2 跑整个 workspace 的测试"></a>13.2 跑整个 workspace 的测试</h3><pre><code class="highlight bash"><span class="built_in">cd</span> workspaces/workspace-demo
+cargo <span class="built_in">test</span></code></pre>
+
+<h3 id="13-3-查看工作空间里有哪些-crate"><a href="#13-3-查看工作空间里有哪些-crate" class="headerlink" title="13.3 查看工作空间里有哪些 crate"></a>13.3 查看工作空间里有哪些 crate</h3><p>你也可以通过根目录直接感受到 workspace 的统一管理方式。</p>
+<p>例如你只需要站在根目录，就能完成：</p>
+<ul>
+<li>对全部 crate 做检查</li>
+<li>只运行某一个二进制 crate</li>
+<li>统一跑所有测试</li>
+</ul>
+<p>这也是 workspace 在工程协作里很有价值的一点。</p>
+<hr>
+<h2 id="十四、如果项目继续变大，可以怎么演进？"><a href="#十四、如果项目继续变大，可以怎么演进？" class="headerlink" title="十四、如果项目继续变大，可以怎么演进？"></a>十四、如果项目继续变大，可以怎么演进？</h2><p>这套示例只是一个起点。</p>
+<p>如果你的项目继续变大，可以往下面这些方向演进。</p>
+<h3 id="14-1-增加新的运行入口-crate"><a href="#14-1-增加新的运行入口-crate" class="headerlink" title="14.1 增加新的运行入口 crate"></a>14.1 增加新的运行入口 crate</h3><p>例如除了 <code>task-cli</code>，你还可以再增加：</p>
+<ul>
+<li><code>task-http</code></li>
+<li><code>task-worker</code></li>
+</ul>
+<p>它们都复用同一个领域 crate。</p>
+<h3 id="14-2-为不同基础设施提供多个实现-crate"><a href="#14-2-为不同基础设施提供多个实现-crate" class="headerlink" title="14.2 为不同基础设施提供多个实现 crate"></a>14.2 为不同基础设施提供多个实现 crate</h3><p>例如：</p>
+<ul>
+<li><code>task-store-memory</code></li>
+<li><code>task-store-postgres</code></li>
+</ul>
+<p>这样替换实现时，核心规则仍然不受影响。</p>
+<h3 id="14-3-把协议类型单独抽成稳定-crate"><a href="#14-3-把协议类型单独抽成稳定-crate" class="headerlink" title="14.3 把协议类型单独抽成稳定 crate"></a>14.3 把协议类型单独抽成稳定 crate</h3><p>只有当协议真的需要跨 client&#x2F;server 或多个服务复用时，这一步才值得做。</p>
+<p>不要一上来就把所有 DTO 都拆出去。</p>
+<hr>
+<h2 id="十五、总结"><a href="#十五、总结" class="headerlink" title="十五、总结"></a>十五、总结</h2><p>Rust workspace 真正的价值，不是“项目看起来更大、更专业”，而是：</p>
+<ol>
+<li>用 crate 边界把依赖关系约束清楚</li>
+<li>把稳定核心和易变实现拆开</li>
+<li>让多个 crate 仍然共享统一的构建和测试体验</li>
+</ol>
+<p>所以什么时候该拆，核心判断其实只有一句话：</p>
+<blockquote>
+<p>当某部分代码已经形成清晰职责、明确依赖方向和稳定复用边界时，才值得把它拆成独立 crate。</p>
+</blockquote>
+<p>而怎么拆，最重要的也不是套某种分层模板，而是尽量满足这几个原则：</p>
+<ul>
+<li>一个 crate 的职责要能一句话说清</li>
+<li>内层抽象不要依赖外层实现</li>
+<li>不要为了“通用”过早造 <code>common</code> crate</li>
+<li>先按真实边界拆，再考虑目录好不好看</li>
+</ul>
+<p>如果你当前项目还只是一个中小型服务，其实完全没必要急着把所有东西变成 workspace。</p>
+<p>但如果你已经开始出现下面这些信号：</p>
+<ul>
+<li>入口代码承担过多职责</li>
+<li>核心逻辑希望被多个入口复用</li>
+<li>存储、协议、运行时框架之间边界越来越模糊</li>
+</ul>
+<p>那 workspace 就很值得上了。</p>
+<p>对大多数 Rust 工程项目来说，一个非常实用的起点往往就是这篇里的结构：</p>
+<ul>
+<li>一个入口 crate 负责组装</li>
+<li>一个领域 crate 负责核心规则</li>
+<li>一个或多个实现 crate 负责具体适配</li>
+</ul>
+<p>这套方式不花哨，但通常足够稳，也足够能陪项目长大。</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
