@@ -1,0 +1,672 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>多签（Multisig）深入解析：从近期重大安全事故说起</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>多签（Multisig）深入解析：从近期重大安全事故说起</h1><div class="time">2026-05-18</div><ul class="tags"><li><span>#</span><a href="/tags/区块链/">区块链</a></li></ul><p>2025 年 2 月 21 日，加密货币交易所 ByBit 遭遇史上最大规模单次盗窃，约 <strong>15 亿美元</strong> 的 ETH 被黑客转走。</p>
+<p>攻击者是朝鲜国家黑客组织 Lazarus Group。他们并不是直接爆破私钥，而是入侵了 Safe{Wallet}（前身 Gnosis Safe）的前端服务，篡改了 JavaScript 脚本，让 ByBit 的多签操作员在看到”正常转账界面”的同时，实际签署的却是一笔恶意合约升级交易。</p>
+<p>这件事令人不安的地方在于：</p>
+<p><strong>ByBit 用的就是多签钱包。</strong></p>
+<p>不是单签，不是简单的热钱包。是号称行业最佳实践的 3-of-3 多签冷钱包。</p>
+<p>然而还是被偷了。</p>
+<hr>
+<p>这就引出了本文想深入讨论的核心问题：</p>
+<ul>
+<li>多签到底是什么，它解决的是什么问题</li>
+<li>多签有哪几种实现方式，各有什么权衡</li>
+<li>密码学层面的多签（阈值签名）和合约层面的多签有什么根本区别</li>
+<li>ByBit 这类攻击说明了什么：多签的局限与真正的安全边界在哪里</li>
+<li>用 Rust 实现一个 m-of-n 多签验证器是什么感觉</li>
+</ul>
+<hr>
+<h2 id="一、先从单签的根本脆弱性说起"><a href="#一、先从单签的根本脆弱性说起" class="headerlink" title="一、先从单签的根本脆弱性说起"></a>一、先从单签的根本脆弱性说起</h2><p>区块链上最基础的资产控制模型，是”谁拥有私钥，谁就控制资产”。</p>
+<p>这个设计很优雅，但它把所有风险集中到了一个点：</p>
+<pre><code class="highlight plaintext">私钥 ──► 签名 ──► 交易上链 ──► 资产转移</code></pre>
+
+<p>私钥丢了？资产永久消失。<br>私钥泄露？资产即刻被盗。<br>私钥被单点持有？一次内鬼攻击就够了。</p>
+<p>历史上的惨痛案例：</p>
+<table>
+<thead>
+<tr>
+<th>时间</th>
+<th>事件</th>
+<th>损失</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>2022-03</td>
+<td>Ronin Bridge 被盗（9 个验证节点中 5 个私钥被盗）</td>
+<td>$6.25 亿</td>
+</tr>
+<tr>
+<td>2022-02</td>
+<td>Wormhole 跨链桥漏洞</td>
+<td>$3.2 亿</td>
+</tr>
+<tr>
+<td>2024-10</td>
+<td>Radiant Capital（多签操作员设备遭恶意软件植入）</td>
+<td>$5500 万</td>
+</tr>
+<tr>
+<td>2025-02</td>
+<td>ByBit（Safe 前端被篡改，多签操作员被欺骗签名）</td>
+<td>$15 亿</td>
+</tr>
+</tbody></table>
+<p>注意：后两个案例用的都是多签，但依然被盗。后面我们会详细分析原因。</p>
+<hr>
+<h2 id="二、多签（Multisig）的基本概念：m-of-n"><a href="#二、多签（Multisig）的基本概念：m-of-n" class="headerlink" title="二、多签（Multisig）的基本概念：m-of-n"></a>二、多签（Multisig）的基本概念：m-of-n</h2><p>多签的核心思想很简单：</p>
+<blockquote>
+<p>不再是”一把锁一把钥匙”，而是”一把锁需要 m 把钥匙中的任意 m 把才能打开”。</p>
+</blockquote>
+<p>形式化地写是 <strong>m-of-n</strong>：</p>
+<ul>
+<li><code>n</code>：总共有 n 个参与方，各持有一份私钥</li>
+<li><code>m</code>：需要其中至少 m 个参与方共同签名，交易才有效（<code>1 ≤ m ≤ n</code>）</li>
+</ul>
+<p>常见配置：</p>
+<table>
+<thead>
+<tr>
+<th>配置</th>
+<th>场景</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>2-of-3</td>
+<td>个人备份：手机 + 硬件钱包 + 纸钱包，坏掉一个也能用</td>
+</tr>
+<tr>
+<td>3-of-5</td>
+<td>团队金库：5 个高管，需要 3 个同意才能动资金</td>
+</tr>
+<tr>
+<td>5-of-9</td>
+<td>大型协议：分布在全球的节点，防止单点被攻破</td>
+</tr>
+<tr>
+<td>1-of-2</td>
+<td>两个人共用账户，任一方可操作（低安全，高便捷）</td>
+</tr>
+</tbody></table>
+<p>m-of-n 的安全逻辑：</p>
+<ul>
+<li><strong>攻击者</strong>需要同时控制 m 个独立密钥，成本远高于单签</li>
+<li><strong>内部恶意方</strong>需要串通至少 m 个成员才能盗取资产</li>
+<li><strong>密钥丢失</strong>：只要丢失的数量不超过 <code>n - m</code>，资产仍可恢复</li>
+</ul>
+<hr>
+<h2 id="三、多签的三种实现方式"><a href="#三、多签的三种实现方式" class="headerlink" title="三、多签的三种实现方式"></a>三、多签的三种实现方式</h2><h3 id="3-1-脚本层多签（Bitcoin-P2MS-P2SH）"><a href="#3-1-脚本层多签（Bitcoin-P2MS-P2SH）" class="headerlink" title="3.1 脚本层多签（Bitcoin P2MS &#x2F; P2SH）"></a>3.1 脚本层多签（Bitcoin P2MS &#x2F; P2SH）</h3><p>Bitcoin 是最早原生支持多签的公链。它在脚本层面直接实现了 m-of-n：</p>
+<pre><code class="highlight plaintext">// P2MS (Pay to MultiSig) 解锁脚本
+OP_0
+&lt;签名1&gt;
+&lt;签名2&gt;
+// 锁定脚本
+OP_2 &lt;公钥A&gt; &lt;公钥B&gt; &lt;公钥C&gt; OP_3 OP_CHECKMULTISIG</code></pre>
+
+<p><strong>特点</strong>：</p>
+<ul>
+<li>多签逻辑由比特币脚本虚拟机执行，不依赖任何合约或第三方</li>
+<li>所有公钥暴露在链上（P2SH 在赎回前隐藏，但花费时仍要暴露）</li>
+<li>Gas（手续费）比单签高，因为脚本更复杂</li>
+</ul>
+<h3 id="3-2-合约层多签（Ethereum-Gnosis-Safe）"><a href="#3-2-合约层多签（Ethereum-Gnosis-Safe）" class="headerlink" title="3.2 合约层多签（Ethereum Gnosis Safe）"></a>3.2 合约层多签（Ethereum Gnosis Safe）</h3><p>Ethereum 上没有原生脚本多签，但可以用智能合约实现：</p>
+<pre><code class="highlight plaintext">用户 A 提交交易 ──►
+用户 B 确认交易 ──►  Safe 合约收集签名 ──► 达到 m 个后执行交易
+用户 C 确认交易 ──►</code></pre>
+
+<p>Gnosis Safe（现在叫 Safe{Wallet}）是这个领域的事实标准，管理着数千亿美元资产。</p>
+<p><strong>特点</strong>：</p>
+<ul>
+<li>灵活性极高，可以编程各种策略（时间锁、白名单、限额等）</li>
+<li>多签逻辑在合约里，合约本身可升级——<strong>这正是 ByBit 被攻击的关键点</strong></li>
+<li>操作员看到的是 dApp 前端，前端被篡改就可能被欺骗</li>
+</ul>
+<h3 id="3-3-密码学层多签（MuSig2-FROST-阈值-ECDSA）"><a href="#3-3-密码学层多签（MuSig2-FROST-阈值-ECDSA）" class="headerlink" title="3.3 密码学层多签（MuSig2 &#x2F; FROST &#x2F; 阈值 ECDSA）"></a>3.3 密码学层多签（MuSig2 &#x2F; FROST &#x2F; 阈值 ECDSA）</h3><p>这是最本质的多签：直接在密码学层面合并多个参与方的签名，产生一个<strong>看起来和普通单签完全一样</strong>的签名。</p>
+<p><strong>代表协议</strong>：</p>
+<ul>
+<li><strong>Schnorr + MuSig2</strong>：Bitcoin Taproot 使用，n 个参与方共同生成一个聚合公钥，协作产生单一 Schnorr 签名</li>
+<li><strong>FROST</strong>（Flexible Round-Optimized Schnorr Threshold Signature）：真正的阈值签名，m-of-n 语义，签名过程中不重建完整私钥</li>
+<li><strong>阈值 ECDSA</strong>：MPC（多方计算）实现的 ECDSA 阈值签名，用于不支持 Schnorr 的链</li>
+</ul>
+<p><strong>密码学多签的最大优势</strong>：</p>
+<p>链上看不出来是多签，也不暴露参与方数量和公钥集合，隐私性和手续费都和单签相同。</p>
+<hr>
+<h2 id="四、密码学基础：为什么签名可以”合并”"><a href="#四、密码学基础：为什么签名可以”合并”" class="headerlink" title="四、密码学基础：为什么签名可以”合并”"></a>四、密码学基础：为什么签名可以”合并”</h2><p>要理解密码学多签，先要了解 ECDSA 和 Schnorr 签名的基本结构。</p>
+<h3 id="4-1-ECDSA-签名回顾"><a href="#4-1-ECDSA-签名回顾" class="headerlink" title="4.1 ECDSA 签名回顾"></a>4.1 ECDSA 签名回顾</h3><p>设私钥为 $d$，对应公钥 $Q &#x3D; d \cdot G$（$G$ 是椭圆曲线基点）。</p>
+<p>签名一条消息 $m$：</p>
+<ol>
+<li>随机生成 nonce $k$，计算 $R &#x3D; k \cdot G$，取 $r &#x3D; R_x \bmod n$</li>
+<li>计算 $s &#x3D; k^{-1}(H(m) + r \cdot d) \bmod n$</li>
+<li>签名为 $(r, s)$</li>
+</ol>
+<p>验证时：检查 $R’ &#x3D; s^{-1} H(m) \cdot G + s^{-1} r \cdot Q$ 的 x 坐标是否等于 $r$。</p>
+<p>ECDSA 的问题是 nonce $k$ 的相关性——多方协同产生签名时需要避免 nonce 泄露私钥，这使得阈值 ECDSA 的协议设计非常复杂。</p>
+<h3 id="4-2-Schnorr-签名的线性性质"><a href="#4-2-Schnorr-签名的线性性质" class="headerlink" title="4.2 Schnorr 签名的线性性质"></a>4.2 Schnorr 签名的线性性质</h3><p>Schnorr 签名的结构：</p>
+<ol>
+<li>随机 nonce $r$，计算 $R &#x3D; r \cdot G$</li>
+<li>计算挑战值 $e &#x3D; H(R | Q | m)$</li>
+<li>签名为 $(R, s)$，其中 $s &#x3D; r + e \cdot d$</li>
+</ol>
+<p>验证：$s \cdot G &#x3D; R + e \cdot Q$</p>
+<p>Schnorr 的神奇之处：<strong>签名分量 $s$ 是线性的</strong>。</p>
+<p>多个参与方各自有私钥 $d_1, d_2, \ldots$，公钥聚合为 $Q &#x3D; Q_1 + Q_2 + \ldots$，各方分别计算 $s_i &#x3D; r_i + e \cdot d_i$，然后直接相加：</p>
+<p>$$s &#x3D; s_1 + s_2 + \ldots &#x3D; (r_1 + r_2 + \ldots) + e \cdot (d_1 + d_2 + \ldots)$$</p>
+<p>验证时：</p>
+<p>$$s \cdot G &#x3D; R + e \cdot Q \quad \checkmark$$</p>
+<p>这就是 MuSig2 的核心思想。</p>
+<hr>
+<h2 id="五、Rust-实现：m-of-n-多签验证器"><a href="#五、Rust-实现：m-of-n-多签验证器" class="headerlink" title="五、Rust 实现：m-of-n 多签验证器"></a>五、Rust 实现：m-of-n 多签验证器</h2><p>下面我们用 Rust 实现一个基于 secp256k1 ECDSA 的 <strong>m-of-n 签名收集与验证系统</strong>，模拟合约层多签的核心逻辑（类似 Gnosis Safe 的链下签名收集流程）。</p>
+<h3 id="5-1-项目依赖"><a href="#5-1-项目依赖" class="headerlink" title="5.1 项目依赖"></a>5.1 项目依赖</h3><pre><code class="highlight toml"><span class="section">[package]</span>
+<span class="attr">name</span> = <span class="string">&quot;multisig&quot;</span>
+<span class="attr">version</span> = <span class="string">&quot;0.1.0&quot;</span>
+<span class="attr">edition</span> = <span class="string">&quot;2024&quot;</span>
+
+<span class="section">[dependencies]</span>
+<span class="attr">k256</span> = &#123; version = <span class="string">&quot;0.13.4&quot;</span>, features = [<span class="string">&quot;ecdsa&quot;</span>] &#125;
+<span class="attr">rand</span> = <span class="string">&quot;0.10.1&quot;</span>
+<span class="attr">rand_core</span> = <span class="string">&quot;0.6.4&quot;</span>
+<span class="attr">serde_json</span> = <span class="string">&quot;1.0.149&quot;</span>
+<span class="attr">sha2</span> = <span class="string">&quot;0.11.0&quot;</span>
+<span class="attr">thiserror</span> = <span class="string">&quot;2.0.18&quot;</span></code></pre>
+
+<h3 id="5-2-核心数据结构"><a href="#5-2-核心数据结构" class="headerlink" title="5.2 核心数据结构"></a>5.2 核心数据结构</h3><pre><code class="highlight rust"><span class="comment">// src/sig/sig.rs</span>
+<span class="keyword">use</span> k256::ecdsa::signature::Verifier;
+<span class="keyword">use</span> k256::ecdsa::&#123;Signature, SigningKey, VerifyingKey&#125;;
+<span class="keyword">use</span> rand_core::OsRng;
+<span class="keyword">use</span> sha2::&#123;Digest, Sha256&#125;;
+<span class="keyword">use</span> std::collections::HashMap;
+
+<span class="comment">/// 多签配置</span>
+<span class="meta">#[derive(Debug, Clone)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">MultiSigPolicy</span> &#123;
+    <span class="comment">/// 最少需要多少个签名</span>
+    <span class="keyword">pub</span> threshold: <span class="type">usize</span>,
+    <span class="comment">/// 所有授权参与方的公钥（indexed by participant ID）</span>
+    <span class="keyword">pub</span> participants: <span class="type">Vec</span>&lt;VerifyingKey&gt;,
+&#125;
+
+<span class="comment">/// 单个参与方的部分签名</span>
+<span class="meta">#[derive(Debug, Clone)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">PartialSignature</span> &#123;
+    <span class="comment">/// 参与方在 participants 列表中的索引</span>
+    <span class="keyword">pub</span> participant_idx: <span class="type">usize</span>,
+    <span class="comment">/// 签名字节（DER 编码）</span>
+    <span class="keyword">pub</span> signature: Signature,
+&#125;
+
+<span class="comment">/// 多签会话——收集签名的过程</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">MultiSigSession</span> &#123;
+    <span class="keyword">pub</span> policy: MultiSigPolicy,
+    <span class="comment">/// 待签消息（原始字节，验证时会先做 SHA-256）</span>
+    <span class="keyword">pub</span> message: <span class="type">Vec</span>&lt;<span class="type">u8</span>&gt;,
+    <span class="comment">/// 已收集的签名</span>
+    <span class="keyword">pub</span> collected: HashMap&lt;<span class="type">usize</span>, Signature&gt;,
+&#125;
+
+<span class="meta">#[derive(Debug, thiserror::Error)]</span>
+<span class="keyword">pub</span> <span class="keyword">enum</span> <span class="title class_">MultiSigError</span> &#123;
+    <span class="meta">#[error(<span class="string">&quot;participant index &#123;0&#125; out of range&quot;</span>)]</span>
+    <span class="title function_ invoke__">InvalidParticipant</span>(<span class="type">usize</span>),
+    <span class="meta">#[error(<span class="string">&quot;signature from participant &#123;0&#125; is invalid&quot;</span>)]</span>
+    <span class="title function_ invoke__">InvalidSignature</span>(<span class="type">usize</span>),
+    <span class="meta">#[error(<span class="string">&quot;duplicate signature from participant &#123;0&#125;&quot;</span>)]</span>
+    <span class="title function_ invoke__">DuplicateSignature</span>(<span class="type">usize</span>),
+    <span class="meta">#[error(<span class="string">&quot;threshold not met: need &#123;need&#125;, got &#123;got&#125;&quot;</span>)]</span>
+    ThresholdNotMet &#123; need: <span class="type">usize</span>, got: <span class="type">usize</span> &#125;,
+&#125;</code></pre>
+
+<h3 id="5-3-多签会话实现"><a href="#5-3-多签会话实现" class="headerlink" title="5.3 多签会话实现"></a>5.3 多签会话实现</h3><pre><code class="highlight rust"><span class="comment">// src/sig/sig.rs</span>
+
+<span class="keyword">impl</span> <span class="title class_">MultiSigPolicy</span> &#123;
+    <span class="comment">/// 创建一个 m-of-n 策略</span>
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">new</span>(threshold: <span class="type">usize</span>, participants: <span class="type">Vec</span>&lt;VerifyingKey&gt;) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123;
+        <span class="built_in">assert!</span>(
+            threshold &gt; <span class="number">0</span> &amp;&amp; threshold &lt;= participants.<span class="title function_ invoke__">len</span>(),
+            <span class="string">&quot;threshold must satisfy 1 ≤ m ≤ n&quot;</span>
+        );
+        <span class="keyword">Self</span> &#123;
+            threshold,
+            participants,
+        &#125;
+    &#125;
+
+    <span class="comment">/// 生成 n 个随机密钥对（用于测试）</span>
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">generate_test_keys</span>(n: <span class="type">usize</span>) <span class="punctuation">-&gt;</span> (<span class="type">Vec</span>&lt;SigningKey&gt;, <span class="keyword">Self</span>) &#123;
+        <span class="keyword">let</span> <span class="variable">signing_keys</span>: <span class="type">Vec</span>&lt;SigningKey&gt; =
+            (<span class="number">0</span>..n).<span class="title function_ invoke__">map</span>(|_| SigningKey::<span class="title function_ invoke__">random</span>(&amp;<span class="keyword">mut</span> OsRng)).<span class="title function_ invoke__">collect</span>();
+        <span class="keyword">let</span> <span class="variable">verifying_keys</span>: <span class="type">Vec</span>&lt;VerifyingKey&gt; =
+            signing_keys.<span class="title function_ invoke__">iter</span>().<span class="title function_ invoke__">map</span>(|sk| *sk.<span class="title function_ invoke__">verifying_key</span>()).<span class="title function_ invoke__">collect</span>();
+        (signing_keys, <span class="keyword">Self</span>::<span class="title function_ invoke__">new</span>(n, verifying_keys)) <span class="comment">// 暂时 n-of-n，调用方可按需修改</span>
+    &#125;
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">MultiSigSession</span> &#123;
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">new</span>(policy: MultiSigPolicy, message: <span class="type">Vec</span>&lt;<span class="type">u8</span>&gt;) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123;
+        <span class="keyword">Self</span> &#123;
+            policy,
+            message,
+            collected: HashMap::<span class="title function_ invoke__">new</span>(),
+        &#125;
+    &#125;
+
+    <span class="comment">/// 消息摘要（所有操作都基于此摘要）</span>
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">message_digest</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> [<span class="type">u8</span>; <span class="number">32</span>] &#123;
+        <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">hasher</span> = Sha256::<span class="title function_ invoke__">new</span>();
+        <span class="comment">// 加入域分隔前缀，防止跨协议签名重放</span>
+        hasher.<span class="title function_ invoke__">update</span>(<span class="string">b&quot;multisig-v1:&quot;</span>);
+        hasher.<span class="title function_ invoke__">update</span>(&amp;<span class="keyword">self</span>.message);
+        hasher.<span class="title function_ invoke__">finalize</span>().<span class="title function_ invoke__">into</span>()
+    &#125;
+
+    <span class="comment">/// 参与方提交签名</span>
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">submit_signature</span>(
+        &amp;<span class="keyword">mut</span> <span class="keyword">self</span>,
+        participant_idx: <span class="type">usize</span>,
+        signature: Signature,
+    ) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;(), MultiSigError&gt; &#123;
+        <span class="comment">// 边界检查</span>
+        <span class="keyword">if</span> participant_idx &gt;= <span class="keyword">self</span>.policy.participants.<span class="title function_ invoke__">len</span>() &#123;
+            <span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(MultiSigError::<span class="title function_ invoke__">InvalidParticipant</span>(participant_idx));
+        &#125;
+        <span class="comment">// 防止重复提交</span>
+        <span class="keyword">if</span> <span class="keyword">self</span>.collected.<span class="title function_ invoke__">contains_key</span>(&amp;participant_idx) &#123;
+            <span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(MultiSigError::<span class="title function_ invoke__">DuplicateSignature</span>(participant_idx));
+        &#125;
+        <span class="comment">// 验证签名有效性——注意：这里验证的是摘要</span>
+        <span class="keyword">let</span> <span class="variable">digest</span> = <span class="keyword">self</span>.<span class="title function_ invoke__">message_digest</span>();
+        <span class="keyword">let</span> <span class="variable">vk</span> = &amp;<span class="keyword">self</span>.policy.participants[participant_idx];
+        vk.<span class="title function_ invoke__">verify</span>(&amp;digest, &amp;signature)
+            .<span class="title function_ invoke__">map_err</span>(|_| MultiSigError::<span class="title function_ invoke__">InvalidSignature</span>(participant_idx))?;
+
+        <span class="keyword">self</span>.collected.<span class="title function_ invoke__">insert</span>(participant_idx, signature);
+        <span class="title function_ invoke__">Ok</span>(())
+    &#125;
+
+    <span class="comment">/// 当前有效签名数量</span>
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">signature_count</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> <span class="type">usize</span> &#123;
+        <span class="keyword">self</span>.collected.<span class="title function_ invoke__">len</span>()
+    &#125;
+
+    <span class="comment">/// 是否已满足阈值</span>
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">is_complete</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> <span class="type">bool</span> &#123;
+        <span class="keyword">self</span>.collected.<span class="title function_ invoke__">len</span>() &gt;= <span class="keyword">self</span>.policy.threshold
+    &#125;
+
+    <span class="comment">/// 最终验证并导出已收集的签名列表</span>
+    <span class="comment">/// 返回满足阈值的参与方索引列表</span>
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">finalize</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="type">Vec</span>&lt;<span class="type">usize</span>&gt;, MultiSigError&gt; &#123;
+        <span class="keyword">if</span> !<span class="keyword">self</span>.<span class="title function_ invoke__">is_complete</span>() &#123;
+            <span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(MultiSigError::ThresholdNotMet &#123;
+                need: <span class="keyword">self</span>.policy.threshold,
+                got: <span class="keyword">self</span>.collected.<span class="title function_ invoke__">len</span>(),
+            &#125;);
+        &#125;
+        <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">indices</span>: <span class="type">Vec</span>&lt;<span class="type">usize</span>&gt; = <span class="keyword">self</span>.collected.<span class="title function_ invoke__">keys</span>().<span class="title function_ invoke__">copied</span>().<span class="title function_ invoke__">collect</span>();
+        indices.<span class="title function_ invoke__">sort</span>(); <span class="comment">// 确定性顺序</span>
+        <span class="title function_ invoke__">Ok</span>(indices)
+    &#125;
+&#125;</code></pre>
+
+<h3 id="5-4-参与方签名"><a href="#5-4-参与方签名" class="headerlink" title="5.4 参与方签名"></a>5.4 参与方签名</h3><pre><code class="highlight rust"><span class="comment">// src/sig/mod.rs</span>
+<span class="keyword">mod</span> sig;
+
+<span class="keyword">use</span> k256::ecdsa::signature::Signer;
+<span class="keyword">use</span> k256::ecdsa::&#123;Signature, SigningKey&#125;;
+
+<span class="keyword">pub</span> <span class="keyword">use</span> sig::MultiSigPolicy;
+<span class="keyword">pub</span> <span class="keyword">use</span> sig::MultiSigSession;
+
+<span class="comment">/// 参与方使用自己的私钥对会话消息签名</span>
+<span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">sign_session</span>(session: &amp;MultiSigSession, signing_key: &amp;SigningKey) <span class="punctuation">-&gt;</span> Signature &#123;
+    <span class="keyword">let</span> <span class="variable">digest</span> = session.<span class="title function_ invoke__">message_digest</span>();
+    <span class="comment">// k256 的 sign 方法内部使用 RFC6979 确定性 nonce，安全可靠</span>
+    signing_key.<span class="title function_ invoke__">sign</span>(&amp;digest)
+&#125;</code></pre>
+
+<h3 id="5-5-完整演示"><a href="#5-5-完整演示" class="headerlink" title="5.5 完整演示"></a>5.5 完整演示</h3><pre><code class="highlight rust"><span class="comment">// src/main.rs</span>
+
+<span class="keyword">use</span> multisig::MultiSigPolicy;
+<span class="keyword">use</span> multisig::MultiSigSession;
+<span class="keyword">use</span> multisig::sign_session;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;(), <span class="type">Box</span>&lt;<span class="keyword">dyn</span> std::error::Error&gt;&gt; &#123;
+    <span class="built_in">println!</span>(<span class="string">&quot;=== m-of-n 多签演示 ===\n&quot;</span>);
+
+    <span class="comment">// 创建 3-of-5 多签策略</span>
+    <span class="keyword">let</span> <span class="variable">n</span> = <span class="number">5</span>;
+    <span class="keyword">let</span> <span class="variable">m</span> = <span class="number">3</span>;
+    <span class="keyword">let</span> (signing_keys, <span class="keyword">mut</span> policy) = MultiSigPolicy::<span class="title function_ invoke__">generate_test_keys</span>(n);
+    policy.threshold = m; <span class="comment">// 覆盖为 3-of-5</span>
+
+    <span class="built_in">println!</span>(<span class="string">&quot;策略: &#123;m&#125;-of-&#123;n&#125; 多签&quot;</span>);
+    <span class="built_in">println!</span>(<span class="string">&quot;参与方数量: &#123;&#125;&quot;</span>, policy.participants.<span class="title function_ invoke__">len</span>());
+
+    <span class="comment">// 创建一笔需要审批的&quot;转账提案&quot;</span>
+    <span class="keyword">let</span> <span class="variable">proposal</span> = serde_json::json!(&#123;
+        <span class="string">&quot;action&quot;</span>: <span class="string">&quot;transfer&quot;</span>,
+        <span class="string">&quot;to&quot;</span>: <span class="string">&quot;0xdeadbeef...&quot;</span>,
+        <span class="string">&quot;amount&quot;</span>: <span class="string">&quot;1000000000000000000&quot;</span>, <span class="comment">// 1 ETH in wei</span>
+        <span class="string">&quot;nonce&quot;</span>: <span class="number">42</span>,
+    &#125;);
+    <span class="keyword">let</span> <span class="variable">message</span> = proposal.<span class="title function_ invoke__">to_string</span>().<span class="title function_ invoke__">into_bytes</span>();
+
+    <span class="built_in">println!</span>(<span class="string">&quot;\n待审批消息: &#123;&#125;&quot;</span>, <span class="type">String</span>::<span class="title function_ invoke__">from_utf8_lossy</span>(&amp;message));
+
+    <span class="comment">// 创建多签会话</span>
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">session</span> = MultiSigSession::<span class="title function_ invoke__">new</span>(policy.<span class="title function_ invoke__">clone</span>(), message);
+
+    <span class="comment">// 模拟参与方逐一签名</span>
+    <span class="keyword">for</span> <span class="variable">i</span> <span class="keyword">in</span> <span class="number">0</span>..n &#123;
+        <span class="keyword">let</span> <span class="variable">sig</span> = <span class="title function_ invoke__">sign_session</span>(&amp;session, &amp;signing_keys[i]);
+        <span class="keyword">match</span> session.<span class="title function_ invoke__">submit_signature</span>(i, sig) &#123;
+            <span class="title function_ invoke__">Ok</span>(()) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;参与方 &#123;i&#125; 签名成功，当前签名数: &#123;&#125;&quot;</span>, session.<span class="title function_ invoke__">signature_count</span>()),
+            <span class="title function_ invoke__">Err</span>(e) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;参与方 &#123;i&#125; 签名失败: &#123;e&#125;&quot;</span>),
+        &#125;
+        <span class="keyword">if</span> session.<span class="title function_ invoke__">is_complete</span>() &#123;
+            <span class="built_in">println!</span>(<span class="string">&quot;\n✓ 已达到阈值 &#123;m&#125;，无需等待剩余参与方&quot;</span>);
+            <span class="keyword">break</span>;
+        &#125;
+    &#125;
+
+    <span class="comment">// 最终确认</span>
+    <span class="keyword">let</span> <span class="variable">approved_by</span> = session.<span class="title function_ invoke__">finalize</span>()?;
+    <span class="built_in">println!</span>(<span class="string">&quot;\n交易已获批准，批准方索引: &#123;approved_by:?&#125;&quot;</span>);
+
+    <span class="comment">// 演示：阈值不足时的错误处理</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;\n--- 演示阈值不足的情况 ---&quot;</span>);
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">insufficient_session</span> = MultiSigSession::<span class="title function_ invoke__">new</span>(policy.<span class="title function_ invoke__">clone</span>(), <span class="string">b&quot;another tx&quot;</span>.<span class="title function_ invoke__">to_vec</span>());
+    <span class="keyword">let</span> <span class="variable">sig0</span> = <span class="title function_ invoke__">sign_session</span>(&amp;insufficient_session, &amp;signing_keys[<span class="number">0</span>]);
+    <span class="keyword">let</span> <span class="variable">sig1</span> = <span class="title function_ invoke__">sign_session</span>(&amp;insufficient_session, &amp;signing_keys[<span class="number">1</span>]);
+    insufficient_session.<span class="title function_ invoke__">submit_signature</span>(<span class="number">0</span>, sig0)?;
+    insufficient_session.<span class="title function_ invoke__">submit_signature</span>(<span class="number">1</span>, sig1)?;
+    <span class="keyword">match</span> insufficient_session.<span class="title function_ invoke__">finalize</span>() &#123;
+        <span class="title function_ invoke__">Err</span>(e) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;预期错误: &#123;e&#125;&quot;</span>),
+        <span class="title function_ invoke__">Ok</span>(_) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;不应该到这里&quot;</span>),
+    &#125;
+
+    <span class="comment">// 演示：伪造签名被拒绝</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;\n--- 演示伪造签名被拒绝 ---&quot;</span>);
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">forge_session</span> = MultiSigSession::<span class="title function_ invoke__">new</span>(policy.<span class="title function_ invoke__">clone</span>(), <span class="string">b&quot;tx to forge&quot;</span>.<span class="title function_ invoke__">to_vec</span>());
+    <span class="comment">// 参与方 0 用自己的私钥签，但声称是参与方 1 的签名</span>
+    <span class="keyword">let</span> <span class="variable">forged_sig</span> = <span class="title function_ invoke__">sign_session</span>(&amp;forge_session, &amp;signing_keys[<span class="number">0</span>]);
+    <span class="keyword">match</span> forge_session.<span class="title function_ invoke__">submit_signature</span>(<span class="number">1</span>, forged_sig) &#123;
+        <span class="title function_ invoke__">Err</span>(e) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;伪造签名被拒绝: &#123;e&#125;&quot;</span>),
+        <span class="title function_ invoke__">Ok</span>(_) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;不应该通过&quot;</span>),
+    &#125;
+
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;</code></pre>
+
+<p>运行输出类似：</p>
+<pre><code class="highlight plaintext">=== m-of-n 多签演示 ===
+
+策略: 3-of-5 多签
+参与方数量: 5
+
+待审批消息: &#123;&quot;action&quot;:&quot;transfer&quot;,&quot;amount&quot;:&quot;1000000000000000000&quot;,&quot;nonce&quot;:42,&quot;to&quot;:&quot;0xdeadbeef...&quot;&#125;
+参与方 0 签名成功，当前签名数: 1
+参与方 1 签名成功，当前签名数: 2
+参与方 2 签名成功，当前签名数: 3
+
+✓ 已达到阈值 3，无需等待剩余参与方
+
+交易已获批准，批准方索引: [0, 1, 2]
+
+--- 演示阈值不足的情况 ---
+预期错误: threshold not met: need 3, got 2
+
+--- 演示伪造签名被拒绝 ---
+伪造签名被拒绝: signature from participant 1 is invalid</code></pre>
+
+<hr>
+<h2 id="六、Shamir-秘密共享：另一种”分散私钥”的思路"><a href="#六、Shamir-秘密共享：另一种”分散私钥”的思路" class="headerlink" title="六、Shamir 秘密共享：另一种”分散私钥”的思路"></a>六、Shamir 秘密共享：另一种”分散私钥”的思路</h2><p>多签是”每人持有完整私钥，需要 m 人签名”。</p>
+<p>还有另一种方案：<strong>Shamir 秘密共享（Shamir’s Secret Sharing，SSS）</strong>——把私钥本身拆成 n 份碎片（称为 share），需要凑齐 m 份才能还原出私钥。</p>
+<p>数学原理：</p>
+<blockquote>
+<p>一个 m-1 次多项式由 m 个点唯一确定。把秘密藏在多项式的常数项，n 个人各持有多项式上的一个点。任意 m 个人可以用拉格朗日插值还原多项式，少于 m 个人则完全无法获取任何信息。</p>
+</blockquote>
+<pre><code class="highlight rust"><span class="comment">// src/shamir.rs</span>
+<span class="comment">/// 简单的 Shamir 秘密共享实现（教学用途，字段为 u64，生产环境应使用大质数有限域）</span>
+<span class="comment">///</span>
+<span class="comment">/// 注意：生产环境请使用 vsss-rs 等专业库</span>
+<span class="keyword">pub</span> <span class="keyword">mod</span> shamir &#123;
+    <span class="keyword">use</span> rand::RngExt;
+
+    <span class="comment">// 使用一个足够大的质数作为有限域模数</span>
+    <span class="comment">// 生产环境应使用 2^256 级别的质数（与私钥空间匹配）</span>
+    <span class="keyword">const</span> PRIME: <span class="type">u64</span> = <span class="number">2_305_843_009_213_693_951</span>; <span class="comment">// 梅森素数 2^61 - 1</span>
+
+    <span class="keyword">fn</span> <span class="title function_">mod_add</span>(a: <span class="type">u64</span>, b: <span class="type">u64</span>) <span class="punctuation">-&gt;</span> <span class="type">u64</span> &#123;
+        ((a <span class="keyword">as</span> <span class="type">u128</span> + b <span class="keyword">as</span> <span class="type">u128</span>) % PRIME <span class="keyword">as</span> <span class="type">u128</span>) <span class="keyword">as</span> <span class="type">u64</span>
+    &#125;
+
+    <span class="keyword">fn</span> <span class="title function_">mod_mul</span>(a: <span class="type">u64</span>, b: <span class="type">u64</span>) <span class="punctuation">-&gt;</span> <span class="type">u64</span> &#123;
+        ((a <span class="keyword">as</span> <span class="type">u128</span> * b <span class="keyword">as</span> <span class="type">u128</span>) % PRIME <span class="keyword">as</span> <span class="type">u128</span>) <span class="keyword">as</span> <span class="type">u64</span>
+    &#125;
+
+    <span class="comment">/// 模逆元（费马小定理：a^(p-2) mod p）</span>
+    <span class="keyword">fn</span> <span class="title function_">mod_inv</span>(a: <span class="type">u64</span>) <span class="punctuation">-&gt;</span> <span class="type">u64</span> &#123;
+        <span class="title function_ invoke__">mod_pow</span>(a, PRIME - <span class="number">2</span>)
+    &#125;
+
+    <span class="keyword">fn</span> <span class="title function_">mod_pow</span>(<span class="keyword">mut</span> base: <span class="type">u64</span>, <span class="keyword">mut</span> exp: <span class="type">u64</span>) <span class="punctuation">-&gt;</span> <span class="type">u64</span> &#123;
+        <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">result</span> = <span class="number">1u64</span>;
+        base %= PRIME;
+        <span class="keyword">while</span> exp &gt; <span class="number">0</span> &#123;
+            <span class="keyword">if</span> exp &amp; <span class="number">1</span> == <span class="number">1</span> &#123;
+                result = <span class="title function_ invoke__">mod_mul</span>(result, base);
+            &#125;
+            exp &gt;&gt;= <span class="number">1</span>;
+            base = <span class="title function_ invoke__">mod_mul</span>(base, base);
+        &#125;
+        result
+    &#125;
+
+    <span class="comment">/// 将秘密 secret 拆分为 n 份，需要 threshold 份才能还原</span>
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">split</span>(secret: <span class="type">u64</span>, threshold: <span class="type">usize</span>, n: <span class="type">usize</span>) <span class="punctuation">-&gt;</span> <span class="type">Vec</span>&lt;(<span class="type">u64</span>, <span class="type">u64</span>)&gt; &#123;
+        <span class="built_in">assert!</span>(threshold &gt;= <span class="number">2</span> &amp;&amp; threshold &lt;= n);
+        <span class="built_in">assert!</span>(secret &lt; PRIME);
+
+        <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">rng</span> = rand::<span class="title function_ invoke__">rng</span>();
+
+        <span class="comment">// 构造一个随机的 (threshold-1) 次多项式，常数项为 secret</span>
+        <span class="comment">// f(x) = secret + a1*x + a2*x^2 + ... + a_&#123;t-1&#125;*x^&#123;t-1&#125;</span>
+        <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">coefficients</span> = <span class="built_in">vec!</span>[secret];
+        <span class="keyword">for</span> <span class="variable">_</span> <span class="keyword">in</span> <span class="number">1</span>..threshold &#123;
+            coefficients.<span class="title function_ invoke__">push</span>(rng.<span class="title function_ invoke__">random_range</span>(<span class="number">1</span>..PRIME));
+        &#125;
+
+        <span class="comment">// 计算 n 个点 (i, f(i))，i 从 1 开始（避免 x=0）</span>
+        (<span class="number">1</span>..=(n <span class="keyword">as</span> <span class="type">u64</span>))
+            .<span class="title function_ invoke__">map</span>(|x| &#123;
+                <span class="keyword">let</span> <span class="variable">y</span> = coefficients
+                    .<span class="title function_ invoke__">iter</span>()
+                    .<span class="title function_ invoke__">enumerate</span>()
+                    .<span class="title function_ invoke__">fold</span>(<span class="number">0u64</span>, |acc, (i, &amp;coef)| &#123;
+                        <span class="title function_ invoke__">mod_add</span>(acc, <span class="title function_ invoke__">mod_mul</span>(coef, <span class="title function_ invoke__">mod_pow</span>(x, i <span class="keyword">as</span> <span class="type">u64</span>)))
+                    &#125;);
+                (x, y)
+            &#125;)
+            .<span class="title function_ invoke__">collect</span>()
+    &#125;
+
+    <span class="comment">/// 用拉格朗日插值从 shares 还原秘密（shares 数量需 ≥ threshold）</span>
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">combine</span>(shares: &amp;[(<span class="type">u64</span>, <span class="type">u64</span>)]) <span class="punctuation">-&gt;</span> <span class="type">u64</span> &#123;
+        <span class="comment">// 计算 f(0) 的拉格朗日插值</span>
+        shares.<span class="title function_ invoke__">iter</span>().<span class="title function_ invoke__">enumerate</span>().<span class="title function_ invoke__">fold</span>(<span class="number">0u64</span>, |acc, (i, &amp;(xi, yi))| &#123;
+            <span class="keyword">let</span> <span class="variable">lagrange</span> = shares.<span class="title function_ invoke__">iter</span>().<span class="title function_ invoke__">enumerate</span>().<span class="title function_ invoke__">fold</span>(<span class="number">1u64</span>, |prod, (j, &amp;(xj, _))| &#123;
+                <span class="keyword">if</span> i == j &#123;
+                    prod
+                &#125; <span class="keyword">else</span> &#123;
+                    <span class="comment">// 分子：(0 - xj) mod p = (p - xj) mod p</span>
+                    <span class="keyword">let</span> <span class="variable">num</span> = (PRIME - xj) % PRIME;
+                    <span class="comment">// 分母：(xi - xj) mod p</span>
+                    <span class="keyword">let</span> <span class="variable">den</span> = <span class="keyword">if</span> xi &gt; xj &#123;
+                        xi - xj
+                    &#125; <span class="keyword">else</span> &#123;
+                        PRIME - (xj - xi) % PRIME
+                    &#125;;
+                    <span class="title function_ invoke__">mod_mul</span>(prod, <span class="title function_ invoke__">mod_mul</span>(num, <span class="title function_ invoke__">mod_inv</span>(den)))
+                &#125;
+            &#125;);
+            <span class="title function_ invoke__">mod_add</span>(acc, <span class="title function_ invoke__">mod_mul</span>(yi, lagrange))
+        &#125;)
+    &#125;
+&#125;</code></pre>
+
+<p>使用示例：</p>
+<pre><code class="highlight rust"><span class="comment">// examples/shamir</span>
+<span class="keyword">use</span> multisig::shamir;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">secret</span>: <span class="type">u64</span> = <span class="number">0x1fff_ffff_dead_beef</span>; <span class="comment">// 模拟私钥片段（需小于 PRIME = 2^61-1）</span>
+
+    <span class="comment">// 拆分：3-of-5</span>
+    <span class="keyword">let</span> <span class="variable">shares</span> = shamir::shamir::<span class="title function_ invoke__">split</span>(secret, <span class="number">3</span>, <span class="number">5</span>);
+    <span class="built_in">println!</span>(<span class="string">&quot;原始秘密: &#123;:#018x&#125;&quot;</span>, secret);
+    <span class="built_in">println!</span>(<span class="string">&quot;生成 &#123;&#125; 份碎片:&quot;</span>, shares.<span class="title function_ invoke__">len</span>());
+    <span class="keyword">for</span> (x, y) <span class="keyword">in</span> &amp;shares &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;  share[&#123;x&#125;] = &#123;y:#018x&#125;&quot;</span>);
+    &#125;
+
+    <span class="comment">// 用任意 3 份还原</span>
+    <span class="keyword">let</span> <span class="variable">recovered</span> = shamir::shamir::<span class="title function_ invoke__">combine</span>(&amp;shares[<span class="number">0</span>..<span class="number">3</span>]);
+    <span class="built_in">println!</span>(<span class="string">&quot;\n用前 3 份还原: &#123;:#018x&#125;&quot;</span>, recovered);
+    <span class="built_in">assert_eq!</span>(recovered, secret, <span class="string">&quot;还原失败！&quot;</span>);
+    <span class="built_in">println!</span>(<span class="string">&quot;✓ 还原成功&quot;</span>);
+
+    <span class="comment">// 用不同的 3 份还原</span>
+    <span class="keyword">let</span> <span class="variable">recovered2</span> = shamir::shamir::<span class="title function_ invoke__">combine</span>(&amp;[shares[<span class="number">1</span>], shares[<span class="number">3</span>], shares[<span class="number">4</span>]]);
+    <span class="built_in">assert_eq!</span>(recovered2, secret);
+    <span class="built_in">println!</span>(<span class="string">&quot;✓ 用第 2、4、5 份也能还原&quot;</span>);
+
+    <span class="comment">// 2 份无法还原（结果错误但不会 panic）</span>
+    <span class="keyword">let</span> <span class="variable">wrong</span> = shamir::shamir::<span class="title function_ invoke__">combine</span>(&amp;shares[<span class="number">0</span>..<span class="number">2</span>]);
+    <span class="built_in">println!</span>(<span class="string">&quot;\n只用 2 份尝试还原: &#123;:#018x&#125;（应与原值不同）&quot;</span>, wrong);
+    <span class="built_in">assert_ne!</span>(wrong, secret);
+    <span class="built_in">println!</span>(<span class="string">&quot;✓ 不足份数无法正确还原&quot;</span>);
+&#125;</code></pre>
+
+<h3 id="SSS-与多签的关键区别"><a href="#SSS-与多签的关键区别" class="headerlink" title="SSS 与多签的关键区别"></a>SSS 与多签的关键区别</h3><table>
+<thead>
+<tr>
+<th>维度</th>
+<th>Shamir 秘密共享</th>
+<th>m-of-n 多签</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>私钥存在性</td>
+<td>还原时私钥在一个地方短暂重组</td>
+<td>私钥从不重组，分布式签名</td>
+</tr>
+<tr>
+<td>重组时的风险</td>
+<td>重组节点成为单点</td>
+<td>无单点风险</td>
+</tr>
+<tr>
+<td>是否需要交互</td>
+<td>还原时需要汇聚 shares</td>
+<td>签名可以离线进行，只传签名结果</td>
+</tr>
+<tr>
+<td>链上可见性</td>
+<td>最终结果与单签相同</td>
+<td>脚本&#x2F;合约多签链上可见；密码学多签不可见</td>
+</tr>
+<tr>
+<td>适用场景</td>
+<td>密钥备份、种子短语分片</td>
+<td>资金管理、治理决策</td>
+</tr>
+</tbody></table>
+<hr>
+<h2 id="七、ByBit-事件的深层教训：多签的安全边界"><a href="#七、ByBit-事件的深层教训：多签的安全边界" class="headerlink" title="七、ByBit 事件的深层教训：多签的安全边界"></a>七、ByBit 事件的深层教训：多签的安全边界</h2><p>回到开头的 ByBit 事件，现在可以更清晰地分析：</p>
+<h3 id="攻击链条"><a href="#攻击链条" class="headerlink" title="攻击链条"></a>攻击链条</h3><pre><code class="highlight plaintext">入侵 Safe&#123;Wallet&#125; 的 AWS S3 存储桶
+    ↓
+替换前端 JavaScript 文件
+    ↓
+ByBit 操作员打开 Safe 界面，看到&quot;正常的 ETH 转账&quot;
+    ↓
+三位操作员分别在硬件钱包上签名（以为是例行操作）
+    ↓
+实际签名的是&quot;将 Safe 实现合约升级为恶意合约&quot;的交易
+    ↓
+攻击者控制合约，清空所有资产</code></pre>
+
+<h3 id="多签保护的是什么，保护不了什么"><a href="#多签保护的是什么，保护不了什么" class="headerlink" title="多签保护的是什么，保护不了什么"></a>多签保护的是什么，保护不了什么</h3><p><strong>多签能防护的</strong>：</p>
+<ul>
+<li>单个私钥泄露（还需要 m-1 个配合）</li>
+<li>单台设备被黑（其他设备仍然安全）</li>
+<li>内部单人作恶（需要 m 人串通）</li>
+<li>物理盗窃单个硬件钱包</li>
+</ul>
+<p><strong>多签保护不了的</strong>：</p>
+<ul>
+<li>所有签名者都通过同一个被攻陷的界面签名（供应链攻击）</li>
+<li>签名者被社会工程学欺骗，对恶意交易数据”视而不见”</li>
+<li>合约本身存在逻辑漏洞，合法签名触发了恶意路径</li>
+</ul>
+<h3 id="真正的防护需要什么"><a href="#真正的防护需要什么" class="headerlink" title="真正的防护需要什么"></a>真正的防护需要什么</h3><ol>
+<li><p><strong>独立验证交易数据</strong>：每个签名者应直接解析 calldata，而不是只看 UI 描述。硬件钱包需要显示原始交易内容。</p>
+</li>
+<li><p><strong>多元化签名环境</strong>：不同签名者使用不同厂商的硬件钱包，访问不同的前端界面（甚至自建界面）。</p>
+</li>
+<li><p><strong>时间锁（Timelock）</strong>：高价值操作强制等待 24-72 小时，期间任何人可以发现异常并取消。</p>
+</li>
+<li><p><strong>交易模拟</strong>：签名前用 Tenderly &#x2F; Foundry 模拟交易执行结果，确认实际效果与预期一致。</p>
+</li>
+<li><p><strong>密码学多签优于合约多签</strong>：如果用 MPC&#x2F;FROST 在密码学层实现阈值签名，合约升级攻击向量直接消失——因为根本没有可升级的合约。</p>
+</li>
+</ol>
+<hr>
+<h2 id="八、生产环境的多签方案选择"><a href="#八、生产环境的多签方案选择" class="headerlink" title="八、生产环境的多签方案选择"></a>八、生产环境的多签方案选择</h2><h3 id="比特币生态"><a href="#比特币生态" class="headerlink" title="比特币生态"></a>比特币生态</h3><pre><code class="highlight plaintext">P2WSH 多签 → 稳定成熟，手续费可接受
+Taproot + MuSig2 → 更便宜（外观与单签相同），需要多轮交互</code></pre>
+
+<p>推荐库：<code>bitcoin</code> crate（Rust）、<code>rust-musig2</code></p>
+<h3 id="以太坊-EVM-生态"><a href="#以太坊-EVM-生态" class="headerlink" title="以太坊 &#x2F; EVM 生态"></a>以太坊 &#x2F; EVM 生态</h3><pre><code class="highlight plaintext">Gnosis Safe → 最成熟，但需要警惕前端安全和合约升级风险
+ERC-4337 Account Abstraction → 更灵活，原生支持复杂签名逻辑</code></pre>
+
+<p>ByBit 事件后，Safe 已强制增加了签名数据的链上原始数据显示。</p>
+<h3 id="Solana-生态"><a href="#Solana-生态" class="headerlink" title="Solana 生态"></a>Solana 生态</h3><pre><code class="highlight plaintext">Squads Protocol → Solana 上的多签标准实现（Program Derived Address + 投票机制）
+SPL Token MultiSig → 原生代币多签</code></pre>
+
+<h3 id="纯密码学方案（链无关）"><a href="#纯密码学方案（链无关）" class="headerlink" title="纯密码学方案（链无关）"></a>纯密码学方案（链无关）</h3><pre><code class="highlight plaintext">FROST → 推荐，正式标准化（RFC 9591），Rust 有 frost-core crate
+阈值 ECDSA → 用于不支持 Schnorr 的场景，实现复杂度更高</code></pre>
+
+<hr>
+<h2 id="九、总结"><a href="#九、总结" class="headerlink" title="九、总结"></a>九、总结</h2><p>多签本质上是把”单点信任”分散成”多点共识”，是区块链资产安全的重要工具。</p>
+<p>但 ByBit 和 Radiant Capital 的案例告诉我们：</p>
+<blockquote>
+<p><strong>多签不是银弹。它保护的是密钥层的安全，而不是签名者的判断力，也不是应用层的完整性。</strong></p>
+</blockquote>
+<p>真正意义上的安全，需要：</p>
+<ul>
+<li><strong>密钥层</strong>：多签 &#x2F; 阈值签名，分散单点风险</li>
+<li><strong>应用层</strong>：独立验证交易内容，不依赖单一前端</li>
+<li><strong>流程层</strong>：时间锁、冷却期、多通道确认</li>
+<li><strong>运营层</strong>：定期轮换密钥，最小化热路径权限</li>
+</ul>
+<p>密码学上的多签（FROST、MuSig2）相比合约多签，消除了合约升级这一额外攻击面，是未来值得关注的方向。</p>
+<p>对于 Rust 开发者而言，<code>k256</code>、<code>ed25519-dalek</code>、<code>frost-core</code> 这些 crate 提供了扎实的密码学基础，可以在此之上构建真正可靠的多签系统。</p>
+<hr>
+<blockquote>
+<p>示例代码仅用于教学演示。生产环境中的密码学实现请使用经过审计的专业库，并务必进行安全审计。</p>
+</blockquote>
+<blockquote>
+<p>示例代码链接：<a href="https://github.com/billchen-818/my-rust-learn/tree/master/multisig">multisig</a></p>
+</blockquote>
+<hr>
+<p><strong>参考资料</strong></p>
+<ul>
+<li><a href="https://offchain.medium.com/bybit-hack-analysis">ByBit Hack Analysis — Offchain Labs</a></li>
+<li><a href="https://www.rfc-editor.org/rfc/rfc9591">FROST RFC 9591</a></li>
+<li><a href="https://github.com/bitcoin/bips/blob/master/bip-0327.mediawiki">MuSig2: Simple Two-Round Schnorr Multisignatures — BIP 327</a></li>
+<li><a href="https://safe.global/blog/safe-wallet-incident">Safe{Wallet} Incident Report</a></li>
+<li><a href="https://docs.rs/k256">k256 crate — RustCrypto</a></li>
+<li><a href="https://docs.rs/frost-core">frost-core crate — ZF FROST</a></li>
+</ul>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
