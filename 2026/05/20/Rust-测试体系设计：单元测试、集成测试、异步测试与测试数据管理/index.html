@@ -1,0 +1,386 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust 测试体系设计：单元测试、集成测试、异步测试与测试数据管理</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust 测试体系设计：单元测试、集成测试、异步测试与测试数据管理</h1><div class="time">2026-05-20</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>很多人刚开始写 Rust 测试时，思路都很直接：</p>
+<ul>
+<li>给几个函数加上 <code>#[test]</code></li>
+<li>跑一下 <code>cargo test</code></li>
+<li>看到绿色通过，就觉得测试差不多了</li>
+</ul>
+<p>这在小 demo 阶段通常没问题。</p>
+<p>但只要项目开始变成“长期维护”的程序，测试问题就会立刻从“有没有”变成“怎么组织”：</p>
+<ul>
+<li>哪些逻辑应该写成单元测试，哪些应该放进集成测试</li>
+<li>异步代码到底该怎么测，难道每个地方都直接上 <code>#[tokio::test]</code></li>
+<li>测试数据到底写死在代码里，还是单独放 fixture</li>
+<li>一个测试失败时，到底说明业务规则错了，还是说明组装方式错了</li>
+<li>为什么测试一多，跑起来反而越来越慢，改起来越来越脆</li>
+</ul>
+<p>这说明：</p>
+<blockquote>
+<p>Rust 里的测试，不是“补几条断言”这么简单，而是一套边界清晰、反馈分层的工程设计。</p>
+</blockquote>
+<p>这一篇我想讲的核心，不是某个测试宏怎么写，而是下面几件事：</p>
+<ol>
+<li>单元测试、集成测试、异步测试分别应该验证什么</li>
+<li>为什么测试边界如果没分清，后面测试会越来越贵</li>
+<li>测试数据和测试辅助代码应该怎么组织，才不会把工程拖乱</li>
+<li>怎样让测试真正成为重构保护网，而不是形式化负担</li>
+</ol>
+<p>文中的完整示例工程在 <a href="workspaces/testing-demo">workspaces&#x2F;testing-demo</a>。</p>
+<hr>
+<h2 id="一、先说结论：测试不是按“框架能力”分，而是按“反馈层次”分"><a href="#一、先说结论：测试不是按“框架能力”分，而是按“反馈层次”分" class="headerlink" title="一、先说结论：测试不是按“框架能力”分，而是按“反馈层次”分"></a>一、先说结论：测试不是按“框架能力”分，而是按“反馈层次”分</h2><p>很多人学测试时，会先接触这些词：</p>
+<ul>
+<li>单元测试</li>
+<li>集成测试</li>
+<li>异步测试</li>
+<li>端到端测试</li>
+</ul>
+<p>然后很容易把它们理解成“几种不同语法”。</p>
+<p>但从工程角度看，更有用的理解方式是：</p>
+<blockquote>
+<p>不同类型的测试，对应的是不同层次的反馈。</p>
+</blockquote>
+<p>例如：</p>
+<ul>
+<li>单元测试回答的是“这段局部逻辑本身对不对”</li>
+<li>集成测试回答的是“对外暴露的能力组合起来对不对”</li>
+<li>异步测试回答的是“这段依赖运行时调度的逻辑，在异步上下文里对不对”</li>
+</ul>
+<p>这几个问题不是互相替代的。</p>
+<p>所以测试体系设计的第一步，不是先写代码，而是先分清你到底要验证哪一层。</p>
+<p>如果这一点没想清楚，后面就很容易出现两个极端：</p>
+<ul>
+<li>什么都写成单元测试，结果外部接口一改全漏掉</li>
+<li>什么都写成集成测试，结果运行很慢、定位很差、维护成本很高</li>
+</ul>
+<hr>
+<h2 id="二、一个可维护的测试体系，通常至少分三层"><a href="#二、一个可维护的测试体系，通常至少分三层" class="headerlink" title="二、一个可维护的测试体系，通常至少分三层"></a>二、一个可维护的测试体系，通常至少分三层</h2><p>我更推荐把大多数 Rust 项目的测试，先拆成三层来看：</p>
+<ol>
+<li>纯逻辑层：验证局部规则、边界条件、错误分支</li>
+<li>对外接口层：验证公开 API 的组合行为</li>
+<li>运行时层：验证异步代码、调度、超时、状态变化</li>
+</ol>
+<p>在示例工程里，这三层分别对应：</p>
+<ul>
+<li>源码内部的单元测试 <a href="workspaces/testing-demo/src/service.rs">workspaces&#x2F;testing-demo&#x2F;src&#x2F;service.rs</a></li>
+<li><code>tests/</code> 目录下的集成测试 <a href="workspaces/testing-demo/tests/task_service.rs">workspaces&#x2F;testing-demo&#x2F;tests&#x2F;task_service.rs</a></li>
+<li>带 <code>#[tokio::test]</code> 的异步测试 <a href="workspaces/testing-demo/tests/task_service.rs">workspaces&#x2F;testing-demo&#x2F;tests&#x2F;task_service.rs</a></li>
+</ul>
+<p>配套还有两块很关键的组织代码：</p>
+<ul>
+<li>测试辅助模块 <a href="workspaces/testing-demo/tests/support/mod.rs">workspaces&#x2F;testing-demo&#x2F;tests&#x2F;support&#x2F;mod.rs</a></li>
+<li>测试数据文件 <a href="workspaces/testing-demo/tests/fixtures/tasks.txt">workspaces&#x2F;testing-demo&#x2F;tests&#x2F;fixtures&#x2F;tasks.txt</a></li>
+</ul>
+<p>这套结构的重点不是“目录摆得好看”，而是：</p>
+<blockquote>
+<p>让不同测试只关注自己该验证的那一层，而不是互相越界。</p>
+</blockquote>
+<hr>
+<h2 id="三、单元测试：优先测试局部规则，而不是整个流程"><a href="#三、单元测试：优先测试局部规则，而不是整个流程" class="headerlink" title="三、单元测试：优先测试局部规则，而不是整个流程"></a>三、单元测试：优先测试局部规则，而不是整个流程</h2><p>示例里的 <code>TaskService</code> 有一个私有函数 <code>normalize_title</code>，负责做标题规整和校验：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">normalize_title</span>(title: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="type">String</span>, TaskError&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">trimmed</span> = title.<span class="title function_ invoke__">trim</span>();
+
+    <span class="keyword">if</span> trimmed.<span class="title function_ invoke__">is_empty</span>() &#123;
+        <span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(TaskError::EmptyTitle);
+    &#125;
+
+    <span class="keyword">if</span> trimmed.<span class="title function_ invoke__">chars</span>().<span class="title function_ invoke__">count</span>() &gt; <span class="number">40</span> &#123;
+        <span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(TaskError::TitleTooLong);
+    &#125;
+
+    <span class="title function_ invoke__">Ok</span>(trimmed.<span class="title function_ invoke__">to_string</span>())
+&#125;</code></pre>
+
+<p>对应的单元测试也很直接：</p>
+<pre><code class="highlight rust"><span class="meta">#[test]</span>
+<span class="keyword">fn</span> <span class="title function_">normalize_title_rejects_blank_input</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">error</span> = <span class="title function_ invoke__">normalize_title</span>(<span class="string">&quot;   &quot;</span>).<span class="title function_ invoke__">unwrap_err</span>();
+    <span class="built_in">assert_eq!</span>(error, TaskError::EmptyTitle);
+&#125;</code></pre>
+
+<p>这类测试最适合验证：</p>
+<ul>
+<li>边界值</li>
+<li>错误分支</li>
+<li>纯逻辑转换</li>
+<li>私有辅助函数的行为</li>
+</ul>
+<p>它们的特点通常是：</p>
+<ul>
+<li>跑得快</li>
+<li>失败定位准</li>
+<li>不依赖外部组装上下文</li>
+</ul>
+<p>所以单元测试最适合承担的是“第一层反馈”。</p>
+<p>也就是：</p>
+<blockquote>
+<p>每次改一点小逻辑，都能立刻知道有没有把局部规则改坏。</p>
+</blockquote>
+<h3 id="3-1-单元测试里最容易犯的错"><a href="#3-1-单元测试里最容易犯的错" class="headerlink" title="3.1 单元测试里最容易犯的错"></a>3.1 单元测试里最容易犯的错</h3><p>最常见的错误，不是单元测试写少了，而是“把本来应该拆开的逻辑混在一个函数里”，导致根本找不到值得单测的边界。</p>
+<p>如果你发现一个函数：</p>
+<ul>
+<li>既做输入校验</li>
+<li>又做状态更新</li>
+<li>还顺带访问外部资源</li>
+</ul>
+<p>那往往不是测试难写，而是代码边界本身就不清楚。</p>
+<p>这也是我一直很认同的一点：</p>
+<blockquote>
+<p>很多测试问题，最终都不是测试技术问题，而是代码设计问题。</p>
+</blockquote>
+<hr>
+<h2 id="四、集成测试：验证公开能力，而不是内部实现细节"><a href="#四、集成测试：验证公开能力，而不是内部实现细节" class="headerlink" title="四、集成测试：验证公开能力，而不是内部实现细节"></a>四、集成测试：验证公开能力，而不是内部实现细节</h2><p>Rust 的 <code>tests/</code> 目录很有价值的一点是：</p>
+<blockquote>
+<p>它会把你的 crate 当成外部使用者来测试。</p>
+</blockquote>
+<p>这意味着在 <code>tests/task_service.rs</code> 里，你只能通过公开 API 去验证行为，而不是直接碰内部私有实现。</p>
+<p>例如示例中的这条测试：</p>
+<pre><code class="highlight rust"><span class="meta">#[test]</span>
+<span class="keyword">fn</span> <span class="title function_">add_task_trims_title_before_storing</span>() &#123;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">service</span> = support::<span class="title function_ invoke__">fixture_service</span>();
+
+    <span class="keyword">let</span> <span class="variable">id</span> = service
+        .<span class="title function_ invoke__">add_task</span>(NewTask &#123;
+            title: <span class="string">&quot;  write async section  &quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+            priority: Priority::High,
+        &#125;)
+        .<span class="title function_ invoke__">unwrap</span>();
+
+    <span class="keyword">let</span> <span class="variable">created</span> = service.<span class="title function_ invoke__">tasks</span>().<span class="title function_ invoke__">iter</span>().<span class="title function_ invoke__">find</span>(|task| task.id == id).<span class="title function_ invoke__">unwrap</span>();
+    <span class="built_in">assert_eq!</span>(created.title, <span class="string">&quot;write async section&quot;</span>);
+    <span class="built_in">assert_eq!</span>(created.status, TaskStatus::Todo);
+&#125;</code></pre>
+
+<p>这里并没有去直接测试 <code>normalize_title</code> 这个内部函数，而是通过 <code>add_task</code> 这个公开入口，确认对外行为是否正确。</p>
+<p>这类测试最适合验证：</p>
+<ul>
+<li>一个公开方法的整体行为</li>
+<li>多个内部逻辑组合后的最终结果</li>
+<li>对外返回的数据结构和状态变化</li>
+</ul>
+<h3 id="4-1-集成测试的价值，不是“更高级”，而是“更接近真实使用方式”"><a href="#4-1-集成测试的价值，不是“更高级”，而是“更接近真实使用方式”" class="headerlink" title="4.1 集成测试的价值，不是“更高级”，而是“更接近真实使用方式”"></a>4.1 集成测试的价值，不是“更高级”，而是“更接近真实使用方式”</h3><p>很多人会误以为集成测试比单元测试高级，所以写得越多越好。</p>
+<p>其实不是。</p>
+<p>它的价值主要在于：</p>
+<blockquote>
+<p>它更接近外部调用者真正看到的世界。</p>
+</blockquote>
+<p>单元测试能告诉你某个内部规则没坏。</p>
+<p>但只有集成测试能告诉你：</p>
+<ul>
+<li>公共 API 还能不能正常用</li>
+<li>公开行为是否还是预期的</li>
+<li>模块之间组装起来以后有没有跑偏</li>
+</ul>
+<p>所以它的重要性不在于“层级更高”，而在于“视角不同”。</p>
+<hr>
+<h2 id="五、异步测试：不要把它理解成“单元测试前面多写一个宏”"><a href="#五、异步测试：不要把它理解成“单元测试前面多写一个宏”" class="headerlink" title="五、异步测试：不要把它理解成“单元测试前面多写一个宏”"></a>五、异步测试：不要把它理解成“单元测试前面多写一个宏”</h2><p>Rust 异步测试最容易被误解成这句：</p>
+<blockquote>
+<p>把 <code>#[test]</code> 换成 <code>#[tokio::test]</code> 就行了。</p>
+</blockquote>
+<p>这当然是表面写法，但真正要理解的是：</p>
+<blockquote>
+<p>异步测试的重点不在宏，而在于你正在验证一段依赖运行时的逻辑。</p>
+</blockquote>
+<p>示例里的异步方法是：</p>
+<pre><code class="highlight rust"><span class="keyword">pub</span> <span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">pending_count_after_sync</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> <span class="type">usize</span> &#123;
+    <span class="title function_ invoke__">sleep</span>(Duration::<span class="title function_ invoke__">from_millis</span>(<span class="number">5</span>)).<span class="keyword">await</span>;
+    <span class="keyword">self</span>.tasks
+        .<span class="title function_ invoke__">iter</span>()
+        .<span class="title function_ invoke__">filter</span>(|task| task.status == TaskStatus::Todo)
+        .<span class="title function_ invoke__">count</span>()
+&#125;</code></pre>
+
+<p>对应测试：</p>
+<pre><code class="highlight rust"><span class="meta">#[tokio::test(flavor = <span class="string">&quot;current_thread&quot;</span>)]</span>
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">pending_count_supports_async_tests</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">service</span> = support::<span class="title function_ invoke__">fixture_service</span>();
+    <span class="keyword">let</span> <span class="variable">pending_count</span> = service.<span class="title function_ invoke__">pending_count_after_sync</span>().<span class="keyword">await</span>;
+
+    <span class="built_in">assert_eq!</span>(pending_count, <span class="number">2</span>);
+&#125;</code></pre>
+
+<p>这里有两个值得注意的点。</p>
+<h3 id="5-1-异步测试验证的是“运行时上下文下的行为”"><a href="#5-1-异步测试验证的是“运行时上下文下的行为”" class="headerlink" title="5.1 异步测试验证的是“运行时上下文下的行为”"></a>5.1 异步测试验证的是“运行时上下文下的行为”</h3><p>一段逻辑只要涉及：</p>
+<ul>
+<li><code>async fn</code></li>
+<li><code>await</code></li>
+<li>超时</li>
+<li>并发任务</li>
+<li>调度顺序</li>
+</ul>
+<p>那它就已经不再只是普通纯函数测试了。</p>
+<p>这时你要测试的不只是结果值，还包括它在异步上下文里是否按预期推进。</p>
+<h3 id="5-2-测试运行时也应该尽量克制"><a href="#5-2-测试运行时也应该尽量克制" class="headerlink" title="5.2 测试运行时也应该尽量克制"></a>5.2 测试运行时也应该尽量克制</h3><p>示例里用的是：</p>
+<pre><code class="highlight rust"><span class="meta">#[tokio::test(flavor = <span class="string">&quot;current_thread&quot;</span>)]</span></code></pre>
+
+<p>这不是必须，但它体现了一个很实用的态度：</p>
+<blockquote>
+<p>如果测试不需要多线程运行时，就不要默认把运行环境放大。</p>
+</blockquote>
+<p>因为测试环境越重：</p>
+<ul>
+<li>运行越慢</li>
+<li>排查越复杂</li>
+<li>偶发性问题越难定位</li>
+</ul>
+<p>异步测试不是越“接近生产环境”越好，而是越“刚好满足验证目标”越好。</p>
+<hr>
+<h2 id="六、测试数据管理：别让-fixture-到处散落"><a href="#六、测试数据管理：别让-fixture-到处散落" class="headerlink" title="六、测试数据管理：别让 fixture 到处散落"></a>六、测试数据管理：别让 fixture 到处散落</h2><p>测试写到后面，最容易变乱的其实不是断言，而是测试数据。</p>
+<p>比如：</p>
+<ul>
+<li>每个测试都手写一份任务列表</li>
+<li>同样的数据在多个测试文件里复制</li>
+<li>测试辅助函数和测试数据混在一起</li>
+<li>改一个字段，十几个测试同时碎掉</li>
+</ul>
+<p>示例里把这块拆成了两部分：</p>
+<ol>
+<li>测试辅助模块 <a href="workspaces/testing-demo/tests/support/mod.rs">workspaces&#x2F;testing-demo&#x2F;tests&#x2F;support&#x2F;mod.rs</a></li>
+<li>测试 fixture 文件 <a href="workspaces/testing-demo/tests/fixtures/tasks.txt">workspaces&#x2F;testing-demo&#x2F;tests&#x2F;fixtures&#x2F;tasks.txt</a></li>
+</ol>
+<p>辅助模块里对外暴露一个统一入口：</p>
+<pre><code class="highlight rust"><span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">fixture_service</span>() <span class="punctuation">-&gt;</span> TaskService &#123;
+    TaskService::<span class="title function_ invoke__">with_tasks</span>(<span class="title function_ invoke__">load_tasks_from_fixture</span>())
+&#125;</code></pre>
+
+<p>它的好处很直接：</p>
+<ul>
+<li>测试代码不需要知道 fixture 如何加载</li>
+<li>fixture 格式变了，只改一处</li>
+<li>多个测试可以复用相同初始状态</li>
+</ul>
+<p>这块我自己的经验是：</p>
+<blockquote>
+<p>测试数据不是越“就近写”越好，而是越“能稳定复用”越好。</p>
+</blockquote>
+<p>当然，也不是所有数据都要抽成文件。</p>
+<p>如果只是一个很小、很局部、只服务单个测试的数据，内联写在测试里反而更清楚。</p>
+<p>真正值得抽出来的，通常是：</p>
+<ul>
+<li>多个测试共享的数据</li>
+<li>结构稍复杂的数据</li>
+<li>会反复演进的数据场景</li>
+</ul>
+<hr>
+<h2 id="七、单元测试和集成测试到底怎么分？一个实用判断法"><a href="#七、单元测试和集成测试到底怎么分？一个实用判断法" class="headerlink" title="七、单元测试和集成测试到底怎么分？一个实用判断法"></a>七、单元测试和集成测试到底怎么分？一个实用判断法</h2><p>很多人最常问的问题就是这个：</p>
+<blockquote>
+<p>到底什么应该写在 <code>src</code> 里的 <code>#[cfg(test)]</code>，什么应该写在 <code>tests/</code>？</p>
+</blockquote>
+<p>我通常用下面这个判断法：</p>
+<h3 id="7-1-如果你在验证“内部规则”，优先单元测试"><a href="#7-1-如果你在验证“内部规则”，优先单元测试" class="headerlink" title="7.1 如果你在验证“内部规则”，优先单元测试"></a>7.1 如果你在验证“内部规则”，优先单元测试</h3><p>例如：</p>
+<ul>
+<li>字符串规整</li>
+<li>状态转换边界</li>
+<li>错误分支</li>
+<li>私有辅助函数</li>
+</ul>
+<h3 id="7-2-如果你在验证“公开行为”，优先集成测试"><a href="#7-2-如果你在验证“公开行为”，优先集成测试" class="headerlink" title="7.2 如果你在验证“公开行为”，优先集成测试"></a>7.2 如果你在验证“公开行为”，优先集成测试</h3><p>例如：</p>
+<ul>
+<li><code>add_task</code> 之后对象状态是否正确</li>
+<li>某个公开 API 是否仍符合预期</li>
+<li>模块组合之后的对外结果是否稳定</li>
+</ul>
+<h3 id="7-3-如果测试依赖运行时，明确把它当成异步测试处理"><a href="#7-3-如果测试依赖运行时，明确把它当成异步测试处理" class="headerlink" title="7.3 如果测试依赖运行时，明确把它当成异步测试处理"></a>7.3 如果测试依赖运行时，明确把它当成异步测试处理</h3><p>例如：</p>
+<ul>
+<li><code>async fn</code></li>
+<li>并发逻辑</li>
+<li>定时器</li>
+<li>channel</li>
+<li>重试与超时</li>
+</ul>
+<p>这个分法最大的价值是：</p>
+<blockquote>
+<p>让每种测试只承担自己该承担的反馈责任。</p>
+</blockquote>
+<p>一旦你把这个责任划清，测试数量变多也不容易失控。</p>
+<hr>
+<h2 id="八、为什么有些测试越写越脆？"><a href="#八、为什么有些测试越写越脆？" class="headerlink" title="八、为什么有些测试越写越脆？"></a>八、为什么有些测试越写越脆？</h2><p>这是我很想强调的一点。</p>
+<p>很多项目不是没有测试，而是测试越来越难维护。</p>
+<p>通常有几个典型原因：</p>
+<h3 id="8-1-过度断言实现细节"><a href="#8-1-过度断言实现细节" class="headerlink" title="8.1 过度断言实现细节"></a>8.1 过度断言实现细节</h3><p>比如本来只需要断言最终行为，却把中间状态、内部顺序、临时结构全断言了一遍。</p>
+<p>这样代码稍微重构一下，测试就碎，但业务其实没坏。</p>
+<h3 id="8-2-一个测试覆盖太多责任"><a href="#8-2-一个测试覆盖太多责任" class="headerlink" title="8.2 一个测试覆盖太多责任"></a>8.2 一个测试覆盖太多责任</h3><p>如果一条测试同时验证：</p>
+<ul>
+<li>输入校验</li>
+<li>状态更新</li>
+<li>输出格式</li>
+<li>异步流程</li>
+</ul>
+<p>那它一旦失败，定位成本会很高。</p>
+<h3 id="8-3-测试数据构造成本太高"><a href="#8-3-测试数据构造成本太高" class="headerlink" title="8.3 测试数据构造成本太高"></a>8.3 测试数据构造成本太高</h3><p>如果每个测试都要手搓一大堆初始化状态，后面大家就会越来越不想补测试。</p>
+<p>所以从维护角度看，一个好的测试不只是“能抓 bug”，还应该满足：</p>
+<ul>
+<li>失败定位快</li>
+<li>重构时稳定</li>
+<li>新人容易读懂</li>
+<li>新场景容易补充</li>
+</ul>
+<p>这比单纯提高覆盖率数字更有意义。</p>
+<hr>
+<h2 id="九、完整示例：一个最小但结构完整的测试-demo"><a href="#九、完整示例：一个最小但结构完整的测试-demo" class="headerlink" title="九、完整示例：一个最小但结构完整的测试 demo"></a>九、完整示例：一个最小但结构完整的测试 demo</h2><p>示例工程 <a href="workspaces/testing-demo">workspaces&#x2F;testing-demo</a> 里一共放了几类东西：</p>
+<ol>
+<li>领域模型 <a href="workspaces/testing-demo/src/task.rs">workspaces&#x2F;testing-demo&#x2F;src&#x2F;task.rs</a></li>
+<li>服务逻辑和单元测试 <a href="workspaces/testing-demo/src/service.rs">workspaces&#x2F;testing-demo&#x2F;src&#x2F;service.rs</a></li>
+<li>集成测试 <a href="workspaces/testing-demo/tests/task_service.rs">workspaces&#x2F;testing-demo&#x2F;tests&#x2F;task_service.rs</a></li>
+<li>smoke test <a href="workspaces/testing-demo/tests/smoke.rs">workspaces&#x2F;testing-demo&#x2F;tests&#x2F;smoke.rs</a></li>
+<li>测试辅助模块 <a href="workspaces/testing-demo/tests/support/mod.rs">workspaces&#x2F;testing-demo&#x2F;tests&#x2F;support&#x2F;mod.rs</a></li>
+<li>fixture 文件 <a href="workspaces/testing-demo/tests/fixtures/tasks.txt">workspaces&#x2F;testing-demo&#x2F;tests&#x2F;fixtures&#x2F;tasks.txt</a></li>
+</ol>
+<p>这套结构虽然很小，但已经能覆盖一篇工程实战文章最核心的几个点：</p>
+<ul>
+<li>局部逻辑如何单测</li>
+<li>公开行为如何集成测试</li>
+<li>异步逻辑如何运行在测试 runtime 里</li>
+<li>测试数据如何复用和收口</li>
+</ul>
+<hr>
+<h2 id="十、实际运行结果"><a href="#十、实际运行结果" class="headerlink" title="十、实际运行结果"></a>十、实际运行结果</h2><p>在 <a href="workspaces/testing-demo">workspaces&#x2F;testing-demo</a> 下执行：</p>
+<pre><code class="highlight bash">cargo <span class="built_in">test</span></code></pre>
+
+<p>当前示例已经可以稳定通过，运行结果会看到：</p>
+<pre><code class="highlight text">running 3 tests
+...
+test result: ok. 3 passed
+
+running 1 test
+...
+test result: ok. 1 passed
+
+running 4 tests
+...
+test result: ok. 4 passed</code></pre>
+
+<p>这 3 组结果分别对应：</p>
+<ul>
+<li><code>src/lib.rs</code> 下的单元测试</li>
+<li><code>smoke.rs</code> 的最小公开能力验证</li>
+<li><code>task_service.rs</code> 的集成测试和异步测试</li>
+</ul>
+<hr>
+<h2 id="十一、我对-Rust-测试体系的几个判断"><a href="#十一、我对-Rust-测试体系的几个判断" class="headerlink" title="十一、我对 Rust 测试体系的几个判断"></a>十一、我对 Rust 测试体系的几个判断</h2><p>这部分是我自己的经验总结。</p>
+<h3 id="11-1-先追求反馈质量，不要先追求测试数量"><a href="#11-1-先追求反馈质量，不要先追求测试数量" class="headerlink" title="11.1 先追求反馈质量，不要先追求测试数量"></a>11.1 先追求反馈质量，不要先追求测试数量</h3><p>如果测试很多，但定位很慢、维护很痛苦，那它们的价值会快速下降。</p>
+<h3 id="11-2-单元测试不是越细越好，集成测试也不是越大越好"><a href="#11-2-单元测试不是越细越好，集成测试也不是越大越好" class="headerlink" title="11.2 单元测试不是越细越好，集成测试也不是越大越好"></a>11.2 单元测试不是越细越好，集成测试也不是越大越好</h3><p>真正关键的是：</p>
+<blockquote>
+<p>每条测试验证的责任是否单一。</p>
+</blockquote>
+<h3 id="11-3-异步测试的重点不是宏，而是运行时语义"><a href="#11-3-异步测试的重点不是宏，而是运行时语义" class="headerlink" title="11.3 异步测试的重点不是宏，而是运行时语义"></a>11.3 异步测试的重点不是宏，而是运行时语义</h3><p>不要只记 <code>#[tokio::test]</code> 的写法，要先想清楚这段逻辑到底依赖了什么异步行为。</p>
+<h3 id="11-4-测试数据管理是测试工程化的一半"><a href="#11-4-测试数据管理是测试工程化的一半" class="headerlink" title="11.4 测试数据管理是测试工程化的一半"></a>11.4 测试数据管理是测试工程化的一半</h3><p>很多测试后期失控，并不是断言写错了，而是 fixture、helper、初始化状态完全失去组织。</p>
+<h3 id="11-5-好的测试体系，本质上是在保护重构"><a href="#11-5-好的测试体系，本质上是在保护重构" class="headerlink" title="11.5 好的测试体系，本质上是在保护重构"></a>11.5 好的测试体系，本质上是在保护重构</h3><p>如果一套测试不能让你更放心地改代码，那它的工程价值就会打折。</p>
+<hr>
+<h2 id="结语"><a href="#结语" class="headerlink" title="结语"></a>结语</h2><p>Rust 的测试能力本身并不复杂，复杂的是你怎么把它们组织成一套长期可维护的反馈系统。</p>
+<p>如果只是写几个 <code>#[test]</code>，很多项目也能动起来；但一旦系统开始长大，你就会发现，真正重要的不是“有没有测试”，而是：</p>
+<ul>
+<li>哪一层逻辑由哪一层测试负责</li>
+<li>哪些规则应该局部验证，哪些应该从公开接口验证</li>
+<li>异步逻辑是否在合适的运行时里被验证</li>
+<li>测试数据和辅助代码有没有被稳定组织起来</li>
+</ul>
+<p>所以这篇文章如果只留一句建议，我会写这句：</p>
+<blockquote>
+<p>测试不是给代码加附件，而是给系统建立分层反馈。</p>
+</blockquote>
+<p>一旦你用这个视角去看单元测试、集成测试、异步测试和 fixture 管理，它们就不再是零散技巧，而会变成一套真正有工程价值的测试体系。</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
