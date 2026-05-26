@@ -1,0 +1,357 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust 文件 I/O 实战：缓冲读写、分块处理、临时文件与原子重命名</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust 文件 I/O 实战：缓冲读写、分块处理、临时文件与原子重命名</h1><div class="time">2026-05-26</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>很多人第一次写 Rust 文件 I&#x2F;O，通常就是几行代码：</p>
+<ul>
+<li><code>std::fs::read_to_string</code></li>
+<li><code>std::fs::write</code></li>
+<li>读出来、改一下、再写回去</li>
+</ul>
+<p>这在 demo 阶段当然够用。</p>
+<p>但只要代码进入长期维护阶段，文件 I&#x2F;O 很快就不再只是“把内容读出来”这么简单，而会变成一组工程问题：</p>
+<ul>
+<li>文件稍微大一点时，还适不适合一次性读进内存</li>
+<li>日志、导出、备份这类场景，为什么经常要用缓冲写</li>
+<li>拷贝大文件时，为什么不能永远指望 <code>read_to_end</code></li>
+<li>更新配置文件时，为什么很多成熟程序都不是直接覆盖原文件</li>
+<li>程序写到一半崩了，文件只写了一半怎么办</li>
+</ul>
+<p>这说明：</p>
+<blockquote>
+<p>文件 I&#x2F;O 的关键，不是 API 会不会用，而是你是否知道当前场景真正需要哪种读写策略。</p>
+</blockquote>
+<p>这一篇我会围绕 4 个最常见、也最容易写错的场景展开：</p>
+<ol>
+<li>缓冲读写什么时候值得用</li>
+<li>分块处理适合解决什么问题</li>
+<li>临时文件为什么是“安全写入”的基础手法</li>
+<li>原子重命名为什么比“直接覆盖”更稳妥</li>
+</ol>
+<p>文中的完整示例工程在 <a href="workspaces/io-demo">workspaces&#x2F;io-demo</a>。</p>
+<hr>
+<h2 id="一、先说结论：文件-I-O-不是一个动作，而是一组策略选择"><a href="#一、先说结论：文件-I-O-不是一个动作，而是一组策略选择" class="headerlink" title="一、先说结论：文件 I&#x2F;O 不是一个动作，而是一组策略选择"></a>一、先说结论：文件 I&#x2F;O 不是一个动作，而是一组策略选择</h2><p>很多初学者把文件 I&#x2F;O 理解成一件事：</p>
+<blockquote>
+<p>读文件，或者写文件。</p>
+</blockquote>
+<p>这个理解太粗了。</p>
+<p>从工程角度看，文件 I&#x2F;O 至少要先回答这几个问题：</p>
+<ul>
+<li>数据量大不大</li>
+<li>是顺序读取还是随机读取</li>
+<li>是一次性生成结果，还是持续追加</li>
+<li>中途失败时，能不能接受文件处于半写入状态</li>
+<li>文件是临时产物，还是关键配置、索引、状态文件</li>
+</ul>
+<p>这些问题一旦不同，最合适的 I&#x2F;O 策略也会不同。</p>
+<p>例如：</p>
+<ul>
+<li>小文本配置：一次性读完整通常没问题</li>
+<li>大文件备份：更适合分块复制</li>
+<li>日志输出：更适合追加写入</li>
+<li>配置更新：更适合临时文件加原子替换</li>
+</ul>
+<p>所以我更推荐把文件 I&#x2F;O 看成“读写策略设计”，而不是“调用某个标准库函数”。</p>
+<hr>
+<h2 id="二、什么时候直接-fs-read-fs-write-没问题？"><a href="#二、什么时候直接-fs-read-fs-write-没问题？" class="headerlink" title="二、什么时候直接 fs::read &#x2F; fs::write 没问题？"></a>二、什么时候直接 <code>fs::read</code> &#x2F; <code>fs::write</code> 没问题？</h2><p>先别把事情复杂化。</p>
+<p>Rust 标准库里这些 API 很方便：</p>
+<ul>
+<li><code>std::fs::read</code></li>
+<li><code>std::fs::read_to_string</code></li>
+<li><code>std::fs::write</code></li>
+</ul>
+<p>如果满足下面这些条件，它们通常完全够用：</p>
+<ul>
+<li>文件很小</li>
+<li>内容结构简单</li>
+<li>不需要流式处理</li>
+<li>失败时文件损坏风险可接受</li>
+</ul>
+<p>例如：</p>
+<ul>
+<li>读取一个小型配置模板</li>
+<li>输出一个一次性生成的调试文件</li>
+<li>读取几十行以内的文本资源</li>
+</ul>
+<p>很多工程问题不是“你用了简单 API”，而是“文件场景已经复杂了，你还在沿用最简单的策略”。</p>
+<p>所以更重要的不是背诵“哪个 API 高级”，而是知道什么时候该升级读写方式。</p>
+<hr>
+<h2 id="三、缓冲读写：它解决的不是语法问题，而是系统调用频率问题"><a href="#三、缓冲读写：它解决的不是语法问题，而是系统调用频率问题" class="headerlink" title="三、缓冲读写：它解决的不是语法问题，而是系统调用频率问题"></a>三、缓冲读写：它解决的不是语法问题，而是系统调用频率问题</h2><p>先看示例工程里的这段代码 <a href="workspaces/io-demo/src/main.rs">workspaces&#x2F;io-demo&#x2F;src&#x2F;main.rs</a>：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">seed_input_file</span>(path: &amp;Path) <span class="punctuation">-&gt;</span> io::<span class="type">Result</span>&lt;()&gt; &#123;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">writer</span> = BufWriter::<span class="title function_ invoke__">new</span>(File::<span class="title function_ invoke__">create</span>(path)?);
+    writer.<span class="title function_ invoke__">write_all</span>(<span class="string">b&quot;Rust file io demo\n&quot;</span>)?;
+    writer.<span class="title function_ invoke__">write_all</span>(<span class="string">b&quot;buffered read and write\n&quot;</span>)?;
+    writer.<span class="title function_ invoke__">write_all</span>(<span class="string">b&quot;atomic rename matters\n&quot;</span>)?;
+    writer.<span class="title function_ invoke__">flush</span>()?;
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;</code></pre>
+
+<p>这里用的是 <code>BufWriter</code>，而不是直接对 <code>File</code> 连续 <code>write_all</code>。</p>
+<p>为什么？</p>
+<p>因为文件写入不是“Rust 函数调用”这么简单，背后通常会涉及系统调用。</p>
+<p>如果你的程序不断进行很多小块读写：</p>
+<ul>
+<li>一行一行写</li>
+<li>一个字段一个字段写</li>
+<li>一个字节一个字节拷贝</li>
+</ul>
+<p>那不加缓冲往往会让系统调用变得过于频繁。</p>
+<p><code>BufWriter</code> 和 <code>BufReader</code> 的核心价值就在这里：</p>
+<blockquote>
+<p>先在用户态内存里攒一部分数据，再批量和内核交互。</p>
+</blockquote>
+<p>这通常会带来更稳定的性能，也会让代码更适合顺序处理场景。</p>
+<h3 id="3-1-什么时候优先考虑-BufReader"><a href="#3-1-什么时候优先考虑-BufReader" class="headerlink" title="3.1 什么时候优先考虑 BufReader"></a>3.1 什么时候优先考虑 <code>BufReader</code></h3><p>例如示例中的预览读取：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">read_preview</span>(path: &amp;Path, limit: <span class="type">usize</span>) <span class="punctuation">-&gt;</span> io::<span class="type">Result</span>&lt;<span class="type">Vec</span>&lt;<span class="type">String</span>&gt;&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">reader</span> = BufReader::<span class="title function_ invoke__">new</span>(File::<span class="title function_ invoke__">open</span>(path)?);
+    reader.<span class="title function_ invoke__">lines</span>().<span class="title function_ invoke__">take</span>(limit).<span class="title function_ invoke__">collect</span>()
+&#125;</code></pre>
+
+<p>这类场景通常适合 <code>BufReader</code>：</p>
+<ul>
+<li>按行读取文本</li>
+<li>顺序扫描文件</li>
+<li>不想一次性把全文都放进内存</li>
+</ul>
+<p>特别是日志、CSV、导出文本、逐行解析场景，缓冲读取几乎是默认选择。</p>
+<h3 id="3-2-一个常见误区"><a href="#3-2-一个常见误区" class="headerlink" title="3.2 一个常见误区"></a>3.2 一个常见误区</h3><p>很多人会把“用了 <code>BufReader</code> &#x2F; <code>BufWriter</code>”理解成“性能就一定更好”。</p>
+<p>这也不准确。</p>
+<p>如果你本来就是一次性大块读写，缓冲层未必会带来明显改善。</p>
+<p>更准确的理解是：</p>
+<blockquote>
+<p>缓冲最擅长优化“很多小块顺序 I&#x2F;O”的场景。</p>
+</blockquote>
+<hr>
+<h2 id="四、分块处理：大文件、流式处理和内存边界"><a href="#四、分块处理：大文件、流式处理和内存边界" class="headerlink" title="四、分块处理：大文件、流式处理和内存边界"></a>四、分块处理：大文件、流式处理和内存边界</h2><p>很多文件 I&#x2F;O 的真正问题，不是“能不能读”，而是“值不值得一次性全读”。</p>
+<p>示例工程里有一个分块复制函数：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">copy_in_chunks</span>(src: &amp;Path, dst: &amp;Path, chunk_size: <span class="type">usize</span>) <span class="punctuation">-&gt;</span> io::<span class="type">Result</span>&lt;<span class="type">u64</span>&gt; &#123;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">reader</span> = BufReader::<span class="title function_ invoke__">new</span>(File::<span class="title function_ invoke__">open</span>(src)?);
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">writer</span> = BufWriter::<span class="title function_ invoke__">new</span>(File::<span class="title function_ invoke__">create</span>(dst)?);
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">buffer</span> = <span class="built_in">vec!</span>[<span class="number">0_u8</span>; chunk_size];
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">total</span> = <span class="number">0_u64</span>;
+
+    <span class="keyword">loop</span> &#123;
+        <span class="keyword">let</span> <span class="variable">read_bytes</span> = reader.<span class="title function_ invoke__">read</span>(&amp;<span class="keyword">mut</span> buffer)?;
+        <span class="keyword">if</span> read_bytes == <span class="number">0</span> &#123;
+            <span class="keyword">break</span>;
+        &#125;
+        writer.<span class="title function_ invoke__">write_all</span>(&amp;buffer[..read_bytes])?;
+        total += read_bytes <span class="keyword">as</span> <span class="type">u64</span>;
+    &#125;
+
+    writer.<span class="title function_ invoke__">flush</span>()?;
+    <span class="title function_ invoke__">Ok</span>(total)
+&#125;</code></pre>
+
+<p>这段代码的重点不是“手写了一个复制函数”，而是它体现了一种很重要的思路：</p>
+<blockquote>
+<p>让内存占用和处理窗口保持稳定，而不是随着文件大小线性膨胀。</p>
+</blockquote>
+<p>这类分块处理特别适合：</p>
+<ul>
+<li>大文件复制</li>
+<li>上传下载</li>
+<li>流式导出</li>
+<li>校验和计算</li>
+<li>压缩、解压、转码等流水线处理</li>
+</ul>
+<h3 id="4-1-为什么分块处理更稳"><a href="#4-1-为什么分块处理更稳" class="headerlink" title="4.1 为什么分块处理更稳"></a>4.1 为什么分块处理更稳</h3><p>如果你直接：</p>
+<pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">bytes</span> = std::fs::<span class="title function_ invoke__">read</span>(path)?;</code></pre>
+
+<p>对于小文件当然很方便。</p>
+<p>但如果文件很大，或者文件大小不可控，问题就来了：</p>
+<ul>
+<li>内存占用飙升</li>
+<li>峰值内存不可预测</li>
+<li>出错时上下文更重</li>
+</ul>
+<p>分块处理的价值就在于把资源使用控制住。</p>
+<p>它不一定让代码更短，但往往让系统行为更可控。</p>
+<p>这在工程里通常比“少写几行代码”更重要。</p>
+<hr>
+<h2 id="五、追加写入：日志和持续输出不是一回事"><a href="#五、追加写入：日志和持续输出不是一回事" class="headerlink" title="五、追加写入：日志和持续输出不是一回事"></a>五、追加写入：日志和持续输出不是一回事</h2><p>除了创建和覆盖，文件写入里还有一种很常见的模式：追加。</p>
+<p>示例里有一个简单函数：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">append_log</span>(path: <span class="keyword">impl</span> <span class="title class_">AsRef</span>&lt;Path&gt;, message: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> io::<span class="type">Result</span>&lt;()&gt; &#123;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">file</span> = OpenOptions::<span class="title function_ invoke__">new</span>().<span class="title function_ invoke__">create</span>(<span class="literal">true</span>).<span class="title function_ invoke__">append</span>(<span class="literal">true</span>).<span class="title function_ invoke__">open</span>(path)?;
+    <span class="built_in">writeln!</span>(file, <span class="string">&quot;&#123;message&#125;&quot;</span>)?;
+    file.<span class="title function_ invoke__">flush</span>()?;
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;</code></pre>
+
+<p>这里用的是 <code>OpenOptions</code>，而不是 <code>File::create</code>。</p>
+<p>因为很多真实场景不是“重新生成一个完整文件”，而是：</p>
+<ul>
+<li>追加日志</li>
+<li>追加导出记录</li>
+<li>追加审计事件</li>
+<li>追加批处理结果</li>
+</ul>
+<p>这时候你要表达的不是“写文件”，而是“以追加模式打开文件”。</p>
+<p><code>OpenOptions</code> 的意义就在于把这些语义显式表达出来：</p>
+<ul>
+<li><code>create(true)</code></li>
+<li><code>append(true)</code></li>
+<li>也可以配合 <code>read(true)</code>、<code>write(true)</code> 等组合</li>
+</ul>
+<p>这比默认靠 <code>File::create</code> 或 <code>File::open</code> 去猜语义更稳妥。</p>
+<hr>
+<h2 id="六、为什么更新关键文件时，不应该直接覆盖原文件？"><a href="#六、为什么更新关键文件时，不应该直接覆盖原文件？" class="headerlink" title="六、为什么更新关键文件时，不应该直接覆盖原文件？"></a>六、为什么更新关键文件时，不应该直接覆盖原文件？</h2><p>这部分是文件 I&#x2F;O 里最有工程味的一块。</p>
+<p>很多人更新配置文件会直觉地这么做：</p>
+<ol>
+<li>打开原文件</li>
+<li>清空或覆盖写入</li>
+<li>写完结束</li>
+</ol>
+<p>看起来没问题，但这里有一个很现实的风险：</p>
+<blockquote>
+<p>如果程序在写到一半时崩溃，原文件可能会处于半新半旧、甚至直接损坏的状态。</p>
+</blockquote>
+<p>这对于：</p>
+<ul>
+<li>配置文件</li>
+<li>索引文件</li>
+<li>状态快照</li>
+<li>元数据文件</li>
+</ul>
+<p>这类关键文件尤其危险。</p>
+<p>所以更稳妥的思路通常是：</p>
+<ol>
+<li>先把新内容写到临时文件</li>
+<li>确保临时文件写完并 flush</li>
+<li>再把临时文件重命名替换为目标文件</li>
+</ol>
+<p>这也是很多成熟程序更新关键文件时的基本套路。</p>
+<hr>
+<h2 id="七、临时文件-原子重命名：为什么这是“安全写入”的常见手法"><a href="#七、临时文件-原子重命名：为什么这是“安全写入”的常见手法" class="headerlink" title="七、临时文件 + 原子重命名：为什么这是“安全写入”的常见手法"></a>七、临时文件 + 原子重命名：为什么这是“安全写入”的常见手法</h2><p>示例里的 <code>write_atomic</code>：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">write_atomic</span>(path: &amp;Path, content: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> io::<span class="type">Result</span>&lt;()&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">temp_path</span> = path.<span class="title function_ invoke__">with_extension</span>(<span class="string">&quot;tmp&quot;</span>);
+
+    &#123;
+        <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">writer</span> = BufWriter::<span class="title function_ invoke__">new</span>(File::<span class="title function_ invoke__">create</span>(&amp;temp_path)?);
+        writer.<span class="title function_ invoke__">write_all</span>(content.<span class="title function_ invoke__">as_bytes</span>())?;
+        writer.<span class="title function_ invoke__">flush</span>()?;
+    &#125;
+
+    fs::<span class="title function_ invoke__">rename</span>(temp_path, path)?;
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;</code></pre>
+
+<p>这段代码传达的是一个工程原则：</p>
+<blockquote>
+<p>写入过程和对外可见切换过程，最好分成两步。</p>
+</blockquote>
+<p>在重命名发生之前，外部看到的还是旧文件。</p>
+<p>只有当新文件完整写好后，才通过一次替换把它切换成正式版本。</p>
+<h3 id="7-1-为什么说它“更安全”"><a href="#7-1-为什么说它“更安全”" class="headerlink" title="7.1 为什么说它“更安全”"></a>7.1 为什么说它“更安全”</h3><p>因为它尽量避免了“原文件写到一半就已经对外暴露”的情况。</p>
+<p>也就是说，外部读者通常会看到两种状态之一：</p>
+<ul>
+<li>旧版本完整文件</li>
+<li>新版本完整文件</li>
+</ul>
+<p>而不是一个中间态残缺文件。</p>
+<h3 id="7-2-为什么说它“原子”"><a href="#7-2-为什么说它“原子”" class="headerlink" title="7.2 为什么说它“原子”"></a>7.2 为什么说它“原子”</h3><p>在同一文件系统里，重命名通常可以作为一次切换动作发生。</p>
+<p>这不是说整个写入过程原子，而是说：</p>
+<blockquote>
+<p>最终从旧文件切换到新文件这一步，通常可以做到比“直接覆盖写”更接近原子替换。</p>
+</blockquote>
+<p>这里要注意一个工程前提：</p>
+<ul>
+<li>临时文件和目标文件最好在同一文件系统上</li>
+</ul>
+<p>否则你以为自己在做安全替换，实际可能退化成复制和删除。</p>
+<hr>
+<h2 id="八、什么时候该用哪种-I-O-策略？一个实用判断表"><a href="#八、什么时候该用哪种-I-O-策略？一个实用判断表" class="headerlink" title="八、什么时候该用哪种 I&#x2F;O 策略？一个实用判断表"></a>八、什么时候该用哪种 I&#x2F;O 策略？一个实用判断表</h2><p>如果把前面几种模式收一下，我平时大概会这样判断：</p>
+<h3 id="8-1-小文件、低风险、一次性内容"><a href="#8-1-小文件、低风险、一次性内容" class="headerlink" title="8.1 小文件、低风险、一次性内容"></a>8.1 小文件、低风险、一次性内容</h3><p>优先考虑：</p>
+<ul>
+<li><code>fs::read</code></li>
+<li><code>fs::read_to_string</code></li>
+<li><code>fs::write</code></li>
+</ul>
+<h3 id="8-2-顺序文本读取、逐行处理"><a href="#8-2-顺序文本读取、逐行处理" class="headerlink" title="8.2 顺序文本读取、逐行处理"></a>8.2 顺序文本读取、逐行处理</h3><p>优先考虑：</p>
+<ul>
+<li><code>BufReader</code></li>
+<li><code>lines()</code></li>
+</ul>
+<h3 id="8-3-大文件复制、流式处理、上传下载"><a href="#8-3-大文件复制、流式处理、上传下载" class="headerlink" title="8.3 大文件复制、流式处理、上传下载"></a>8.3 大文件复制、流式处理、上传下载</h3><p>优先考虑：</p>
+<ul>
+<li>分块读取</li>
+<li>分块写入</li>
+<li>固定大小 buffer</li>
+</ul>
+<h3 id="8-4-日志、审计、持续追加输出"><a href="#8-4-日志、审计、持续追加输出" class="headerlink" title="8.4 日志、审计、持续追加输出"></a>8.4 日志、审计、持续追加输出</h3><p>优先考虑：</p>
+<ul>
+<li><code>OpenOptions</code></li>
+<li><code>append(true)</code></li>
+</ul>
+<h3 id="8-5-配置、索引、状态快照等关键文件更新"><a href="#8-5-配置、索引、状态快照等关键文件更新" class="headerlink" title="8.5 配置、索引、状态快照等关键文件更新"></a>8.5 配置、索引、状态快照等关键文件更新</h3><p>优先考虑：</p>
+<ul>
+<li>临时文件</li>
+<li><code>flush</code></li>
+<li><code>rename</code></li>
+</ul>
+<p>这张“判断表”比死记某个 API 名字更重要。</p>
+<p>因为工程里最常见的问题，从来都不是“不知道 Rust 有这个函数”，而是“场景已经变了，策略却还没变”。</p>
+<hr>
+<h2 id="九、完整示例：一个最小但覆盖关键场景的-I-O-demo"><a href="#九、完整示例：一个最小但覆盖关键场景的-I-O-demo" class="headerlink" title="九、完整示例：一个最小但覆盖关键场景的 I&#x2F;O demo"></a>九、完整示例：一个最小但覆盖关键场景的 I&#x2F;O demo</h2><p>示例工程 <a href="workspaces/io-demo">workspaces&#x2F;io-demo</a> 包含的几段逻辑分别对应：</p>
+<ol>
+<li>缓冲写入种子文件 <a href="workspaces/io-demo/src/main.rs">workspaces&#x2F;io-demo&#x2F;src&#x2F;main.rs</a></li>
+<li>缓冲读取前几行 <a href="workspaces/io-demo/src/main.rs">workspaces&#x2F;io-demo&#x2F;src&#x2F;main.rs</a></li>
+<li>分块复制文件 <a href="workspaces/io-demo/src/main.rs">workspaces&#x2F;io-demo&#x2F;src&#x2F;main.rs</a></li>
+<li>原子方式写入配置 <a href="workspaces/io-demo/src/main.rs">workspaces&#x2F;io-demo&#x2F;src&#x2F;main.rs</a></li>
+<li>追加写入日志 <a href="workspaces/io-demo/src/main.rs">workspaces&#x2F;io-demo&#x2F;src&#x2F;main.rs</a></li>
+</ol>
+<p>虽然示例不大，但已经能把文件 I&#x2F;O 里最常见的几个工程判断串起来：</p>
+<ul>
+<li>什么时候适合缓冲</li>
+<li>什么时候该分块</li>
+<li>什么时候不能直接覆盖目标文件</li>
+<li>什么时候要把写入和切换分开</li>
+</ul>
+<hr>
+<h2 id="十、实际运行结果"><a href="#十、实际运行结果" class="headerlink" title="十、实际运行结果"></a>十、实际运行结果</h2><p>在 <a href="workspaces/io-demo">workspaces&#x2F;io-demo</a> 下执行：</p>
+<pre><code class="highlight bash">cargo run</code></pre>
+
+<p>当前示例会输出类似结果：</p>
+<pre><code class="highlight text">preview lines: [&quot;Rust file io demo&quot;, &quot;buffered read and write&quot;]
+copied bytes: 64
+workspace: /tmp/...</code></pre>
+
+<p>这说明示例里几件事都已经跑通：</p>
+<ul>
+<li>成功用 <code>BufWriter</code> 写入测试文件</li>
+<li>成功用 <code>BufReader</code> 读取前两行</li>
+<li>成功按固定 chunk 拷贝文件</li>
+<li>成功写入临时配置并替换为正式文件</li>
+</ul>
+<hr>
+<h2 id="十一、我对-Rust-文件-I-O-的几个判断"><a href="#十一、我对-Rust-文件-I-O-的几个判断" class="headerlink" title="十一、我对 Rust 文件 I&#x2F;O 的几个判断"></a>十一、我对 Rust 文件 I&#x2F;O 的几个判断</h2><p>这部分是我自己的经验总结。</p>
+<h3 id="11-1-先判断文件场景，再选-API"><a href="#11-1-先判断文件场景，再选-API" class="headerlink" title="11.1 先判断文件场景，再选 API"></a>11.1 先判断文件场景，再选 API</h3><p>不要反过来。不是因为会用 <code>read_to_string</code>，就适合所有读取场景。</p>
+<h3 id="11-2-缓冲的重点是减少小块-I-O-的成本"><a href="#11-2-缓冲的重点是减少小块-I-O-的成本" class="headerlink" title="11.2 缓冲的重点是减少小块 I&#x2F;O 的成本"></a>11.2 缓冲的重点是减少小块 I&#x2F;O 的成本</h3><p>它最适合顺序、连续、小块的读写模式，不是万能性能按钮。</p>
+<h3 id="11-3-分块处理的重点是控制资源边界"><a href="#11-3-分块处理的重点是控制资源边界" class="headerlink" title="11.3 分块处理的重点是控制资源边界"></a>11.3 分块处理的重点是控制资源边界</h3><p>大文件处理里，稳定的内存占用往往比“代码最短”更重要。</p>
+<h3 id="11-4-关键文件更新时，优先考虑“先写新文件，再切换”"><a href="#11-4-关键文件更新时，优先考虑“先写新文件，再切换”" class="headerlink" title="11.4 关键文件更新时，优先考虑“先写新文件，再切换”"></a>11.4 关键文件更新时，优先考虑“先写新文件，再切换”</h3><p>这比直接覆盖原文件稳妥得多，也更接近真实工程环境需要的可靠性。</p>
+<h3 id="11-5-文件-I-O-的很多问题，本质上是失败场景问题"><a href="#11-5-文件-I-O-的很多问题，本质上是失败场景问题" class="headerlink" title="11.5 文件 I&#x2F;O 的很多问题，本质上是失败场景问题"></a>11.5 文件 I&#x2F;O 的很多问题，本质上是失败场景问题</h3><p>平时最容易忽略的是：</p>
+<ul>
+<li>写到一半崩溃怎么办</li>
+<li>文件部分更新怎么办</li>
+<li>内容很大怎么办</li>
+<li>多次追加怎么办</li>
+</ul>
+<p>一旦从失败场景反推，你对 I&#x2F;O 策略的判断通常会更稳。</p>
+<hr>
+<h2 id="结语"><a href="#结语" class="headerlink" title="结语"></a>结语</h2><p>文件 I&#x2F;O 在 Rust 里并不神秘，真正难的是你怎么把“读写文件”这件事放回真实场景里思考。</p>
+<p>很多时候，代码能跑并不代表设计合适。</p>
+<p>如果你能先分清：</p>
+<ul>
+<li>这是小文件还是大文件</li>
+<li>这是覆盖写还是追加写</li>
+<li>这是普通输出还是关键状态文件</li>
+<li>这是一次性处理还是流式处理</li>
+</ul>
+<p>那你对缓冲、分块、临时文件和原子重命名的选择就会自然很多。</p>
+<p>所以这篇文章如果只留一句建议，我会写这句：</p>
+<blockquote>
+<p>文件 I&#x2F;O 不是在选函数，而是在选失败成本和资源边界都更可控的策略。</p>
+</blockquote>
+<p>这比单纯记住几个 API 名字重要得多。</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
