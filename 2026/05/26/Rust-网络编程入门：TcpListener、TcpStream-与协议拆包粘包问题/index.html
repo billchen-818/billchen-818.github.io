@@ -1,0 +1,384 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust 网络编程入门：TcpListener、TcpStream 与协议拆包粘包问题</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust 网络编程入门：TcpListener、TcpStream 与协议拆包粘包问题</h1><div class="time">2026-05-26</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>很多人第一次写 Rust 网络程序，通常会先从这两类 API 开始：</p>
+<ul>
+<li><code>TcpListener</code></li>
+<li><code>TcpStream</code></li>
+</ul>
+<p>然后很快就能跑出一个最小 demo：</p>
+<ul>
+<li>服务端监听端口</li>
+<li>客户端连上去</li>
+<li>双方互相收发几条字符串</li>
+</ul>
+<p>这一步通常不难。</p>
+<p>真正让人开始踩坑的，是程序一旦不再只是“本地玩具示例”，问题马上就来了：</p>
+<ul>
+<li>为什么我明明发了两条消息，服务端却可能一次读到一大块数据</li>
+<li>为什么我发了一条完整消息，服务端却可能只读到半条</li>
+<li>为什么 <code>read</code> 返回一次，不代表“读到了一条消息”</li>
+<li>为什么网络代码里最难的部分，常常不是 <code>connect</code> 和 <code>accept</code>，而是协议边界</li>
+</ul>
+<p>这说明：</p>
+<blockquote>
+<p>TCP 编程最容易被误解的一点，就是它传输的是字节流，不是天然带边界的消息。</p>
+</blockquote>
+<p>这一篇我会围绕 4 个问题展开：</p>
+<ol>
+<li><code>TcpListener</code> 和 <code>TcpStream</code> 分别负责什么</li>
+<li>一个最小 TCP server &#x2F; client 是怎么工作的</li>
+<li>为什么 TCP 会出现拆包和粘包</li>
+<li>最基本的协议边界应该怎么设计</li>
+</ol>
+<p>文中的完整示例工程在 <a href="workspaces/network-demo">workspaces&#x2F;network-demo</a>。</p>
+<hr>
+<h2 id="一、先说结论：TCP-提供的是“可靠字节流”，不是“消息通道”"><a href="#一、先说结论：TCP-提供的是“可靠字节流”，不是“消息通道”" class="headerlink" title="一、先说结论：TCP 提供的是“可靠字节流”，不是“消息通道”"></a>一、先说结论：TCP 提供的是“可靠字节流”，不是“消息通道”</h2><p>很多人第一次写 socket 程序时，脑子里默认想的是：</p>
+<blockquote>
+<p>我发一条消息，对方就收一条消息。</p>
+</blockquote>
+<p>这个直觉很自然，但对 TCP 来说并不准确。</p>
+<p>TCP 真正提供的是：</p>
+<ul>
+<li>有连接</li>
+<li>有顺序</li>
+<li>尽量可靠</li>
+<li>面向字节流</li>
+</ul>
+<p>最后这个“面向字节流”最关键。</p>
+<p>它意味着：</p>
+<blockquote>
+<p>TCP 只关心字节按顺序到达，不关心这些字节在你的应用层里到底应该算几条消息。</p>
+</blockquote>
+<p>也就是说，应用层看到的“消息边界”，不是 TCP 自带的，而是你自己协议里定义出来的。</p>
+<p>如果这个前提没搞清楚，后面你会很容易写出这种代码：</p>
+<pre><code class="highlight rust"><span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">buf</span> = [<span class="number">0_u8</span>; <span class="number">1024</span>];
+<span class="keyword">let</span> <span class="variable">n</span> = stream.<span class="title function_ invoke__">read</span>(&amp;<span class="keyword">mut</span> buf)?;
+<span class="keyword">let</span> <span class="variable">msg</span> = <span class="type">String</span>::<span class="title function_ invoke__">from_utf8_lossy</span>(&amp;buf[..n]);</code></pre>
+
+<p>然后默认觉得：</p>
+<ul>
+<li>这次 <code>read</code> 就读到了一条完整消息</li>
+</ul>
+<p>这恰恰是最常见的误区。</p>
+<hr>
+<h2 id="二、TcpListener-和-TcpStream-到底分别干什么？"><a href="#二、TcpListener-和-TcpStream-到底分别干什么？" class="headerlink" title="二、TcpListener 和 TcpStream 到底分别干什么？"></a>二、<code>TcpListener</code> 和 <code>TcpStream</code> 到底分别干什么？</h2><p>先把最基础的角色分清。</p>
+<h3 id="2-1-TcpListener：负责监听和接收连接"><a href="#2-1-TcpListener：负责监听和接收连接" class="headerlink" title="2.1 TcpListener：负责监听和接收连接"></a>2.1 <code>TcpListener</code>：负责监听和接收连接</h3><p>服务端通常先做这一步：</p>
+<pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">listener</span> = TcpListener::<span class="title function_ invoke__">bind</span>(<span class="string">&quot;127.0.0.1:7878&quot;</span>)?;</code></pre>
+
+<p>它的职责不是“收消息”，而是：</p>
+<ul>
+<li>绑定地址和端口</li>
+<li>等待客户端连进来</li>
+<li>接收新的连接</li>
+</ul>
+<p>一旦有客户端连上，你真正用于通信的对象就不再是 <code>TcpListener</code>，而是 <code>accept</code> 返回的 <code>TcpStream</code>。</p>
+<h3 id="2-2-TcpStream：代表一条已经建立好的连接"><a href="#2-2-TcpStream：代表一条已经建立好的连接" class="headerlink" title="2.2 TcpStream：代表一条已经建立好的连接"></a>2.2 <code>TcpStream</code>：代表一条已经建立好的连接</h3><p>无论是客户端 <code>connect</code> 拿到的，还是服务端 <code>accept</code> 拿到的，最终双方都通过 <code>TcpStream</code> 做读写。</p>
+<p>也就是说：</p>
+<ul>
+<li><code>TcpListener</code> 更像“门口”</li>
+<li><code>TcpStream</code> 更像“已经连上的那根管道”</li>
+</ul>
+<p>这个区分虽然基础，但很重要。</p>
+<p>很多刚开始写网络程序的人，会把“监听”和“连接内通信”混成一层思考，结果后面一加并发或多连接就开始混乱。</p>
+<hr>
+<h2 id="三、一个最小-TCP-程序是怎么跑起来的？"><a href="#三、一个最小-TCP-程序是怎么跑起来的？" class="headerlink" title="三、一个最小 TCP 程序是怎么跑起来的？"></a>三、一个最小 TCP 程序是怎么跑起来的？</h2><p>示例工程 <a href="workspaces/network-demo/src/main.rs">workspaces&#x2F;network-demo&#x2F;src&#x2F;main.rs</a> 里给了一套最小 server &#x2F; client。</p>
+<p>程序入口会先启动 server 线程，再启动 client：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() <span class="punctuation">-&gt;</span> io::<span class="type">Result</span>&lt;()&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">server</span> = thread::<span class="title function_ invoke__">spawn</span>(run_server);
+
+    thread::<span class="title function_ invoke__">sleep</span>(Duration::<span class="title function_ invoke__">from_millis</span>(<span class="number">100</span>));
+    <span class="title function_ invoke__">run_client</span>()?;
+
+    server.<span class="title function_ invoke__">join</span>().<span class="title function_ invoke__">expect</span>(<span class="string">&quot;server thread panicked&quot;</span>)?;
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;</code></pre>
+
+<p>这里用线程只是为了把 demo 放在一个程序里演示清楚，不是说真实项目只能这么组织。</p>
+<h3 id="3-1-服务端监听连接"><a href="#3-1-服务端监听连接" class="headerlink" title="3.1 服务端监听连接"></a>3.1 服务端监听连接</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">run_server</span>() <span class="punctuation">-&gt;</span> io::<span class="type">Result</span>&lt;()&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">listener</span> = TcpListener::<span class="title function_ invoke__">bind</span>(<span class="string">&quot;127.0.0.1:7878&quot;</span>)?;
+    <span class="built_in">println!</span>(<span class="string">&quot;server listening on 127.0.0.1:7878&quot;</span>);
+
+    <span class="keyword">let</span> (<span class="keyword">mut</span> stream, peer_addr) = listener.<span class="title function_ invoke__">accept</span>()?;
+    <span class="built_in">println!</span>(<span class="string">&quot;accepted client from &#123;&#125;&quot;</span>, peer_addr);
+    ...
+&#125;</code></pre>
+
+<p>这段代码表达得很直接：</p>
+<ol>
+<li>服务端绑定端口</li>
+<li>阻塞等待新连接</li>
+<li>拿到一个 <code>TcpStream</code>，后续所有收发都通过它进行</li>
+</ol>
+<h3 id="3-2-客户端发起连接"><a href="#3-2-客户端发起连接" class="headerlink" title="3.2 客户端发起连接"></a>3.2 客户端发起连接</h3><pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">run_client</span>() <span class="punctuation">-&gt;</span> io::<span class="type">Result</span>&lt;()&gt; &#123;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">stream</span> = TcpStream::<span class="title function_ invoke__">connect</span>(<span class="string">&quot;127.0.0.1:7878&quot;</span>)?;
+    <span class="built_in">println!</span>(<span class="string">&quot;client connected&quot;</span>);
+    ...
+&#125;</code></pre>
+
+<p>客户端这边更简单：</p>
+<ul>
+<li>连上服务端</li>
+<li>拿到一个 <code>TcpStream</code></li>
+<li>开始按应用协议读写</li>
+</ul>
+<p>所以网络编程最基本的骨架通常就是：</p>
+<ul>
+<li>服务端：<code>bind -&gt; accept -&gt; read/write</code></li>
+<li>客户端：<code>connect -&gt; read/write</code></li>
+</ul>
+<p>真正开始变复杂的，从来不是这几步，而是“你到底怎么定义读写的边界”。</p>
+<hr>
+<h2 id="四、为什么-read-一次，不等于读到一条完整消息？"><a href="#四、为什么-read-一次，不等于读到一条完整消息？" class="headerlink" title="四、为什么 read 一次，不等于读到一条完整消息？"></a>四、为什么 <code>read</code> 一次，不等于读到一条完整消息？</h2><p>这是整篇文章最核心的问题。</p>
+<p>很多人看到 <code>read</code> 返回了 <code>n</code> 个字节，就会很自然地把这次返回理解成一条消息。</p>
+<p>但 TCP 并没有做这个承诺。</p>
+<p>因为在 TCP 看来，发送端如果写了这些字节：</p>
+<pre><code class="highlight text">hello
+world</code></pre>
+
+<p>接收端可能看到的结果有很多种：</p>
+<ul>
+<li>一次读到 <code>helloworld</code></li>
+<li>第一次读到 <code>hel</code>，第二次读到 <code>loworld</code></li>
+<li>第一次读到 <code>hello</code>，第二次读到 <code>world</code></li>
+</ul>
+<p>这些对 TCP 来说都不奇怪。</p>
+<p>因为 TCP 要保证的是：</p>
+<ul>
+<li>顺序</li>
+<li>完整性尽量可靠</li>
+</ul>
+<p>而不是“应用层消息边界刚好保持和 <code>write</code> 次数一致”。</p>
+<p>这就是所谓的：</p>
+<ul>
+<li>拆包：一条应用消息被分成多次读到</li>
+<li>粘包：多条应用消息在一次读中连在一起</li>
+</ul>
+<p>这里最需要记住的一句话是：</p>
+<blockquote>
+<p>拆包和粘包不是异常情况，而是 TCP 字节流模型下的正常现象。</p>
+</blockquote>
+<hr>
+<h2 id="五、那协议边界到底该怎么做？"><a href="#五、那协议边界到底该怎么做？" class="headerlink" title="五、那协议边界到底该怎么做？"></a>五、那协议边界到底该怎么做？</h2><p>既然 TCP 不帮你做消息边界，那就只能应用层自己做。</p>
+<p>常见方案一般有几类：</p>
+<ol>
+<li>固定长度消息</li>
+<li>特殊分隔符消息</li>
+<li>长度前缀消息</li>
+</ol>
+<h3 id="5-1-固定长度"><a href="#5-1-固定长度" class="headerlink" title="5.1 固定长度"></a>5.1 固定长度</h3><p>例如每条消息都规定 256 字节。</p>
+<p>优点是简单。</p>
+<p>缺点也明显：</p>
+<ul>
+<li>浪费空间</li>
+<li>变长内容不友好</li>
+<li>协议扩展性差</li>
+</ul>
+<h3 id="5-2-分隔符"><a href="#5-2-分隔符" class="headerlink" title="5.2 分隔符"></a>5.2 分隔符</h3><p>例如一条消息以 <code>\n</code> 结束。</p>
+<p>这在文本协议里很常见，比如很多行协议、命令协议。</p>
+<p>优点是直观。</p>
+<p>但要额外处理：</p>
+<ul>
+<li>消息内容里如何转义分隔符</li>
+<li>二进制数据不方便</li>
+</ul>
+<h3 id="5-3-长度前缀"><a href="#5-3-长度前缀" class="headerlink" title="5.3 长度前缀"></a>5.3 长度前缀</h3><p>例如：</p>
+<ul>
+<li>前 4 个字节表示消息体长度</li>
+<li>后面跟消息体内容</li>
+</ul>
+<p>这是非常常见、也很实用的一种做法。</p>
+<p>因为它能比较清楚地回答两个问题：</p>
+<ol>
+<li>我先读多少字节才能知道消息体长度</li>
+<li>我接下来应该再读多少字节才算一条完整消息</li>
+</ol>
+<p>示例工程就采用了这种方式。</p>
+<hr>
+<h2 id="六、示例协议：4-字节长度前缀-消息体"><a href="#六、示例协议：4-字节长度前缀-消息体" class="headerlink" title="六、示例协议：4 字节长度前缀 + 消息体"></a>六、示例协议：4 字节长度前缀 + 消息体</h2><p>示例里写帧的逻辑是：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">write_frame</span>(stream: &amp;<span class="keyword">mut</span> TcpStream, message: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> io::<span class="type">Result</span>&lt;()&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">payload</span> = message.<span class="title function_ invoke__">as_bytes</span>();
+    <span class="keyword">let</span> <span class="variable">len</span> = payload.<span class="title function_ invoke__">len</span>() <span class="keyword">as</span> <span class="type">u32</span>;
+
+    stream.<span class="title function_ invoke__">write_all</span>(&amp;len.<span class="title function_ invoke__">to_be_bytes</span>())?;
+    stream.<span class="title function_ invoke__">write_all</span>(payload)?;
+    stream.<span class="title function_ invoke__">flush</span>()?;
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;</code></pre>
+
+<p>这段代码的含义很直接：</p>
+<ol>
+<li>先把消息体长度编码成 4 字节</li>
+<li>再写入真实消息体</li>
+</ol>
+<p>接收端读取逻辑：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">read_frame</span>(stream: &amp;<span class="keyword">mut</span> TcpStream) <span class="punctuation">-&gt;</span> io::<span class="type">Result</span>&lt;<span class="type">Option</span>&lt;<span class="type">String</span>&gt;&gt; &#123;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">header</span> = [<span class="number">0_u8</span>; <span class="number">4</span>];
+
+    <span class="keyword">match</span> stream.<span class="title function_ invoke__">read_exact</span>(&amp;<span class="keyword">mut</span> header) &#123;
+        <span class="title function_ invoke__">Ok</span>(()) =&gt; &#123;&#125;
+        <span class="title function_ invoke__">Err</span>(error) <span class="keyword">if</span> error.<span class="title function_ invoke__">kind</span>() == io::ErrorKind::UnexpectedEof =&gt; <span class="keyword">return</span> <span class="title function_ invoke__">Ok</span>(<span class="literal">None</span>),
+        <span class="title function_ invoke__">Err</span>(error) =&gt; <span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(error),
+    &#125;
+
+    <span class="keyword">let</span> <span class="variable">len</span> = <span class="type">u32</span>::<span class="title function_ invoke__">from_be_bytes</span>(header) <span class="keyword">as</span> <span class="type">usize</span>;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">payload</span> = <span class="built_in">vec!</span>[<span class="number">0_u8</span>; len];
+    stream.<span class="title function_ invoke__">read_exact</span>(&amp;<span class="keyword">mut</span> payload)?;
+
+    <span class="keyword">let</span> <span class="variable">message</span> = <span class="type">String</span>::<span class="title function_ invoke__">from_utf8</span>(payload)
+        .<span class="title function_ invoke__">map_err</span>(|error| io::Error::<span class="title function_ invoke__">new</span>(io::ErrorKind::InvalidData, error))?;
+    <span class="title function_ invoke__">Ok</span>(<span class="title function_ invoke__">Some</span>(message))
+&#125;</code></pre>
+
+<p>这里用 <code>read_exact</code> 很关键。</p>
+<p>因为我们不是“随便读一点看看”，而是在协议层明确知道：</p>
+<ul>
+<li>头部必须是 4 字节</li>
+<li>消息体必须是 <code>len</code> 字节</li>
+</ul>
+<p>所以这时候“必须读够”才有意义。</p>
+<p>这也是我觉得长度前缀协议特别适合入门 TCP 的原因：</p>
+<blockquote>
+<p>它能很清楚地把“字节流”和“消息边界”区分开。</p>
+</blockquote>
+<hr>
+<h2 id="七、为什么示例里要故意把一条消息拆开发送？"><a href="#七、为什么示例里要故意把一条消息拆开发送？" class="headerlink" title="七、为什么示例里要故意把一条消息拆开发送？"></a>七、为什么示例里要故意把一条消息拆开发送？</h2><p>示例中的客户端没有直接一次性写完整帧，而是故意分几段发：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">send_fragmented_frame</span>(stream: &amp;<span class="keyword">mut</span> TcpStream, message: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> io::<span class="type">Result</span>&lt;()&gt; &#123;
+    <span class="keyword">let</span> <span class="variable">payload</span> = message.<span class="title function_ invoke__">as_bytes</span>();
+    <span class="keyword">let</span> <span class="variable">len</span> = payload.<span class="title function_ invoke__">len</span>() <span class="keyword">as</span> <span class="type">u32</span>;
+    <span class="keyword">let</span> <span class="variable">header</span> = len.<span class="title function_ invoke__">to_be_bytes</span>();
+
+    stream.<span class="title function_ invoke__">write_all</span>(&amp;header[..<span class="number">2</span>])?;
+    thread::<span class="title function_ invoke__">sleep</span>(Duration::<span class="title function_ invoke__">from_millis</span>(<span class="number">20</span>));
+    stream.<span class="title function_ invoke__">write_all</span>(&amp;header[<span class="number">2</span>..])?;
+    thread::<span class="title function_ invoke__">sleep</span>(Duration::<span class="title function_ invoke__">from_millis</span>(<span class="number">20</span>));
+
+    <span class="keyword">let</span> <span class="variable">midpoint</span> = payload.<span class="title function_ invoke__">len</span>() / <span class="number">2</span>;
+    stream.<span class="title function_ invoke__">write_all</span>(&amp;payload[..midpoint])?;
+    thread::<span class="title function_ invoke__">sleep</span>(Duration::<span class="title function_ invoke__">from_millis</span>(<span class="number">20</span>));
+    stream.<span class="title function_ invoke__">write_all</span>(&amp;payload[midpoint..])?;
+    stream.<span class="title function_ invoke__">flush</span>()?;
+
+    <span class="title function_ invoke__">Ok</span>(())
+&#125;</code></pre>
+
+<p>这么做的目的就是把“拆包”现象显式演示出来。</p>
+<p>也就是说：</p>
+<ul>
+<li>即使发送端把一条消息拆开成多次 <code>write_all</code></li>
+<li>只要接收端协议读取逻辑正确</li>
+</ul>
+<p>最终仍然可以重组出完整消息。</p>
+<p>这正是应用层 framing 的价值。</p>
+<p>你会发现，真正稳定的网络程序依赖的不是“运气好每次都刚好读完整”，而是：</p>
+<blockquote>
+<p>无论底层怎么拆分传输，只要字节按顺序到达，应用层都能恢复出协议消息。</p>
+</blockquote>
+<hr>
+<h2 id="八、那粘包呢？为什么长度前缀同样能处理？"><a href="#八、那粘包呢？为什么长度前缀同样能处理？" class="headerlink" title="八、那粘包呢？为什么长度前缀同样能处理？"></a>八、那粘包呢？为什么长度前缀同样能处理？</h2><p>刚才说的是拆包。</p>
+<p>再看粘包。</p>
+<p>如果底层一次性把多条消息的数据都送到了接收端，那么对长度前缀协议来说也没问题。</p>
+<p>因为接收流程仍然是：</p>
+<ol>
+<li>先读 4 字节头部</li>
+<li>按头部长度读出一条完整消息体</li>
+<li>如果流里还有剩余数据，继续读下一帧</li>
+</ol>
+<p>所以长度前缀协议的优势就在这里：</p>
+<blockquote>
+<p>它不依赖底层每次读写边界刚好对齐，而是靠协议自身恢复边界。</p>
+</blockquote>
+<p>这比把“每次 <code>read</code> 结果”错当成“每条消息”要稳健得多。</p>
+<hr>
+<h2 id="九、一个很常见但很重要的判断：网络程序真正难的是协议，不是-socket"><a href="#九、一个很常见但很重要的判断：网络程序真正难的是协议，不是-socket" class="headerlink" title="九、一个很常见但很重要的判断：网络程序真正难的是协议，不是 socket"></a>九、一个很常见但很重要的判断：网络程序真正难的是协议，不是 socket</h2><p>很多入门文章会把重点放在：</p>
+<ul>
+<li>怎么 <code>bind</code></li>
+<li>怎么 <code>connect</code></li>
+<li>怎么 <code>accept</code></li>
+</ul>
+<p>这些当然要会。</p>
+<p>但真正写稍微像样一点的网络程序后，你会发现：</p>
+<blockquote>
+<p>socket API 往往只是开始，真正的复杂度几乎都在协议设计上。</p>
+</blockquote>
+<p>例如：</p>
+<ul>
+<li>消息边界怎么定义</li>
+<li>长度字段多长</li>
+<li>编码格式是什么</li>
+<li>是否支持半关闭</li>
+<li>错误包怎么处理</li>
+<li>心跳、超时、重连怎么做</li>
+</ul>
+<p>也就是说，网络编程表面看是 I&#x2F;O，实质上经常是协议工程。</p>
+<p>这也是为什么拆包粘包问题值得在入门阶段就讲清楚。</p>
+<p>因为如果你一开始就误以为“TCP 会替你按消息收发”，后面做聊天、RPC、自定义协议时会一直踩坑。</p>
+<hr>
+<h2 id="十、完整示例：一个最小可运行的-TCP-framing-demo"><a href="#十、完整示例：一个最小可运行的-TCP-framing-demo" class="headerlink" title="十、完整示例：一个最小可运行的 TCP framing demo"></a>十、完整示例：一个最小可运行的 TCP framing demo</h2><p>示例工程 <a href="workspaces/network-demo">workspaces&#x2F;network-demo</a> 的核心逻辑包括：</p>
+<ol>
+<li>服务端监听 <a href="workspaces/network-demo/src/main.rs">workspaces&#x2F;network-demo&#x2F;src&#x2F;main.rs</a></li>
+<li>客户端连接 <a href="workspaces/network-demo/src/main.rs">workspaces&#x2F;network-demo&#x2F;src&#x2F;main.rs</a></li>
+<li>长度前缀写帧 <a href="workspaces/network-demo/src/main.rs">workspaces&#x2F;network-demo&#x2F;src&#x2F;main.rs</a></li>
+<li>按协议读帧 <a href="workspaces/network-demo/src/main.rs">workspaces&#x2F;network-demo&#x2F;src&#x2F;main.rs</a></li>
+<li>故意分片发送，演示拆包仍能被协议层恢复 <a href="workspaces/network-demo/src/main.rs">workspaces&#x2F;network-demo&#x2F;src&#x2F;main.rs</a></li>
+</ol>
+<p>它虽然很小，但已经把入门 TCP 最该先理解的几个点串起来了：</p>
+<ul>
+<li><code>TcpListener</code> 负责接连接</li>
+<li><code>TcpStream</code> 负责连接内读写</li>
+<li>TCP 不负责消息边界</li>
+<li>协议 framing 才负责消息恢复</li>
+</ul>
+<hr>
+<h2 id="十一、实际运行结果"><a href="#十一、实际运行结果" class="headerlink" title="十一、实际运行结果"></a>十一、实际运行结果</h2><p>在 <a href="workspaces/network-demo">workspaces&#x2F;network-demo</a> 下执行：</p>
+<pre><code class="highlight bash">cargo run</code></pre>
+
+<p>当前示例会输出类似结果：</p>
+<pre><code class="highlight text">server listening on 127.0.0.1:7878
+client connected
+accepted client from 127.0.0.1:54294
+server received =&gt; hello from client
+client got =&gt; ack: HELLO FROM CLIENT
+server received =&gt; tcp has no message boundary
+client got =&gt; ack: TCP HAS NO MESSAGE BOUNDARY
+client closed connection</code></pre>
+
+<p>这说明：</p>
+<ul>
+<li>server &#x2F; client 建连正常</li>
+<li>客户端故意分片发送后，服务端仍能正确恢复完整消息</li>
+<li>服务端返回响应后，客户端也能按协议读回结果</li>
+</ul>
+<hr>
+<h2 id="十二、我对-Rust-TCP-入门的几个判断"><a href="#十二、我对-Rust-TCP-入门的几个判断" class="headerlink" title="十二、我对 Rust TCP 入门的几个判断"></a>十二、我对 Rust TCP 入门的几个判断</h2><p>这部分是我自己的经验总结。</p>
+<h3 id="12-1-先把“字节流”和“消息”分开理解"><a href="#12-1-先把“字节流”和“消息”分开理解" class="headerlink" title="12.1 先把“字节流”和“消息”分开理解"></a>12.1 先把“字节流”和“消息”分开理解</h3><p>这是入门 TCP 最重要的一步。</p>
+<p>只要这一步没分清，后面几乎一定会在拆包粘包上反复踩坑。</p>
+<h3 id="12-2-入门阶段优先把协议边界讲清楚，比先追求并发更重要"><a href="#12-2-入门阶段优先把协议边界讲清楚，比先追求并发更重要" class="headerlink" title="12.2 入门阶段优先把协议边界讲清楚，比先追求并发更重要"></a>12.2 入门阶段优先把协议边界讲清楚，比先追求并发更重要</h3><p>很多人一开始就想上线程池、异步 runtime、多连接广播。</p>
+<p>这些后面都可以做，但如果 framing 没搞清楚，复杂度只会更早爆炸。</p>
+<h3 id="12-3-read-write-是字节层-API，不是消息层-API"><a href="#12-3-read-write-是字节层-API，不是消息层-API" class="headerlink" title="12.3 read &#x2F; write 是字节层 API，不是消息层 API"></a>12.3 <code>read</code> &#x2F; <code>write</code> 是字节层 API，不是消息层 API</h3><p>这一点必须反复提醒自己。</p>
+<h3 id="12-4-长度前缀是一个非常适合入门和工程落地的基础方案"><a href="#12-4-长度前缀是一个非常适合入门和工程落地的基础方案" class="headerlink" title="12.4 长度前缀是一个非常适合入门和工程落地的基础方案"></a>12.4 长度前缀是一个非常适合入门和工程落地的基础方案</h3><p>它不是唯一方案，但通常足够清晰、稳定，也很适合二进制协议扩展。</p>
+<h3 id="12-5-网络编程很多时候不是“代码会不会写”，而是“失败场景有没有想清楚”"><a href="#12-5-网络编程很多时候不是“代码会不会写”，而是“失败场景有没有想清楚”" class="headerlink" title="12.5 网络编程很多时候不是“代码会不会写”，而是“失败场景有没有想清楚”"></a>12.5 网络编程很多时候不是“代码会不会写”，而是“失败场景有没有想清楚”</h3><p>例如：</p>
+<ul>
+<li>读到一半断开怎么办</li>
+<li>长度字段非法怎么办</li>
+<li>对方迟迟不发完怎么办</li>
+<li>多连接怎么隔离状态</li>
+</ul>
+<p>这些问题才是网络程序真正开始变成熟的地方。</p>
+<hr>
+<h2 id="结语"><a href="#结语" class="headerlink" title="结语"></a>结语</h2><p>Rust 的 <code>TcpListener</code> 和 <code>TcpStream</code> 本身并不难，真正需要尽早建立的是网络编程的底层直觉。</p>
+<p>也就是：</p>
+<ul>
+<li>TCP 给你的是按序字节流</li>
+<li>应用层消息边界要自己设计</li>
+<li>拆包粘包不是 bug，而是常态</li>
+<li>稳定程序依赖协议恢复能力，而不是“刚好一次读完整”</li>
+</ul>
+<p>所以这篇文章如果只留一句建议，我会写这句：</p>
+<blockquote>
+<p>写 TCP 程序时，不要先问“我这次 read 到了什么”，而要先问“我的协议如何定义一条完整消息”。</p>
+</blockquote>
+<p>把这件事想清楚，后面的聊天协议、RPC、自定义二进制协议都会顺很多。</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
