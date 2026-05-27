@@ -1,0 +1,326 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust 泛型与单态化深入解析：泛型为什么快，代价又是什么</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust 泛型与单态化深入解析：泛型为什么快，代价又是什么</h1><div class="time">2026-05-27</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>很多人学 Rust 泛型时，最先记住的往往是几句话：</p>
+<ul>
+<li>泛型很重要</li>
+<li>泛型是零成本抽象</li>
+<li>泛型通常比动态分发更快</li>
+</ul>
+<p>这些结论大体没错。</p>
+<p>但如果你只记住这些口号，后面很容易继续困惑：</p>
+<ul>
+<li>泛型到底为什么快</li>
+<li>编译器到底做了什么</li>
+<li>为什么同样是抽象，<code>dyn Trait</code> 和泛型的运行时成本会不一样</li>
+<li>如果泛型这么好，为什么还会说它有“代码膨胀”问题</li>
+</ul>
+<p>这说明：</p>
+<blockquote>
+<p>Rust 泛型真正难的地方，不在语法，而在你是否理解它背后的编译模型。</p>
+</blockquote>
+<p>这一篇我会围绕 4 个问题展开：</p>
+<ol>
+<li>单态化到底是什么</li>
+<li>为什么单态化让泛型往往更快</li>
+<li>为什么它又可能带来编译时间和二进制体积的代价</li>
+<li>工程里什么时候应该优先泛型，什么时候反而该克制</li>
+</ol>
+<p>文中的完整示例工程在 <a href="workspaces/monomorphization-demo">workspaces&#x2F;monomorphization-demo</a>。</p>
+<hr>
+<h2 id="一、先说结论：Rust-泛型的“快”，本质上来自编译期具体化"><a href="#一、先说结论：Rust-泛型的“快”，本质上来自编译期具体化" class="headerlink" title="一、先说结论：Rust 泛型的“快”，本质上来自编译期具体化"></a>一、先说结论：Rust 泛型的“快”，本质上来自编译期具体化</h2><p>很多语言里，泛型或模板背后的实现机制并不完全一样。</p>
+<p>Rust 里最关键的一点是：</p>
+<blockquote>
+<p>大多数普通泛型代码，最终不会以“一个万能版本”在运行时解释执行，而是会在编译期按具体类型展开成专门版本。</p>
+</blockquote>
+<p>这个过程就叫单态化（monomorphization）。</p>
+<p>也就是说，当你写：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">identity</span>&lt;T&gt;(value: T) <span class="punctuation">-&gt;</span> T &#123;
+    value
+&#125;</code></pre>
+
+<p>然后分别这样用：</p>
+<pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">a</span> = <span class="title function_ invoke__">identity</span>(<span class="number">1_u32</span>);
+<span class="keyword">let</span> <span class="variable">b</span> = <span class="title function_ invoke__">identity</span>(<span class="number">2_u64</span>);</code></pre>
+
+<p>从编译器视角看，最终更接近于生成两份不同的具体逻辑：</p>
+<ul>
+<li>一份给 <code>u32</code></li>
+<li>一份给 <code>u64</code></li>
+</ul>
+<p>这就是为什么 Rust 泛型经常能做到“抽象写法”和“具体类型性能”同时成立。</p>
+<hr>
+<h2 id="二、单态化到底在做什么？"><a href="#二、单态化到底在做什么？" class="headerlink" title="二、单态化到底在做什么？"></a>二、单态化到底在做什么？</h2><p>如果把它讲得更直白一点，单态化其实就是：</p>
+<blockquote>
+<p>把“带类型参数的通用代码”替换成“针对具体类型的专用代码”。</p>
+</blockquote>
+<p>示例工程里有一个简单函数：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">generic_identity</span>&lt;T&gt;(value: T) <span class="punctuation">-&gt;</span> T &#123;
+    value
+&#125;</code></pre>
+
+<p>然后我们把它分别赋给两个不同签名的函数指针：</p>
+<pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">u32_fn</span>: <span class="title function_ invoke__">fn</span>(<span class="type">u32</span>) <span class="punctuation">-&gt;</span> <span class="type">u32</span> = generic_identity;
+<span class="keyword">let</span> <span class="variable">u64_fn</span>: <span class="title function_ invoke__">fn</span>(<span class="type">u64</span>) <span class="punctuation">-&gt;</span> <span class="type">u64</span> = generic_identity;
+
+<span class="built_in">println!</span>(<span class="string">&quot;identity::&lt;u32&gt; fn ptr = &#123;:p&#125;&quot;</span>, u32_<span class="keyword">fn</span> <span class="title function_">as</span> *<span class="title function_ invoke__">const</span> ());
+<span class="built_in">println!</span>(<span class="string">&quot;identity::&lt;u64&gt; fn ptr = &#123;:p&#125;&quot;</span>, u64_<span class="keyword">fn</span> <span class="title function_">as</span> *<span class="title function_ invoke__">const</span> ());</code></pre>
+
+<p>在 <a href="workspaces/monomorphization-demo/src/main.rs">workspaces&#x2F;monomorphization-demo&#x2F;src&#x2F;main.rs</a> 里运行后，可以看到两组不同的函数地址。</p>
+<p>这不是在证明所有平台和所有优化等级下地址都一定不同，而是想帮助你建立一个直觉：</p>
+<blockquote>
+<p>编译器不是在运行时拿一个“泛型函数解释器”去处理不同类型，而是在编译期把它们落成了不同的具体实例。</p>
+</blockquote>
+<p>这个直觉很重要。</p>
+<p>因为只要这一步想清楚，后面很多问题都会跟着变得顺：</p>
+<ul>
+<li>为什么泛型调用常常能被内联</li>
+<li>为什么类型信息在优化阶段更充分</li>
+<li>为什么泛型也会带来代码重复生成</li>
+</ul>
+<hr>
+<h2 id="三、为什么泛型通常更快？"><a href="#三、为什么泛型通常更快？" class="headerlink" title="三、为什么泛型通常更快？"></a>三、为什么泛型通常更快？</h2><p>这部分是大家最关心的问题。</p>
+<p>很多文章会直接说：</p>
+<blockquote>
+<p>泛型是静态分发，所以更快。</p>
+</blockquote>
+<p>这句话没错，但有点短。</p>
+<p>更完整一点地说，泛型通常更快，主要是因为下面三件事。</p>
+<h3 id="3-1-调用目标在编译期就已经确定"><a href="#3-1-调用目标在编译期就已经确定" class="headerlink" title="3.1 调用目标在编译期就已经确定"></a>3.1 调用目标在编译期就已经确定</h3><p>例如示例里的静态分发函数：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">describe_static</span>&lt;T: FormatValue&gt;(value: &amp;T) &#123;
+    <span class="built_in">println!</span>(<span class="string">&quot;[static] &#123;&#125; =&gt; &#123;&#125;&quot;</span>, type_name::&lt;T&gt;(), value.format_value());
+&#125;</code></pre>
+
+<p>当它被 <code>UserId</code> 或 <code>OrderId</code> 调用时，编译器是知道 <code>T</code> 具体是谁的。</p>
+<p>这意味着：</p>
+<ul>
+<li>方法调用目标明确</li>
+<li>不需要运行时查表决定该调哪个实现</li>
+</ul>
+<h3 id="3-2-优化器能看到更多具体信息"><a href="#3-2-优化器能看到更多具体信息" class="headerlink" title="3.2 优化器能看到更多具体信息"></a>3.2 优化器能看到更多具体信息</h3><p>一旦类型具体化，优化器看到的就不再是“某个未知的 <code>T</code>”，而是：</p>
+<ul>
+<li>这个值的大小</li>
+<li>这个方法的具体实现</li>
+<li>这个调用链能不能继续展开</li>
+</ul>
+<p>于是它就更容易做这些事情：</p>
+<ul>
+<li>内联</li>
+<li>常量传播</li>
+<li>消除中间层</li>
+<li>更激进的优化组合</li>
+</ul>
+<p>也就是说，泛型快不只是因为“少了一次间接调用”，更因为：</p>
+<blockquote>
+<p>编译器掌握的信息更多，优化空间也更大。</p>
+</blockquote>
+<h3 id="3-3-数据布局通常也更直接"><a href="#3-3-数据布局通常也更直接" class="headerlink" title="3.3 数据布局通常也更直接"></a>3.3 数据布局通常也更直接</h3><p>当你在泛型上下文里操作具体类型时，很多时候数据就是按那个具体类型的原生布局存在。</p>
+<p>而不是先经过一层抽象对象再去间接访问。</p>
+<p>这会让整个执行路径更贴近“直接写死具体类型”的代码。</p>
+<p>所以从结果上看，Rust 泛型的价值就是：</p>
+<blockquote>
+<p>你在源码里写的是抽象，编译器最终给你的常常是具体代码。</p>
+</blockquote>
+<p>这也是“零成本抽象”那句话真正想表达的东西。</p>
+<hr>
+<h2 id="四、它和-dyn-Trait-的根本区别，还是静态分发-vs-动态分发"><a href="#四、它和-dyn-Trait-的根本区别，还是静态分发-vs-动态分发" class="headerlink" title="四、它和 dyn Trait 的根本区别，还是静态分发 vs 动态分发"></a>四、它和 <code>dyn Trait</code> 的根本区别，还是静态分发 vs 动态分发</h2><p>这部分和前面的 trait object 那篇是相邻话题，但角度不一样。</p>
+<p>示例里同时放了静态分发和动态分发两个版本：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">describe_static</span>&lt;T: FormatValue&gt;(value: &amp;T) &#123;
+    <span class="built_in">println!</span>(<span class="string">&quot;[static] &#123;&#125; =&gt; &#123;&#125;&quot;</span>, type_name::&lt;T&gt;(), value.format_value());
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">describe_dynamic</span>(value: &amp;<span class="keyword">dyn</span> FormatValue) &#123;
+    <span class="built_in">println!</span>(<span class="string">&quot;[dynamic] &#123;&#125;&quot;</span>, value.format_value());
+&#125;</code></pre>
+
+<p>这里的关键区别在于：</p>
+<ul>
+<li><code>describe_static</code> 在编译期知道具体类型</li>
+<li><code>describe_dynamic</code> 在运行期才根据 trait object 找到对应实现</li>
+</ul>
+<p>也就是说：</p>
+<ul>
+<li>泛型把“选哪个实现”提前到编译期</li>
+<li><code>dyn Trait</code> 把“选哪个实现”推迟到运行期</li>
+</ul>
+<p>所以泛型和动态分发的差别，不只是“一个快一点，一个慢一点”，而是：</p>
+<blockquote>
+<p>一个用代码展开换运行时直接调用，一个用运行时灵活性换掉编译期具体化。</p>
+</blockquote>
+<p>这就是为什么它们在工程里经常不是替代关系，而是分工关系。</p>
+<hr>
+<h2 id="五、那单态化的代价到底是什么？"><a href="#五、那单态化的代价到底是什么？" class="headerlink" title="五、那单态化的代价到底是什么？"></a>五、那单态化的代价到底是什么？</h2><p>这部分很重要。</p>
+<p>因为很多人一听到“泛型零成本抽象”，就会误以为它只有好处，没有代价。</p>
+<p>这不准确。</p>
+<p>Rust 泛型的主要代价，不在运行时，而更多在编译期和产物体积上。</p>
+<h3 id="5-1-代码膨胀"><a href="#5-1-代码膨胀" class="headerlink" title="5.1 代码膨胀"></a>5.1 代码膨胀</h3><p>如果一个泛型函数被很多不同具体类型实例化，编译器往往就要生成很多份具体版本。</p>
+<p>这意味着：</p>
+<ul>
+<li>可执行文件体积可能变大</li>
+<li>指令缓存压力可能变大</li>
+<li>编译产物里的代码重复会增加</li>
+</ul>
+<p>当然，现代优化器和链接器有时能消掉一部分重复，但不能把这个问题当不存在。</p>
+<p>所以更准确的说法是：</p>
+<blockquote>
+<p>泛型常常用“更多编译期展开”去换“更少运行时抽象成本”。</p>
+</blockquote>
+<h3 id="5-2-编译时间"><a href="#5-2-编译时间" class="headerlink" title="5.2 编译时间"></a>5.2 编译时间</h3><p>泛型实例越多，编译器要处理的具体版本通常也越多。</p>
+<p>这会带来：</p>
+<ul>
+<li>类型检查和代码生成工作量增加</li>
+<li>增量编译压力增加</li>
+<li>编译时间拉长</li>
+</ul>
+<p>很多大型 Rust 项目对泛型的感受，并不是“运行慢”，而是“编译越来越重”。</p>
+<p>这正是单态化代价最真实的一面。</p>
+<h3 id="5-3-错误信息和类型复杂度"><a href="#5-3-错误信息和类型复杂度" class="headerlink" title="5.3 错误信息和类型复杂度"></a>5.3 错误信息和类型复杂度</h3><p>泛型越深、约束越多、嵌套越复杂，带来的还有另一个隐性成本：</p>
+<ul>
+<li>错误信息更长</li>
+<li>类型推导更难读</li>
+<li>接口边界更容易变复杂</li>
+</ul>
+<p>这虽然不是单态化本身造成的全部问题，但和泛型设计复杂化高度相关。</p>
+<p>所以工程里真正该追求的不是“把所有抽象都做成泛型”，而是：</p>
+<blockquote>
+<p>只在泛型真正带来价值的地方使用它。</p>
+</blockquote>
+<hr>
+<h2 id="六、为什么-Rust-社区会一直强调“零成本抽象”？"><a href="#六、为什么-Rust-社区会一直强调“零成本抽象”？" class="headerlink" title="六、为什么 Rust 社区会一直强调“零成本抽象”？"></a>六、为什么 Rust 社区会一直强调“零成本抽象”？</h2><p>因为在很多语言里，抽象一多，运行时就更容易付出额外开销。</p>
+<p>而 Rust 想强调的是：</p>
+<blockquote>
+<p>你可以在源码层面写得更抽象，但最终编译出来的机器码仍然尽量接近手写具体类型代码。</p>
+</blockquote>
+<p>泛型正是这个理念最典型的例子。</p>
+<p>但这里有一个很容易被忽略的补充：</p>
+<blockquote>
+<p>“零成本”通常是指运行时抽象成本尽量低，不是说它完全没有任何成本。</p>
+</blockquote>
+<p>编译时间、代码体积、接口复杂度，这些都是真实成本。</p>
+<p>所以如果只记住“零成本”，而忽略“成本转移到了哪里”，理解就还是不完整。</p>
+<hr>
+<h2 id="七、什么时候泛型特别合适？"><a href="#七、什么时候泛型特别合适？" class="headerlink" title="七、什么时候泛型特别合适？"></a>七、什么时候泛型特别合适？</h2><p>如果满足下面这些特征，我通常会优先考虑泛型：</p>
+<h3 id="7-1-你在写通用算法，而不是运行时插件边界"><a href="#7-1-你在写通用算法，而不是运行时插件边界" class="headerlink" title="7.1 你在写通用算法，而不是运行时插件边界"></a>7.1 你在写通用算法，而不是运行时插件边界</h3><p>例如：</p>
+<ul>
+<li>容器操作</li>
+<li>迭代器适配器</li>
+<li>编码解码辅助逻辑</li>
+<li>通用校验和转换函数</li>
+</ul>
+<p>这类场景的重点通常是：</p>
+<ul>
+<li>复用逻辑</li>
+<li>保持性能</li>
+<li>尽量不给运行时增加额外抽象层</li>
+</ul>
+<h3 id="7-2-调用方在编译期天然知道具体类型"><a href="#7-2-调用方在编译期天然知道具体类型" class="headerlink" title="7.2 调用方在编译期天然知道具体类型"></a>7.2 调用方在编译期天然知道具体类型</h3><p>如果调用点本来就知道自己拿的是 <code>UserId</code> 还是 <code>OrderId</code>，那泛型往往就很自然。</p>
+<p>示例里的 <code>repeat_static</code> 就属于这种情况：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">repeat_static</span>&lt;T: FormatValue&gt;(values: &amp;[T]) &#123;
+    <span class="keyword">for</span> <span class="variable">value</span> <span class="keyword">in</span> values &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;repeat static =&gt; &#123;&#125;&quot;</span>, value.format_value());
+    &#125;
+&#125;</code></pre>
+
+<p>只要切片里元素类型统一，泛型的表达就很顺。</p>
+<h3 id="7-3-这段逻辑处在高频路径上"><a href="#7-3-这段逻辑处在高频路径上" class="headerlink" title="7.3 这段逻辑处在高频路径上"></a>7.3 这段逻辑处在高频路径上</h3><p>如果一段代码位于高频调用路径，静态分发和优化空间通常更有价值。</p>
+<p>当然，这不是说看到高频路径就一定要泛型，而是说：</p>
+<blockquote>
+<p>在性能敏感路径里，单态化更值得优先考虑。</p>
+</blockquote>
+<hr>
+<h2 id="八、什么时候反而要克制泛型？"><a href="#八、什么时候反而要克制泛型？" class="headerlink" title="八、什么时候反而要克制泛型？"></a>八、什么时候反而要克制泛型？</h2><p>泛型不是越多越高级。</p>
+<p>下面这些场景，我通常会更谨慎。</p>
+<h3 id="8-1-你真正需要的是运行时异构处理"><a href="#8-1-你真正需要的是运行时异构处理" class="headerlink" title="8.1 你真正需要的是运行时异构处理"></a>8.1 你真正需要的是运行时异构处理</h3><p>例如：</p>
+<ul>
+<li>插件系统</li>
+<li>UI 组件集合</li>
+<li>运行时注册的 handler</li>
+<li>多种实现并存的抽象边界</li>
+</ul>
+<p>这时候问题核心不是“写通用算法”，而是“统一处理不同具体实现”。</p>
+<p>这种场景往往更接近 <code>dyn Trait</code> 的价值区间。</p>
+<h3 id="8-2-泛型让公开接口开始失控"><a href="#8-2-泛型让公开接口开始失控" class="headerlink" title="8.2 泛型让公开接口开始失控"></a>8.2 泛型让公开接口开始失控</h3><p>如果一个函数签名已经长成这样：</p>
+<ul>
+<li>多层泛型参数</li>
+<li>大量 trait bound</li>
+<li>复杂 where 子句</li>
+</ul>
+<p>那就应该停下来问一句：</p>
+<blockquote>
+<p>这里的泛型到底是在表达真实抽象，还是只是把复杂度推给调用方？</p>
+</blockquote>
+<p>很多时候，泛型不是写不出来，而是写出来以后边界不再清晰。</p>
+<h3 id="8-3-你已经明显感受到编译负担在上升"><a href="#8-3-你已经明显感受到编译负担在上升" class="headerlink" title="8.3 你已经明显感受到编译负担在上升"></a>8.3 你已经明显感受到编译负担在上升</h3><p>大型项目里，这个信号很真实。</p>
+<p>如果某些泛型层次特别深、实例特别多，确实可能显著拖慢编译。</p>
+<p>这时候就不能只盯着“运行时快”，还得开始平衡：</p>
+<ul>
+<li>编译成本</li>
+<li>团队可读性</li>
+<li>抽象稳定性</li>
+</ul>
+<hr>
+<h2 id="九、完整示例：一个最小单态化演示工程"><a href="#九、完整示例：一个最小单态化演示工程" class="headerlink" title="九、完整示例：一个最小单态化演示工程"></a>九、完整示例：一个最小单态化演示工程</h2><p>示例工程 <a href="workspaces/monomorphization-demo">workspaces&#x2F;monomorphization-demo</a> 里放了几类代码：</p>
+<ol>
+<li>泛型函数实例化地址示意 <a href="workspaces/monomorphization-demo/src/main.rs">workspaces&#x2F;monomorphization-demo&#x2F;src&#x2F;main.rs</a></li>
+<li>基于泛型的静态分发 <a href="workspaces/monomorphization-demo/src/main.rs">workspaces&#x2F;monomorphization-demo&#x2F;src&#x2F;main.rs</a></li>
+<li>基于 <code>dyn Trait</code> 的动态分发对照 <a href="workspaces/monomorphization-demo/src/main.rs">workspaces&#x2F;monomorphization-demo&#x2F;src&#x2F;main.rs</a></li>
+</ol>
+<p>其中这两行尤其适合拿来建立直觉：</p>
+<pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">u32_fn</span>: <span class="title function_ invoke__">fn</span>(<span class="type">u32</span>) <span class="punctuation">-&gt;</span> <span class="type">u32</span> = generic_identity;
+<span class="keyword">let</span> <span class="variable">u64_fn</span>: <span class="title function_ invoke__">fn</span>(<span class="type">u64</span>) <span class="punctuation">-&gt;</span> <span class="type">u64</span> = generic_identity;</code></pre>
+
+<p>它不是在做什么生产级技巧，而是在帮助你看见：</p>
+<blockquote>
+<p>同一个泛型函数，在不同具体类型下，会被落成不同实例。</p>
+</blockquote>
+<p>这就是单态化最值得先理解的第一层含义。</p>
+<hr>
+<h2 id="十、实际运行结果"><a href="#十、实际运行结果" class="headerlink" title="十、实际运行结果"></a>十、实际运行结果</h2><p>在 <a href="workspaces/monomorphization-demo">workspaces&#x2F;monomorphization-demo</a> 下执行：</p>
+<pre><code class="highlight bash">cargo run</code></pre>
+
+<p>当前示例会输出类似结果：</p>
+<pre><code class="highlight text">identity::&lt;u32&gt; fn ptr = 0x...
+identity::&lt;u64&gt; fn ptr = 0x...
+[static] monomorphization_demo::UserId =&gt; user:7
+[static] monomorphization_demo::OrderId =&gt; order:42
+[dynamic] user:7
+[dynamic] order:42
+repeat static =&gt; user:1
+repeat static =&gt; user:2
+repeat static =&gt; user:3</code></pre>
+
+<p>这组输出主要用于说明三件事：</p>
+<ul>
+<li>泛型函数会按具体类型实例化</li>
+<li>静态分发调用时编译器知道具体类型</li>
+<li>动态分发则是在运行时通过 trait object 调用实现</li>
+</ul>
+<hr>
+<h2 id="十一、我对-Rust-泛型和单态化的几个判断"><a href="#十一、我对-Rust-泛型和单态化的几个判断" class="headerlink" title="十一、我对 Rust 泛型和单态化的几个判断"></a>十一、我对 Rust 泛型和单态化的几个判断</h2><p>这部分是我自己的经验总结。</p>
+<h3 id="11-1-泛型的真正价值，不只是“复用代码”，而是“复用逻辑同时保留具体类型优化空间”"><a href="#11-1-泛型的真正价值，不只是“复用代码”，而是“复用逻辑同时保留具体类型优化空间”" class="headerlink" title="11.1 泛型的真正价值，不只是“复用代码”，而是“复用逻辑同时保留具体类型优化空间”"></a>11.1 泛型的真正价值，不只是“复用代码”，而是“复用逻辑同时保留具体类型优化空间”</h3><p>这是它和很多运行时抽象最不一样的地方。</p>
+<h3 id="11-2-单态化把成本从运行时转移到了编译期和产物体积"><a href="#11-2-单态化把成本从运行时转移到了编译期和产物体积" class="headerlink" title="11.2 单态化把成本从运行时转移到了编译期和产物体积"></a>11.2 单态化把成本从运行时转移到了编译期和产物体积</h3><p>如果只看到“快”，没看到“编译更重、代码可能更大”，理解就还不完整。</p>
+<h3 id="11-3-不是所有抽象都该泛型化"><a href="#11-3-不是所有抽象都该泛型化" class="headerlink" title="11.3 不是所有抽象都该泛型化"></a>11.3 不是所有抽象都该泛型化</h3><p>泛型最适合统一算法和高频路径，不一定适合所有公开边界。</p>
+<h3 id="11-4-“零成本抽象”不是“没有成本”，而是“尽量不把成本留给运行时”"><a href="#11-4-“零成本抽象”不是“没有成本”，而是“尽量不把成本留给运行时”" class="headerlink" title="11.4 “零成本抽象”不是“没有成本”，而是“尽量不把成本留给运行时”"></a>11.4 “零成本抽象”不是“没有成本”，而是“尽量不把成本留给运行时”</h3><p>这句话我觉得特别值得单独记住。</p>
+<h3 id="11-5-工程里真正成熟的做法，从来不是泛型或动态分发二选一，而是按边界分工"><a href="#11-5-工程里真正成熟的做法，从来不是泛型或动态分发二选一，而是按边界分工" class="headerlink" title="11.5 工程里真正成熟的做法，从来不是泛型或动态分发二选一，而是按边界分工"></a>11.5 工程里真正成熟的做法，从来不是泛型或动态分发二选一，而是按边界分工</h3><p>泛型解决的是编译期统一。</p>
+<p><code>dyn Trait</code> 解决的是运行时统一。</p>
+<p>把这两个层次分清以后，很多设计选择都会自然很多。</p>
+<hr>
+<h2 id="结语"><a href="#结语" class="headerlink" title="结语"></a>结语</h2><p>Rust 泛型之所以常常表现得又抽象又高效，本质上不是因为编译器“魔法优化”了几下，而是因为它在编译期就把抽象落成了具体实现。</p>
+<p>这就是单态化的意义。</p>
+<p>一旦你从这个角度去看：</p>
+<ul>
+<li>为什么泛型通常更快</li>
+<li>为什么优化空间更大</li>
+<li>为什么二进制可能变大</li>
+<li>为什么编译时间可能上升</li>
+<li>为什么有些边界更适合 <code>dyn Trait</code></li>
+</ul>
+<p>这些原本看起来零散的结论就会被串成一条线。</p>
+<p>所以这篇文章如果只留一句建议，我会写这句：</p>
+<blockquote>
+<p>不要只记住“泛型快”，要记住“泛型为什么快，以及它把成本挪到了哪里”。</p>
+</blockquote>
+<p>这比单独背“零成本抽象”四个字更有用。</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
