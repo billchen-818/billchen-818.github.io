@@ -1,0 +1,354 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust From/Into/AsRef/Borrow 全面对比：类型转换接口该怎么设计</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust From/Into/AsRef/Borrow 全面对比：类型转换接口该怎么设计</h1><div class="time">2026-05-27</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>很多人第一次系统接触 Rust 类型转换接口时，通常会很快碰到这 4 个 trait：</p>
+<ul>
+<li><code>From</code></li>
+<li><code>Into</code></li>
+<li><code>AsRef</code></li>
+<li><code>Borrow</code></li>
+</ul>
+<p>然后就会开始混：</p>
+<ul>
+<li><code>From</code> 和 <code>Into</code> 到底谁实现、谁来用</li>
+<li><code>AsRef&lt;str&gt;</code> 和 <code>Borrow&lt;str&gt;</code> 看起来都能拿到 <code>&amp;str</code>，区别到底在哪</li>
+<li>为什么有些函数参数更适合写 <code>impl Into&lt;String&gt;</code>，有些又更适合写 <code>impl AsRef&lt;Path&gt;</code></li>
+<li>明明都叫“转换”，为什么它们表达出来的语义差异这么大</li>
+</ul>
+<p>这说明：</p>
+<blockquote>
+<p>Rust 里的“转换接口”其实不是一类问题，而至少是两类问题：值要不要被拿走，以及你只是想不想把它借用成另一种视图。</p>
+</blockquote>
+<p>这一篇我会围绕下面几个问题展开：</p>
+<ol>
+<li><code>From/Into</code> 和 <code>AsRef/Borrow</code> 的根本分界到底是什么</li>
+<li>这 4 个 trait 各自适合表达什么语义</li>
+<li>为什么 <code>Borrow</code> 不是“另一个 <code>AsRef</code>”</li>
+<li>设计函数参数和领域类型时，应该优先选哪一种接口</li>
+</ol>
+<p>文中的完整示例工程在 <a href="workspaces/conversion-demo">workspaces&#x2F;conversion-demo</a>。</p>
+<hr>
+<h2 id="一、先说结论：这-4-个-trait-应该先分成两组看"><a href="#一、先说结论：这-4-个-trait-应该先分成两组看" class="headerlink" title="一、先说结论：这 4 个 trait 应该先分成两组看"></a>一、先说结论：这 4 个 trait 应该先分成两组看</h2><p>如果你一上来就把四个 trait 并排背，很容易越背越乱。</p>
+<p>更好的理解方式是先分组。</p>
+<h3 id="1-1-第一组：From-Into"><a href="#1-1-第一组：From-Into" class="headerlink" title="1.1 第一组：From &#x2F; Into"></a>1.1 第一组：<code>From</code> &#x2F; <code>Into</code></h3><p>这一组主要表达的是：</p>
+<blockquote>
+<p>把一个值转换成另一个值。</p>
+</blockquote>
+<p>也就是说，重点在“生成一个新值”。</p>
+<p>通常伴随着：</p>
+<ul>
+<li>消耗原值</li>
+<li>或者基于输入构造出新的拥有型值</li>
+</ul>
+<h3 id="1-2-第二组：AsRef-Borrow"><a href="#1-2-第二组：AsRef-Borrow" class="headerlink" title="1.2 第二组：AsRef &#x2F; Borrow"></a>1.2 第二组：<code>AsRef</code> &#x2F; <code>Borrow</code></h3><p>这一组主要表达的是：</p>
+<blockquote>
+<p>不拿走值，只是把它借用成另一种视图。</p>
+</blockquote>
+<p>也就是说，重点不在“构造一个新值”，而在：</p>
+<ul>
+<li>提供一个借用出来的引用</li>
+<li>让调用方以另一种只读视角去看待它</li>
+</ul>
+<p>我自己的经验是：</p>
+<blockquote>
+<p>只要先把“拥有型转换”和“借用型视图转换”分清，后面 80% 的困惑都会直接消失。</p>
+</blockquote>
+<hr>
+<h2 id="二、先看-From：它表达的是“我可以被稳定地构造成另一个类型”"><a href="#二、先看-From：它表达的是“我可以被稳定地构造成另一个类型”" class="headerlink" title="二、先看 From：它表达的是“我可以被稳定地构造成另一个类型”"></a>二、先看 <code>From</code>：它表达的是“我可以被稳定地构造成另一个类型”</h2><p>最经典的写法就是：</p>
+<pre><code class="highlight rust"><span class="keyword">impl</span> <span class="title class_">From</span>&lt;&amp;<span class="type">str</span>&gt; <span class="keyword">for</span> <span class="title class_">UserId</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">from</span>(value: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123;
+        <span class="title function_ invoke__">Self</span>(value.<span class="title function_ invoke__">to_owned</span>())
+    &#125;
+&#125;</code></pre>
+
+<p>这段代码来自示例工程 <a href="workspaces/conversion-demo/src/main.rs">workspaces&#x2F;conversion-demo&#x2F;src&#x2F;main.rs</a>。</p>
+<p>它的含义是：</p>
+<blockquote>
+<p>任何 <code>&amp;str</code>，都可以被明确地转换成一个 <code>UserId</code>。</p>
+</blockquote>
+<p>这里最值得强调的是两个词：</p>
+<ul>
+<li>明确</li>
+<li>稳定</li>
+</ul>
+<p>也就是说，<code>From</code> 适合表达那些你愿意公开承诺的、方向清晰的转换关系。</p>
+<p>比如：</p>
+<ul>
+<li><code>String -&gt; UserId</code></li>
+<li><code>&amp;str -&gt; UserId</code></li>
+<li><code>u16 -&gt; Port</code></li>
+</ul>
+<p>如果一个转换语义很自然、几乎不会让人误解，那它通常就适合 <code>From</code>。</p>
+<h3 id="2-1-为什么通常优先实现-From，而不是手写-Into"><a href="#2-1-为什么通常优先实现-From，而不是手写-Into" class="headerlink" title="2.1 为什么通常优先实现 From，而不是手写 Into"></a>2.1 为什么通常优先实现 <code>From</code>，而不是手写 <code>Into</code></h3><p>因为 Rust 会基于 <code>From&lt;T&gt; for U</code> 自动给你提供：</p>
+<pre><code class="highlight rust"><span class="built_in">Into</span>&lt;U&gt; <span class="keyword">for</span> <span class="title class_">T</span></code></pre>
+
+<p>所以从实现者角度看，通常更推荐：</p>
+<blockquote>
+<p>实现 <code>From</code>，让 <code>Into</code> 自动跟着成立。</p>
+</blockquote>
+<p>这也是社区里最主流的写法。</p>
+<hr>
+<h2 id="三、再看-Into：它更多是给调用方参数约束用的"><a href="#三、再看-Into：它更多是给调用方参数约束用的" class="headerlink" title="三、再看 Into：它更多是给调用方参数约束用的"></a>三、再看 <code>Into</code>：它更多是给调用方参数约束用的</h2><p>如果从实现侧看，优先 <code>From</code>；那从使用侧看，经常会遇到的就是 <code>Into</code>。</p>
+<p>示例里有个函数：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">create_user_id</span>&lt;T&gt;(value: T) <span class="punctuation">-&gt;</span> UserId
+<span class="keyword">where</span>
+    T: <span class="built_in">Into</span>&lt;UserId&gt;,
+&#123;
+    value.<span class="title function_ invoke__">into</span>()
+&#125;</code></pre>
+
+<p>这段代码表达的是：</p>
+<blockquote>
+<p>我不关心你传进来的是 <code>&amp;str</code>、<code>String</code> 还是别的什么，只要它最终能变成 <code>UserId</code> 就行。</p>
+</blockquote>
+<p>这里 <code>Into&lt;UserId&gt;</code> 的价值在于参数接受面更宽。</p>
+<p>调用方可以这样传：</p>
+<pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">first</span>: UserId = <span class="string">&quot;u-1001&quot;</span>.<span class="title function_ invoke__">into</span>();
+<span class="keyword">let</span> <span class="variable">second</span> = <span class="title function_ invoke__">create_user_id</span>(<span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;u-1002&quot;</span>));</code></pre>
+
+<h3 id="3-1-一个很实用的经验规则"><a href="#3-1-一个很实用的经验规则" class="headerlink" title="3.1 一个很实用的经验规则"></a>3.1 一个很实用的经验规则</h3><p>如果你是类型作者：</p>
+<ul>
+<li>优先实现 <code>From</code></li>
+</ul>
+<p>如果你是在写一个接收参数的函数：</p>
+<ul>
+<li>经常可以用 <code>Into&lt;Target&gt;</code> 放宽输入类型</li>
+</ul>
+<p>这就是为什么大家经常会说：</p>
+<blockquote>
+<p>实现时想 <code>From</code>，接参时想 <code>Into</code>。</p>
+</blockquote>
+<p>这句话虽然简短，但在多数场景里都挺准。</p>
+<hr>
+<h2 id="四、From-Into-适合解决什么问题？"><a href="#四、From-Into-适合解决什么问题？" class="headerlink" title="四、From/Into 适合解决什么问题？"></a>四、<code>From/Into</code> 适合解决什么问题？</h2><p>这组 trait 最适合表达的是“值层面的转换关系”。</p>
+<p>也就是：</p>
+<ul>
+<li>我愿意生成一个新的目标值</li>
+<li>这个转换方向是清晰的</li>
+<li>转换后的类型在语义上更接近真正想要的领域对象</li>
+</ul>
+<p>例如下面几类 API 都很适合：</p>
+<h3 id="4-1-从外部输入构造领域值"><a href="#4-1-从外部输入构造领域值" class="headerlink" title="4.1 从外部输入构造领域值"></a>4.1 从外部输入构造领域值</h3><p>例如：</p>
+<ul>
+<li><code>&amp;str -&gt; UserId</code></li>
+<li><code>String -&gt; Email</code></li>
+<li><code>u64 -&gt; OrderId</code></li>
+</ul>
+<h3 id="4-2-接收较灵活的创建参数"><a href="#4-2-接收较灵活的创建参数" class="headerlink" title="4.2 接收较灵活的创建参数"></a>4.2 接收较灵活的创建参数</h3><p>例如函数想接收：</p>
+<ul>
+<li><code>String</code></li>
+<li><code>&amp;str</code></li>
+<li>已经构造好的目标类型</li>
+</ul>
+<p>这时用 <code>Into&lt;T&gt;</code> 往往会让 API 更顺手。</p>
+<h3 id="4-3-表达“这是一个自然、低歧义的转换”"><a href="#4-3-表达“这是一个自然、低歧义的转换”" class="headerlink" title="4.3 表达“这是一个自然、低歧义的转换”"></a>4.3 表达“这是一个自然、低歧义的转换”</h3><p>如果转换本身带有明显业务含义，<code>From</code> 往往比手写一个 <code>new</code> 更适合做补充入口。</p>
+<p>当然，不是说所有构造都该塞进 <code>From</code>，而是说：</p>
+<blockquote>
+<p>当转换是自然且稳定的，<code>From</code> 会让类型边界更顺。</p>
+</blockquote>
+<hr>
+<h2 id="五、再看-AsRef：它表达的是“给我一个借用视图”"><a href="#五、再看-AsRef：它表达的是“给我一个借用视图”" class="headerlink" title="五、再看 AsRef：它表达的是“给我一个借用视图”"></a>五、再看 <code>AsRef</code>：它表达的是“给我一个借用视图”</h2><p>示例里实现了：</p>
+<pre><code class="highlight rust"><span class="keyword">impl</span> <span class="title class_">AsRef</span>&lt;<span class="type">str</span>&gt; <span class="keyword">for</span> <span class="title class_">UserId</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">as_ref</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> &amp;<span class="type">str</span> &#123;
+        &amp;<span class="keyword">self</span>.<span class="number">0</span>
+    &#125;
+&#125;</code></pre>
+
+<p>这里和 <code>From/Into</code> 最大的不同在于：</p>
+<ul>
+<li>没有生成新拥有值</li>
+<li>没有拿走原对象</li>
+<li>只是借出了一个 <code>&amp;str</code></li>
+</ul>
+<p>也就是说，<code>AsRef</code> 解决的问题不是：</p>
+<blockquote>
+<p>怎么把这个类型变成另一个拥有型类型</p>
+</blockquote>
+<p>而是：</p>
+<blockquote>
+<p>我能不能临时把它看成另一个引用视图</p>
+</blockquote>
+<p>这类需求非常常见。</p>
+<p>比如：</p>
+<ul>
+<li><code>String</code> 看成 <code>&amp;str</code></li>
+<li><code>PathBuf</code> 看成 <code>&amp;Path</code></li>
+<li>自定义 ID 类型看成底层字符串切片</li>
+</ul>
+<h3 id="5-1-为什么-AsRef-特别适合函数参数"><a href="#5-1-为什么-AsRef-特别适合函数参数" class="headerlink" title="5.1 为什么 AsRef 特别适合函数参数"></a>5.1 为什么 <code>AsRef</code> 特别适合函数参数</h3><p>示例里查找函数是这样写的：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">lookup_user</span>&lt;T&gt;(input: T, users: &amp;HashMap&lt;UserId, UserName&gt;)
+<span class="keyword">where</span>
+    T: <span class="built_in">AsRef</span>&lt;<span class="type">str</span>&gt;,
+&#123;
+    <span class="keyword">let</span> <span class="variable">key</span> = input.<span class="title function_ invoke__">as_ref</span>();
+    ...
+&#125;</code></pre>
+
+<p>这个函数的真正需求不是“我要拥有一个新的字符串”，而是：</p>
+<blockquote>
+<p>我只需要临时得到一个 <code>&amp;str</code> 来查找。</p>
+</blockquote>
+<p>这时如果用 <code>Into&lt;String&gt;</code>，反而会有点重。</p>
+<p>因为它暗示：</p>
+<ul>
+<li>你愿意接收一次拥有型转换</li>
+<li>甚至可能触发分配</li>
+</ul>
+<p>而 <code>AsRef&lt;str&gt;</code> 更贴近真实需求：</p>
+<ul>
+<li>只借用</li>
+<li>不额外要求拥有权</li>
+</ul>
+<p>这就是为什么很多标准库和生态 API 都很喜欢 <code>AsRef&lt;Path&gt;</code>、<code>AsRef&lt;str&gt;</code> 这种写法。</p>
+<hr>
+<h2 id="六、那-Borrow-又是什么？为什么它不是另一个-AsRef？"><a href="#六、那-Borrow-又是什么？为什么它不是另一个-AsRef？" class="headerlink" title="六、那 Borrow 又是什么？为什么它不是另一个 AsRef？"></a>六、那 <code>Borrow</code> 又是什么？为什么它不是另一个 <code>AsRef</code>？</h2><p>这是最容易混的地方。</p>
+<p>示例里同时实现了：</p>
+<pre><code class="highlight rust"><span class="keyword">impl</span> <span class="title class_">Borrow</span>&lt;<span class="type">str</span>&gt; <span class="keyword">for</span> <span class="title class_">UserId</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">borrow</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> &amp;<span class="type">str</span> &#123;
+        &amp;<span class="keyword">self</span>.<span class="number">0</span>
+    &#125;
+&#125;</code></pre>
+
+<p>表面上看，它和 <code>AsRef&lt;str&gt;</code> 几乎一样：</p>
+<ul>
+<li>都返回 <code>&amp;str</code></li>
+</ul>
+<p>但它们语义上并不相同。</p>
+<h3 id="6-1-AsRef-更像“我能提供一个借用视图”"><a href="#6-1-AsRef-更像“我能提供一个借用视图”" class="headerlink" title="6.1 AsRef 更像“我能提供一个借用视图”"></a>6.1 <code>AsRef</code> 更像“我能提供一个借用视图”</h3><p>重点是视图转换。</p>
+<h3 id="6-2-Borrow-更像“在借用语义下，我和被借出的键应该被视为等价”"><a href="#6-2-Borrow-更像“在借用语义下，我和被借出的键应该被视为等价”" class="headerlink" title="6.2 Borrow 更像“在借用语义下，我和被借出的键应该被视为等价”"></a>6.2 <code>Borrow</code> 更像“在借用语义下，我和被借出的键应该被视为等价”</h3><p>这个“等价”非常关键。</p>
+<p><code>Borrow</code> 最典型的使用场景就是哈希表查找。</p>
+<p>例如在示例里：</p>
+<pre><code class="highlight rust"><span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">users</span> = HashMap::<span class="title function_ invoke__">new</span>();
+users.<span class="title function_ invoke__">insert</span>(first.<span class="title function_ invoke__">clone</span>(), <span class="title function_ invoke__">UserName</span>(<span class="string">&quot;alice&quot;</span>.<span class="title function_ invoke__">to_string</span>()));
+
+<span class="keyword">if</span> <span class="keyword">let</span> <span class="variable">Some</span>(name) = users.<span class="title function_ invoke__">get</span>(<span class="string">&quot;u-1001&quot;</span>) &#123;
+    ...
+&#125;</code></pre>
+
+<p>这里 map 的 key 类型是 <code>UserId</code>，但查找时却可以直接用 <code>&amp;str</code>。</p>
+<p>之所以成立，背后就是 <code>Borrow</code> 语义在起作用。</p>
+<p>它要求的是：</p>
+<blockquote>
+<p>你借出来的那个视图，在 <code>Eq</code> &#x2F; <code>Hash</code> 等关键行为上，要和原始键保持一致的语义关系。</p>
+</blockquote>
+<p>这就比 <code>AsRef</code> 严格得多。</p>
+<p>所以我更愿意把它理解成：</p>
+<blockquote>
+<p><code>AsRef</code> 是“给我个只读视图”，<code>Borrow</code> 是“这个借用出来的视图可以参与等价键语义”。</p>
+</blockquote>
+<hr>
+<h2 id="七、为什么不能把-Borrow-随便实现成“另一个-AsRef”？"><a href="#七、为什么不能把-Borrow-随便实现成“另一个-AsRef”？" class="headerlink" title="七、为什么不能把 Borrow 随便实现成“另一个 AsRef”？"></a>七、为什么不能把 <code>Borrow</code> 随便实现成“另一个 <code>AsRef</code>”？</h2><p>因为 <code>Borrow</code> 往往会影响容器和查找语义。</p>
+<p>如果一个类型实现了 <code>Borrow&lt;Q&gt;</code>，通常隐含前提是：</p>
+<ul>
+<li>原类型和 <code>Q</code> 在比较和哈希上语义兼容</li>
+</ul>
+<p>否则你就可能把容器语义搞乱。</p>
+<p>所以一个很实用的经验是：</p>
+<h3 id="7-1-只需要视图转换时，优先考虑-AsRef"><a href="#7-1-只需要视图转换时，优先考虑-AsRef" class="headerlink" title="7.1 只需要视图转换时，优先考虑 AsRef"></a>7.1 只需要视图转换时，优先考虑 <code>AsRef</code></h3><p>例如：</p>
+<ul>
+<li>日志打印</li>
+<li>文本解析</li>
+<li>路径读取</li>
+<li>临时只读访问</li>
+</ul>
+<h3 id="7-2-只有在确实需要“借用键查找”等语义时，再考虑-Borrow"><a href="#7-2-只有在确实需要“借用键查找”等语义时，再考虑-Borrow" class="headerlink" title="7.2 只有在确实需要“借用键查找”等语义时，再考虑 Borrow"></a>7.2 只有在确实需要“借用键查找”等语义时，再考虑 <code>Borrow</code></h3><p>例如：</p>
+<ul>
+<li><code>HashMap&lt;UserId, V&gt;</code> 可以用 <code>&amp;str</code> 查询</li>
+<li><code>BTreeMap&lt;KeyType, V&gt;</code> 可以用借用形式查询</li>
+</ul>
+<p>也就是说，<code>Borrow</code> 不是“更高级的 <code>AsRef</code>”，而是“带有等价语义要求的借用接口”。</p>
+<hr>
+<h2 id="八、设计-API-时到底怎么选？一个最实用的判断法"><a href="#八、设计-API-时到底怎么选？一个最实用的判断法" class="headerlink" title="八、设计 API 时到底怎么选？一个最实用的判断法"></a>八、设计 API 时到底怎么选？一个最实用的判断法</h2><p>如果你写函数时正在犹豫，通常可以先问自己下面两句。</p>
+<h3 id="8-1-我是要“拿到一个新值”，还是只要“临时借来看一眼”？"><a href="#8-1-我是要“拿到一个新值”，还是只要“临时借来看一眼”？" class="headerlink" title="8.1 我是要“拿到一个新值”，还是只要“临时借来看一眼”？"></a>8.1 我是要“拿到一个新值”，还是只要“临时借来看一眼”？</h3><p>如果你要的是新值，优先想：</p>
+<ul>
+<li><code>From</code></li>
+<li><code>Into</code></li>
+</ul>
+<p>如果你要的是借用视图，优先想：</p>
+<ul>
+<li><code>AsRef</code></li>
+<li><code>Borrow</code></li>
+</ul>
+<h3 id="8-2-我借出来的视图，是否还要参与键等价语义？"><a href="#8-2-我借出来的视图，是否还要参与键等价语义？" class="headerlink" title="8.2 我借出来的视图，是否还要参与键等价语义？"></a>8.2 我借出来的视图，是否还要参与键等价语义？</h3><p>如果不用，通常 <code>AsRef</code> 就够了。</p>
+<p>如果要，才考虑 <code>Borrow</code>。</p>
+<p>这两句判断，基本能覆盖大多数常见选择题。</p>
+<hr>
+<h2 id="九、一个更工程化的经验：不要为了“灵活”把所有参数都写成-Into"><a href="#九、一个更工程化的经验：不要为了“灵活”把所有参数都写成-Into" class="headerlink" title="九、一个更工程化的经验：不要为了“灵活”把所有参数都写成 Into&lt;String&gt;"></a>九、一个更工程化的经验：不要为了“灵活”把所有参数都写成 <code>Into&lt;String&gt;</code></h2><p>这是实际项目里很常见的过度设计。</p>
+<p>很多人一学会 <code>Into&lt;T&gt;</code>，就会倾向于把所有字符串参数都写成：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">foo</span>&lt;T: <span class="built_in">Into</span>&lt;<span class="type">String</span>&gt;&gt;(value: T) &#123; ... &#125;</code></pre>
+
+<p>这当然很灵活，但不一定合适。</p>
+<p>如果你的函数真正只需要：</p>
+<ul>
+<li>临时读取一个 <code>&amp;str</code></li>
+<li>不需要拥有它</li>
+<li>不需要长期保存它</li>
+</ul>
+<p>那 <code>AsRef&lt;str&gt;</code> 往往更准确。</p>
+<p>因为它表达的是更轻的需求。</p>
+<p>我自己的经验是：</p>
+<blockquote>
+<p>API 最重要的不是“尽可能什么都能接”，而是“参数约束要准确反映真实需求”。</p>
+</blockquote>
+<p>这也是 Rust 这套 trait 接口最有价值的地方。</p>
+<p>它不是单纯给你更多写法，而是在逼你把需求说清楚。</p>
+<hr>
+<h2 id="十、完整示例：一个把值转换和借用转换拆开的-demo"><a href="#十、完整示例：一个把值转换和借用转换拆开的-demo" class="headerlink" title="十、完整示例：一个把值转换和借用转换拆开的 demo"></a>十、完整示例：一个把值转换和借用转换拆开的 demo</h2><p>示例工程 <a href="workspaces/conversion-demo">workspaces&#x2F;conversion-demo</a> 里放了三组核心代码：</p>
+<ol>
+<li><code>From&lt;&amp;str&gt;</code> &#x2F; <code>From&lt;String&gt;</code> 构造 <code>UserId</code> <a href="workspaces/conversion-demo/src/main.rs">workspaces&#x2F;conversion-demo&#x2F;src&#x2F;main.rs</a></li>
+<li><code>Into&lt;UserId&gt;</code> 形式的构造函数参数 <a href="workspaces/conversion-demo/src/main.rs">workspaces&#x2F;conversion-demo&#x2F;src&#x2F;main.rs</a></li>
+<li><code>AsRef&lt;str&gt;</code> 与 <code>Borrow&lt;str&gt;</code> 在查询和借用场景下的使用 <a href="workspaces/conversion-demo/src/main.rs">workspaces&#x2F;conversion-demo&#x2F;src&#x2F;main.rs</a></li>
+</ol>
+<p>运行后可以看到：</p>
+<ul>
+<li>既能从 <code>&amp;str</code>、<code>String</code> 构造拥有型 <code>UserId</code></li>
+<li>也能在不额外拿走值的前提下借出 <code>&amp;str</code></li>
+<li><code>HashMap&lt;UserId, _&gt;</code> 还能直接用 <code>&amp;str</code> 做查找</li>
+</ul>
+<p>这三件事放在一起，正好能把四个 trait 的边界拉清楚。</p>
+<hr>
+<h2 id="十一、实际运行结果"><a href="#十一、实际运行结果" class="headerlink" title="十一、实际运行结果"></a>十一、实际运行结果</h2><p>在 <a href="workspaces/conversion-demo">workspaces&#x2F;conversion-demo</a> 下执行：</p>
+<pre><code class="highlight bash">cargo run</code></pre>
+
+<p>当前示例会输出类似结果：</p>
+<pre><code class="highlight text">first =&gt; UserId(&quot;u-1001&quot;)
+second =&gt; UserId(&quot;u-1002&quot;)
+lookup key =&gt; u-1001
+found user =&gt; alice
+lookup key =&gt; u-1001
+found user =&gt; alice
+borrowed =&gt; u-1001</code></pre>
+
+<p>这组输出分别对应：</p>
+<ul>
+<li><code>Into</code> &#x2F; <code>From</code> 构造拥有型值</li>
+<li><code>AsRef</code> 支持借用式查找参数</li>
+<li><code>Borrow</code> 支持键语义下的借用访问</li>
+</ul>
+<hr>
+<h2 id="十二、我对这-4-个-trait-的几个判断"><a href="#十二、我对这-4-个-trait-的几个判断" class="headerlink" title="十二、我对这 4 个 trait 的几个判断"></a>十二、我对这 4 个 trait 的几个判断</h2><p>这部分是我自己的经验总结。</p>
+<h3 id="12-1-先分“拥有型转换”和“借用型视图转换”，不要四个-trait-一起背"><a href="#12-1-先分“拥有型转换”和“借用型视图转换”，不要四个-trait-一起背" class="headerlink" title="12.1 先分“拥有型转换”和“借用型视图转换”，不要四个 trait 一起背"></a>12.1 先分“拥有型转换”和“借用型视图转换”，不要四个 trait 一起背</h3><p>只要这一步做了，理解会轻很多。</p>
+<h3 id="12-2-实现侧优先想-From，调用侧参数约束再考虑-Into"><a href="#12-2-实现侧优先想-From，调用侧参数约束再考虑-Into" class="headerlink" title="12.2 实现侧优先想 From，调用侧参数约束再考虑 Into"></a>12.2 实现侧优先想 <code>From</code>，调用侧参数约束再考虑 <code>Into</code></h3><p>这是最常见也最顺手的组合。</p>
+<h3 id="12-3-普通借用视图优先-AsRef，带键等价语义的借用才考虑-Borrow"><a href="#12-3-普通借用视图优先-AsRef，带键等价语义的借用才考虑-Borrow" class="headerlink" title="12.3 普通借用视图优先 AsRef，带键等价语义的借用才考虑 Borrow"></a>12.3 普通借用视图优先 <code>AsRef</code>，带键等价语义的借用才考虑 <code>Borrow</code></h3><p>不要把 <code>Borrow</code> 当成“更通用的 <code>AsRef</code>”。</p>
+<h3 id="12-4-参数约束要贴近真实需求，不要为了灵活把所有东西都写成-Into"><a href="#12-4-参数约束要贴近真实需求，不要为了灵活把所有东西都写成-Into" class="headerlink" title="12.4 参数约束要贴近真实需求，不要为了灵活把所有东西都写成 Into&lt;String&gt;"></a>12.4 参数约束要贴近真实需求，不要为了灵活把所有东西都写成 <code>Into&lt;String&gt;</code></h3><p>灵活不是目的，准确表达需求才是。</p>
+<h3 id="12-5-Rust-的这些-trait-不是在制造复杂度，而是在逼你把转换语义说清楚"><a href="#12-5-Rust-的这些-trait-不是在制造复杂度，而是在逼你把转换语义说清楚" class="headerlink" title="12.5 Rust 的这些 trait 不是在制造复杂度，而是在逼你把转换语义说清楚"></a>12.5 Rust 的这些 trait 不是在制造复杂度，而是在逼你把转换语义说清楚</h3><p>这其实是好事。</p>
+<hr>
+<h2 id="结语"><a href="#结语" class="headerlink" title="结语"></a>结语</h2><p><code>From</code>、<code>Into</code>、<code>AsRef</code>、<code>Borrow</code> 之所以容易混，不是因为它们太多，而是因为很多人一开始就把它们都当成了同一种“转换”。</p>
+<p>但只要你把问题拆成两层：</p>
+<ul>
+<li>我是要拿到一个新值</li>
+<li>还是只想借用成另一种视图</li>
+</ul>
+<p>再继续细分：</p>
+<ul>
+<li>这个借用是否还承担键等价语义</li>
+</ul>
+<p>这四个 trait 的边界就会非常清楚。</p>
+<p>所以这篇文章如果只留一句建议，我会写这句：</p>
+<blockquote>
+<p>设计转换接口时，先想“值要不要被拿走”，再想“借出来的视图是不是还承担等价语义”。</p>
+</blockquote>
+<p>这比单独背四个 trait 的定义有用得多。</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
