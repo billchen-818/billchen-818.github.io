@@ -1,0 +1,305 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust Send 与 Sync 详解：线程安全标记到底是怎么工作的</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust Send 与 Sync 详解：线程安全标记到底是怎么工作的</h1><div class="time">2026-05-28</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>很多人第一次接触 Rust 并发时，都会很快碰到两个名字：</p>
+<ul>
+<li><code>Send</code></li>
+<li><code>Sync</code></li>
+</ul>
+<p>然后通常会顺手记住一句话：</p>
+<ul>
+<li><code>Send</code> 表示可以在线程间发送</li>
+<li><code>Sync</code> 表示可以在线程间共享</li>
+</ul>
+<p>这当然不算错。</p>
+<p>但如果只停在这两句口号上，后面很快还是会混：</p>
+<ul>
+<li>为什么 <code>Rc&lt;T&gt;</code> 不行，<code>Arc&lt;T&gt;</code> 却可以</li>
+<li>为什么 <code>Mutex&lt;T&gt;</code> 看起来明明是“可变的”，却又能是 <code>Sync</code></li>
+<li>为什么很多类型既是 <code>Send</code> 也是 <code>Sync</code>，但这两个 trait 又不能混成一个</li>
+<li>为什么它们明明没方法，却能在并发里起这么大作用</li>
+</ul>
+<p>这说明：</p>
+<blockquote>
+<p>Send 和 Sync 真正难的地方，不在定义本身，而在于你是否分清了“跨线程转移值”和“跨线程共享引用”是两件不同的事。</p>
+</blockquote>
+<p>这一篇我会围绕 4 个问题展开：</p>
+<ol>
+<li><code>Send</code> 和 <code>Sync</code> 到底分别在约束什么</li>
+<li>为什么 Rust 要把它们拆成两个标记 trait</li>
+<li><code>Rc</code>、<code>Arc</code>、<code>Mutex</code>、<code>RefCell</code> 这些常见类型到底各自落在哪一边</li>
+<li>这些规则为什么能在编译期挡住数据竞争</li>
+</ol>
+<p>文中的完整示例工程在 <a href="workspaces/send-sync-demo">workspaces&#x2F;send-sync-demo</a>。</p>
+<hr>
+<h2 id="一、先说结论：Send-管“值能不能过线程边界”，Sync-管“引用能不能过线程边界”"><a href="#一、先说结论：Send-管“值能不能过线程边界”，Sync-管“引用能不能过线程边界”" class="headerlink" title="一、先说结论：Send 管“值能不能过线程边界”，Sync 管“引用能不能过线程边界”"></a>一、先说结论：<code>Send</code> 管“值能不能过线程边界”，<code>Sync</code> 管“引用能不能过线程边界”</h2><p>这是整篇文章最重要的一句话。</p>
+<p>很多人一开始会把 <code>Send</code> 和 <code>Sync</code> 都理解成“线程安全”。</p>
+<p>这虽然方向没错，但太粗。</p>
+<p>更准确的理解应该是：</p>
+<ul>
+<li><code>Send</code>：一个值的所有权，能不能安全地从一个线程转移到另一个线程</li>
+<li><code>Sync</code>：一个类型的共享引用 <code>&amp;T</code>，能不能安全地在多个线程之间共享</li>
+</ul>
+<p>所以它们其实在回答两个完全不同的问题：</p>
+<ol>
+<li>这个值能不能被搬走</li>
+<li>这个值的引用能不能被多人同时看见</li>
+</ol>
+<p>一旦把这两个问题分开，很多原本容易混淆的地方都会自然很多。</p>
+<hr>
+<h2 id="二、为什么-Rust-要把它们拆成两个-trait？"><a href="#二、为什么-Rust-要把它们拆成两个-trait？" class="headerlink" title="二、为什么 Rust 要把它们拆成两个 trait？"></a>二、为什么 Rust 要把它们拆成两个 trait？</h2><p>因为“可以移动”不等于“可以共享引用”，反过来也一样。</p>
+<p>我们先看最直观的两种并发场景。</p>
+<h3 id="2-1-场景一：把值整个交给另一个线程"><a href="#2-1-场景一：把值整个交给另一个线程" class="headerlink" title="2.1 场景一：把值整个交给另一个线程"></a>2.1 场景一：把值整个交给另一个线程</h3><p>比如通过 <code>thread::spawn(move || ...)</code>，把某个值 move 到子线程里。</p>
+<p>这时候原线程不再继续使用它，问题核心是：</p>
+<blockquote>
+<p>这个值被另一个线程接管后，会不会出事？</p>
+</blockquote>
+<p>这就是 <code>Send</code> 在管的事情。</p>
+<h3 id="2-2-场景二：多个线程一起持有同一个值的引用"><a href="#2-2-场景二：多个线程一起持有同一个值的引用" class="headerlink" title="2.2 场景二：多个线程一起持有同一个值的引用"></a>2.2 场景二：多个线程一起持有同一个值的引用</h3><p>比如几个线程共同访问一份共享状态。</p>
+<p>这时问题核心变成：</p>
+<blockquote>
+<p>即使这些线程没有拿走所有权，只是同时看这份值，会不会出事？</p>
+</blockquote>
+<p>这就是 <code>Sync</code> 在管的事情。</p>
+<p>所以 Rust 把它们拆开，不是为了增加概念，而是为了把两类完全不同的风险分开建模。</p>
+<p>我自己的理解是：</p>
+<blockquote>
+<p><code>Send</code> 关注的是“值如何换线程”，<code>Sync</code> 关注的是“引用如何跨线程同时存在”。</p>
+</blockquote>
+<p>这个区分非常本质。</p>
+<hr>
+<h2 id="三、它们为什么没有方法，却还能这么重要？"><a href="#三、它们为什么没有方法，却还能这么重要？" class="headerlink" title="三、它们为什么没有方法，却还能这么重要？"></a>三、它们为什么没有方法，却还能这么重要？</h2><p>因为 <code>Send</code> 和 <code>Sync</code> 都是标记 trait（marker trait）。</p>
+<p>也就是说，它们的作用不是提供行为方法，而是向编译器声明一种性质：</p>
+<ul>
+<li>这个类型满足某种线程安全前提</li>
+</ul>
+<p>所以它们的价值不在“你能调用什么方法”，而在：</p>
+<blockquote>
+<p>编译器会基于这些性质，决定某段并发代码是否允许通过类型检查。</p>
+</blockquote>
+<p>例如你把一个值 move 到 <code>thread::spawn</code> 的闭包里时，编译器会检查它是不是 <code>Send</code>。</p>
+<p>如果不是，代码在编译期就会被拒绝。</p>
+<p>这正是 Rust 并发模型最强的一点：</p>
+<blockquote>
+<p>很多线程安全问题，不是靠运行时兜底，而是靠类型系统提前挡掉。</p>
+</blockquote>
+<hr>
+<h2 id="四、先看-Send：什么叫“值能安全地跨线程移动”？"><a href="#四、先看-Send：什么叫“值能安全地跨线程移动”？" class="headerlink" title="四、先看 Send：什么叫“值能安全地跨线程移动”？"></a>四、先看 <code>Send</code>：什么叫“值能安全地跨线程移动”？</h2><p>示例工程 <a href="workspaces/send-sync-demo/src/main.rs">workspaces&#x2F;send-sync-demo&#x2F;src&#x2F;main.rs</a> 里先演示了一种最简单的 <code>Send</code> 场景：</p>
+<pre><code class="highlight rust"><span class="keyword">let</span> (tx, rx) = mpsc::<span class="title function_ invoke__">channel</span>();
+<span class="keyword">let</span> <span class="variable">sender</span> = thread::<span class="title function_ invoke__">spawn</span>(<span class="keyword">move</span> || &#123;
+    tx.<span class="title function_ invoke__">send</span>(<span class="string">&quot;hello from worker&quot;</span>.<span class="title function_ invoke__">to_string</span>()).<span class="title function_ invoke__">unwrap</span>();
+&#125;);
+sender.<span class="title function_ invoke__">join</span>().<span class="title function_ invoke__">unwrap</span>();
+<span class="built_in">println!</span>(<span class="string">&quot;channel recv =&gt; &#123;&#125;&quot;</span>, rx.<span class="title function_ invoke__">recv</span>().<span class="title function_ invoke__">unwrap</span>());</code></pre>
+
+<p>这里 <code>tx</code> 被 move 进了子线程。</p>
+<p>这件事之所以成立，前提就是：</p>
+<blockquote>
+<p>这个值转移到另一个线程以后，仍然能保持正确语义。</p>
+</blockquote>
+<p>这就是 <code>Send</code> 最朴素的含义。</p>
+<h3 id="4-1-Send-不是说“这个值适合多线程共享”"><a href="#4-1-Send-不是说“这个值适合多线程共享”" class="headerlink" title="4.1 Send 不是说“这个值适合多线程共享”"></a>4.1 <code>Send</code> 不是说“这个值适合多线程共享”</h3><p>这是很容易误解的一点。</p>
+<p><code>Send</code> 只是在说：</p>
+<ul>
+<li>这个值可以被另一个线程接手</li>
+</ul>
+<p>它并不自动意味着：</p>
+<ul>
+<li>多个线程可以同时共享它的引用</li>
+</ul>
+<p>也就是说：</p>
+<blockquote>
+<p><code>Send</code> 管的是所有权转移，不是共享访问。</p>
+</blockquote>
+<hr>
+<h2 id="五、再看-Sync：什么叫“共享引用能安全地跨线程存在”？"><a href="#五、再看-Sync：什么叫“共享引用能安全地跨线程存在”？" class="headerlink" title="五、再看 Sync：什么叫“共享引用能安全地跨线程存在”？"></a>五、再看 <code>Sync</code>：什么叫“共享引用能安全地跨线程存在”？</h2><p>一个很经典的定义是：</p>
+<blockquote>
+<p>如果 <code>&amp;T</code> 是 <code>Send</code>，那么 <code>T</code> 就是 <code>Sync</code>。</p>
+</blockquote>
+<p>这句话刚看很绕，但换成人话就是：</p>
+<blockquote>
+<p>如果一个类型的共享引用可以安全地被送到别的线程，那这个类型就可以被认为是 <code>Sync</code>。</p>
+</blockquote>
+<p>这里要抓住的是“共享引用”三个字。</p>
+<p><code>Sync</code> 从来不是在说：</p>
+<ul>
+<li>这个值自己一定不可变</li>
+</ul>
+<p>而是在说：</p>
+<ul>
+<li>即使多个线程同时拿到它的共享引用，也不会因为没有同步机制而出事</li>
+</ul>
+<p>这就是为什么 <code>Mutex&lt;T&gt;</code> 虽然内部允许可变访问，却仍然可以是 <code>Sync</code>。</p>
+<p>因为它已经把并发访问的同步规则包进去了。</p>
+<hr>
+<h2 id="六、为什么-Rc-不行，而-Arc-可以？"><a href="#六、为什么-Rc-不行，而-Arc-可以？" class="headerlink" title="六、为什么 Rc&lt;T&gt; 不行，而 Arc&lt;T&gt; 可以？"></a>六、为什么 <code>Rc&lt;T&gt;</code> 不行，而 <code>Arc&lt;T&gt;</code> 可以？</h2><p>这是最适合用来讲清 Send&#x2F;Sync 的一组对照。</p>
+<p>示例工程里保留了一段 <code>Rc</code> 对照：</p>
+<pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">local_only</span> = Rc::<span class="title function_ invoke__">new</span>(<span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;rc is not send&quot;</span>));
+<span class="built_in">println!</span>(<span class="string">&quot;rc strong count on main thread =&gt; &#123;&#125;&quot;</span>, Rc::<span class="title function_ invoke__">strong_count</span>(&amp;local_only));
+
+<span class="comment">// Rc&lt;T&gt; 既不是 Send，也不是 Sync。</span>
+<span class="comment">// 如果把它 move 到 thread::spawn 里，代码会直接编译失败。</span></code></pre>
+
+<p>为什么 <code>Rc&lt;T&gt;</code> 不行？</p>
+<p>因为 <code>Rc</code> 的引用计数更新不是原子的。</p>
+<p>这意味着：</p>
+<ul>
+<li>如果多个线程同时操作同一个 <code>Rc</code> 的引用计数</li>
+<li>就可能发生竞争条件</li>
+</ul>
+<p>所以它既不适合：</p>
+<ul>
+<li>把值安全地跨线程传递</li>
+<li>也不适合把共享引用安全地跨线程共享</li>
+</ul>
+<p>而 <code>Arc&lt;T&gt;</code> 则不同。</p>
+<p><code>Arc</code> 的引用计数是原子操作，所以它为跨线程共享提供了最基础的计数安全保障。</p>
+<p>但这里要非常注意一点：</p>
+<blockquote>
+<p><code>Arc&lt;T&gt;</code> 只是把“引用计数”做成了线程安全，不代表 <code>T</code> 内部就自动线程安全。</p>
+</blockquote>
+<p>这句话非常重要。</p>
+<p>很多人会把 <code>Arc&lt;T&gt;</code> 误解成“线程安全万能壳”，其实不是。</p>
+<p>如果 <code>T</code> 本身不满足对应约束，<code>Arc&lt;T&gt;</code> 也救不了它。</p>
+<hr>
+<h2 id="七、为什么-Arc-常常是对的？"><a href="#七、为什么-Arc-常常是对的？" class="headerlink" title="七、为什么 Arc&lt;Mutex&lt;T&gt;&gt; 常常是对的？"></a>七、为什么 <code>Arc&lt;Mutex&lt;T&gt;&gt;</code> 常常是对的？</h2><p>示例工程里有一段共享状态代码：</p>
+<pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">shared</span> = Arc::<span class="title function_ invoke__">new</span>(Mutex::<span class="title function_ invoke__">new</span>(<span class="built_in">vec!</span>[<span class="number">1</span>, <span class="number">2</span>, <span class="number">3</span>]));
+<span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">workers</span> = <span class="type">Vec</span>::<span class="title function_ invoke__">new</span>();
+
+<span class="keyword">for</span> <span class="variable">value</span> <span class="keyword">in</span> [<span class="number">4</span>, <span class="number">5</span>] &#123;
+    <span class="keyword">let</span> <span class="variable">shared</span> = Arc::<span class="title function_ invoke__">clone</span>(&amp;shared);
+    workers.<span class="title function_ invoke__">push</span>(thread::<span class="title function_ invoke__">spawn</span>(<span class="keyword">move</span> || &#123;
+        <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">guard</span> = shared.<span class="title function_ invoke__">lock</span>().<span class="title function_ invoke__">unwrap</span>();
+        guard.<span class="title function_ invoke__">push</span>(value);
+    &#125;));
+&#125;</code></pre>
+
+<p>最后输出：</p>
+<pre><code class="highlight text">shared vec =&gt; [1, 2, 3, 4, 5]</code></pre>
+
+<p>这一组组合为什么常见？</p>
+<p>因为它刚好把两类问题分开解决了：</p>
+<ul>
+<li><code>Arc</code> 负责跨线程共享拥有权</li>
+<li><code>Mutex</code> 负责多线程下的互斥访问</li>
+</ul>
+<p>也就是说：</p>
+<blockquote>
+<p><code>Arc</code> 解决“谁都能持有它”，<code>Mutex</code> 解决“但同一时刻只能有一个人改它”。</p>
+</blockquote>
+<p>这就是它为什么会成为共享可变状态的经典组合。</p>
+<h3 id="7-1-Mutex-为什么能是-Sync"><a href="#7-1-Mutex-为什么能是-Sync" class="headerlink" title="7.1 Mutex&lt;T&gt; 为什么能是 Sync"></a>7.1 <code>Mutex&lt;T&gt;</code> 为什么能是 <code>Sync</code></h3><p>很多人第一次接触这里会觉得有点反直觉：</p>
+<blockquote>
+<p>既然 <code>Mutex&lt;T&gt;</code> 里面可以改数据，为什么它还能被共享？</p>
+</blockquote>
+<p>因为 <code>Sync</code> 从来不是说“永远不能改”，而是说：</p>
+<blockquote>
+<p>多线程共享时，类型自身已经提供了正确的同步机制。</p>
+</blockquote>
+<p><code>Mutex</code> 恰恰就是把“修改前必须拿锁”这件事变成了类型规则。</p>
+<p>所以它可以安全地被共享引用跨线程持有。</p>
+<hr>
+<h2 id="八、那-RefCell、Cell-为什么常常和-Sync-放在一起？"><a href="#八、那-RefCell、Cell-为什么常常和-Sync-放在一起？" class="headerlink" title="八、那 RefCell&lt;T&gt;、Cell&lt;T&gt; 为什么常常和 !Sync 放在一起？"></a>八、那 <code>RefCell&lt;T&gt;</code>、<code>Cell&lt;T&gt;</code> 为什么常常和 <code>!Sync</code> 放在一起？</h2><p>因为这类 interior mutability 类型的可变性检查，主要是为单线程场景设计的。</p>
+<p>例如 <code>RefCell&lt;T&gt;</code> 的借用规则是在运行时检查的，但它本身并没有内建多线程同步机制。</p>
+<p>这意味着：</p>
+<ul>
+<li>在单线程里，它很有用</li>
+<li>但如果跨线程共享，就可能出事</li>
+</ul>
+<p>所以这类类型通常不适合作为 <code>Sync</code> 的基础。</p>
+<p>这也再次说明：</p>
+<blockquote>
+<p>“能修改内部值”和“能安全跨线程共享”完全不是同一回事。</p>
+</blockquote>
+<p>如果缺少同步原语，仅靠 interior mutability 本身并不能自动获得线程安全。</p>
+<hr>
+<h2 id="九、一个非常实用的判断法：先问“搬走”还是“共享”"><a href="#九、一个非常实用的判断法：先问“搬走”还是“共享”" class="headerlink" title="九、一个非常实用的判断法：先问“搬走”还是“共享”"></a>九、一个非常实用的判断法：先问“搬走”还是“共享”</h2><p>如果你在工程里遇到 Send&#x2F;Sync 相关报错，我建议先不要急着背 trait 表，先问自己两句：</p>
+<h3 id="9-1-这个值是不是要被-move-到另一个线程？"><a href="#9-1-这个值是不是要被-move-到另一个线程？" class="headerlink" title="9.1 这个值是不是要被 move 到另一个线程？"></a>9.1 这个值是不是要被 move 到另一个线程？</h3><p>如果是，先想 <code>Send</code>。</p>
+<p>比如：</p>
+<ul>
+<li><code>thread::spawn(move || ...)</code></li>
+<li>把任务交给工作线程</li>
+<li>把值放进跨线程 channel</li>
+</ul>
+<h3 id="9-2-这个值的引用是不是要被多个线程同时拿着？"><a href="#9-2-这个值的引用是不是要被多个线程同时拿着？" class="headerlink" title="9.2 这个值的引用是不是要被多个线程同时拿着？"></a>9.2 这个值的引用是不是要被多个线程同时拿着？</h3><p>如果是，先想 <code>Sync</code>。</p>
+<p>比如：</p>
+<ul>
+<li>多线程共享同一份只读配置</li>
+<li>多线程共享一份带锁状态</li>
+<li>多线程共享连接池、缓存句柄等抽象对象</li>
+</ul>
+<p>很多时候，这两个问题一拆开，编译错误就没那么抽象了。</p>
+<hr>
+<h2 id="十、为什么说它们是在“编译期挡数据竞争”？"><a href="#十、为什么说它们是在“编译期挡数据竞争”？" class="headerlink" title="十、为什么说它们是在“编译期挡数据竞争”？"></a>十、为什么说它们是在“编译期挡数据竞争”？</h2><p>Rust 最核心的目标之一，就是让数据竞争尽量在编译期被禁止。</p>
+<p>而 Send&#x2F;Sync 正是这套机制里非常关键的类型约束。</p>
+<p>它们的价值不是让你手动调用，而是让编译器在这些场景提前拒绝危险代码：</p>
+<ul>
+<li>把不该跨线程 move 的值 move 过去</li>
+<li>把不该跨线程共享引用的值共享出去</li>
+</ul>
+<p>这意味着很多经典并发错误，不会变成“运行久了偶发崩溃”，而会直接变成“代码过不了编译”。</p>
+<p>这也是 Rust 并发模型最有工程价值的地方：</p>
+<blockquote>
+<p>它不是在运行时帮你赌运气，而是在类型层面让错误更难发生。</p>
+</blockquote>
+<hr>
+<h2 id="十一、完整示例：一个最小-Send-Sync-对照-demo"><a href="#十一、完整示例：一个最小-Send-Sync-对照-demo" class="headerlink" title="十一、完整示例：一个最小 Send&#x2F;Sync 对照 demo"></a>十一、完整示例：一个最小 Send&#x2F;Sync 对照 demo</h2><p>示例工程 <a href="workspaces/send-sync-demo">workspaces&#x2F;send-sync-demo</a> 里放了三组最关键的代码：</p>
+<ol>
+<li>用 channel 演示 <code>Send</code> 场景 <a href="workspaces/send-sync-demo/src/main.rs">workspaces&#x2F;send-sync-demo&#x2F;src&#x2F;main.rs</a></li>
+<li>用 <code>Arc&lt;Mutex&lt;Vec&lt;_&gt;&gt;&gt;</code> 演示共享可变状态 <a href="workspaces/send-sync-demo/src/main.rs">workspaces&#x2F;send-sync-demo&#x2F;src&#x2F;main.rs</a></li>
+<li>用 <code>Rc&lt;T&gt;</code> 作为不能跨线程的对照 <a href="workspaces/send-sync-demo/src/main.rs">workspaces&#x2F;send-sync-demo&#x2F;src&#x2F;main.rs</a></li>
+</ol>
+<p>另外还加了几行静态断言：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">assert_send</span>&lt;T: <span class="built_in">Send</span>&gt;() &#123;&#125;
+<span class="keyword">fn</span> <span class="title function_">assert_sync</span>&lt;T: <span class="built_in">Sync</span>&gt;() &#123;&#125;
+
+assert_send::&lt;<span class="type">String</span>&gt;();
+assert_send::&lt;mpsc::Sender&lt;<span class="type">String</span>&gt;&gt;();
+assert_sync::&lt;Arc&lt;Mutex&lt;<span class="type">Vec</span>&lt;<span class="type">i32</span>&gt;&gt;&gt;&gt;();</code></pre>
+
+<p>这类写法很适合拿来帮助你建立直觉：</p>
+<blockquote>
+<p>Send&#x2F;Sync 不只是文档概念，它们是能被编译器真实检查的类型性质。</p>
+</blockquote>
+<hr>
+<h2 id="十二、实际运行结果"><a href="#十二、实际运行结果" class="headerlink" title="十二、实际运行结果"></a>十二、实际运行结果</h2><p>在 <a href="workspaces/send-sync-demo">workspaces&#x2F;send-sync-demo</a> 下执行：</p>
+<pre><code class="highlight bash">cargo run</code></pre>
+
+<p>当前示例会输出类似结果：</p>
+<pre><code class="highlight text">channel recv =&gt; hello from worker
+shared vec =&gt; [1, 2, 3, 4, 5]
+rc strong count on main thread =&gt; 1</code></pre>
+
+<p>这组输出分别对应：</p>
+<ul>
+<li>一个值被安全地 move 到子线程再发回主线程</li>
+<li>一份共享状态被多个线程安全修改</li>
+<li><code>Rc</code> 作为单线程引用计数工具保留在主线程中使用</li>
+</ul>
+<hr>
+<h2 id="十三、我对-Send-Sync-的几个判断"><a href="#十三、我对-Send-Sync-的几个判断" class="headerlink" title="十三、我对 Send &#x2F; Sync 的几个判断"></a>十三、我对 Send &#x2F; Sync 的几个判断</h2><p>这部分是我自己的经验总结。</p>
+<h3 id="13-1-不要把它们背成表格，先背成两个问题"><a href="#13-1-不要把它们背成表格，先背成两个问题" class="headerlink" title="13.1 不要把它们背成表格，先背成两个问题"></a>13.1 不要把它们背成表格，先背成两个问题</h3><ul>
+<li>值能不能搬走</li>
+<li>引用能不能共享</li>
+</ul>
+<p>这比单纯记“谁是 Send 谁不是”更稳。</p>
+<h3 id="13-2-Arc-不是线程安全万能壳"><a href="#13-2-Arc-不是线程安全万能壳" class="headerlink" title="13.2 Arc 不是线程安全万能壳"></a>13.2 <code>Arc</code> 不是线程安全万能壳</h3><p>它只解决原子引用计数，不自动解决内部数据竞争。</p>
+<h3 id="13-3-Mutex-之所以重要，不是因为它“能改”，而是因为它把“怎么安全地改”编码进了类型里"><a href="#13-3-Mutex-之所以重要，不是因为它“能改”，而是因为它把“怎么安全地改”编码进了类型里" class="headerlink" title="13.3 Mutex&lt;T&gt; 之所以重要，不是因为它“能改”，而是因为它把“怎么安全地改”编码进了类型里"></a>13.3 <code>Mutex&lt;T&gt;</code> 之所以重要，不是因为它“能改”，而是因为它把“怎么安全地改”编码进了类型里</h3><p>这正是 Rust 并发抽象的价值所在。</p>
+<h3 id="13-4-Rc、RefCell-这类类型并不是“差”，只是它们的设计目标本来就是单线程"><a href="#13-4-Rc、RefCell-这类类型并不是“差”，只是它们的设计目标本来就是单线程" class="headerlink" title="13.4 Rc&lt;T&gt;、RefCell&lt;T&gt; 这类类型并不是“差”，只是它们的设计目标本来就是单线程"></a>13.4 <code>Rc&lt;T&gt;</code>、<code>RefCell&lt;T&gt;</code> 这类类型并不是“差”，只是它们的设计目标本来就是单线程</h3><p>不要把 <code>!Send</code>、<code>!Sync</code> 理解成“坏类型”，而要理解成“边界不同”。</p>
+<h3 id="13-5-Send-Sync-的真正价值，是让线程安全约束提前变成编译错误"><a href="#13-5-Send-Sync-的真正价值，是让线程安全约束提前变成编译错误" class="headerlink" title="13.5 Send&#x2F;Sync 的真正价值，是让线程安全约束提前变成编译错误"></a>13.5 Send&#x2F;Sync 的真正价值，是让线程安全约束提前变成编译错误</h3><p>这比运行时再慢慢查竞争条件靠谱得多。</p>
+<hr>
+<h2 id="结语"><a href="#结语" class="headerlink" title="结语"></a>结语</h2><p>Send 和 Sync 之所以看起来抽象，是因为它们自己不做任何事，却在并发代码里决定了很多事能不能发生。</p>
+<p>但只要你把问题拆成这两层：</p>
+<ul>
+<li>这是值的跨线程转移问题</li>
+<li>还是引用的跨线程共享问题</li>
+</ul>
+<p>很多原本绕的地方都会变得很顺。</p>
+<p>所以这篇文章如果只留一句建议，我会写这句：</p>
+<blockquote>
+<p>不要把 Send&#x2F;Sync 理解成“线程安全标签”，要把它们理解成“所有权过线程边界”和“引用过线程边界”这两道不同的安全门。</p>
+</blockquote>
+<p>这句想通了，<code>Rc</code>、<code>Arc</code>、<code>Mutex</code>、<code>RefCell</code> 这些常见类型的位置基本也就都清楚了。</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
