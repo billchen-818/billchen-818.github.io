@@ -1,0 +1,1286 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>深入理解 Rust 智能指针：从原理到实战</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>深入理解 Rust 智能指针：从原理到实战</h1><div class="time">2026-06-01</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><h2 id="引言"><a href="#引言" class="headerlink" title="引言"></a>引言</h2><p>在 Rust 中，指针这个概念无处不在。最常见的指针就是引用（<code>&amp;T</code>），它只是借用数据，不拥有数据。但在很多场景下，仅靠引用是不够的：</p>
+<ul>
+<li>你想让数据分配在堆上，而不是栈上</li>
+<li>你想让多个所有者共享同一份数据</li>
+<li>你想在运行时动态决定数据的类型</li>
+<li>你想在不可变结构中实现内部可变性</li>
+</ul>
+<p>这些需求，普通引用都无法满足。Rust 为此提供了<strong>智能指针</strong>。</p>
+<p>智能指针不同于普通引用的关键在于：</p>
+<blockquote>
+<p>智能指针不仅持有指向数据的指针，还拥有元数据和额外能力（如自动释放内存、引用计数等）。</p>
+</blockquote>
+<p>实际上，<code>String</code> 和 <code>Vec&lt;T&gt;</code> 本质上也是智能指针——它们拥有自己的堆内存，并在 Drop 时自动释放。</p>
+<p>这篇文章会从浅到深，按以下层级讲解 Rust 智能指针：</p>
+<ul>
+<li><code>Box&lt;T&gt;</code>：最简单的堆分配智能指针</li>
+<li><code>Deref</code> 和 <code>Drop</code> trait：智能指针的核心机制</li>
+<li><code>Rc&lt;T&gt;</code> 和 <code>Arc&lt;T&gt;</code>：引用计数与共享所有权</li>
+<li><code>Cell&lt;T&gt;</code> 和 <code>RefCell&lt;T&gt;</code>：内部可变性</li>
+<li><code>Cow&lt;T&gt;</code>：写时克隆</li>
+<li><code>Pin&lt;T&gt;</code>：固定内存位置</li>
+<li>自定义智能指针</li>
+<li>各智能指针实现的 trait 总览</li>
+</ul>
+<p>目标不是罗列 API，而是让你理解每种智能指针<strong>为什么存在</strong>、<strong>什么时候用</strong>、<strong>底层怎么工作</strong>。</p>
+<hr>
+<h2 id="一、Box：最基础的堆分配智能指针"><a href="#一、Box：最基础的堆分配智能指针" class="headerlink" title="一、Box&lt;T&gt;：最基础的堆分配智能指针"></a>一、Box&lt;T&gt;：最基础的堆分配智能指针</h2><h3 id="1-1-为什么需要-Box"><a href="#1-1-为什么需要-Box" class="headerlink" title="1.1 为什么需要 Box"></a>1.1 为什么需要 Box</h3><p>Rust 默认将数据分配在栈上。栈分配快，但有两个限制：</p>
+<ol>
+<li><strong>栈上数据的大小必须在编译期确定</strong></li>
+<li><strong>栈的空间有限</strong>，不适合存放大型数据</li>
+</ol>
+<p><code>Box&lt;T&gt;</code> 的作用很简单：把数据从栈移到堆上，同时保持唯一所有权。</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">x</span> = <span class="type">Box</span>::<span class="title function_ invoke__">new</span>(<span class="number">42</span>);
+    <span class="built_in">println!</span>(<span class="string">&quot;x = &#123;&#125;&quot;</span>, x); <span class="comment">// 输出：x = 42</span>
+&#125;</code></pre>
+
+<p>这里 <code>x</code> 是一个 <code>Box&lt;i32&gt;</code>，它在栈上只占一个指针大小（8 字节），而实际的 <code>42</code> 存储在堆上。当 <code>x</code> 离开作用域时，堆上的内存自动释放。</p>
+<h3 id="1-2-Box-的典型使用场景"><a href="#1-2-Box-的典型使用场景" class="headerlink" title="1.2 Box 的典型使用场景"></a>1.2 Box 的典型使用场景</h3><p><strong>场景一：递归类型</strong></p>
+<p>Rust 中的递归类型如果不使用 Box，编译器无法确定类型的大小：</p>
+<pre><code class="highlight rust"><span class="comment">// 编译失败：递归类型具有无限大小</span>
+<span class="comment">// enum List &#123;</span>
+<span class="comment">//     Cons(i32, List),</span>
+<span class="comment">//     Nil,</span>
+<span class="comment">// &#125;</span>
+
+<span class="comment">// 使用 Box 打断无限递归</span>
+<span class="keyword">enum</span> <span class="title class_">List</span> &#123;
+    <span class="title function_ invoke__">Cons</span>(<span class="type">i32</span>, <span class="type">Box</span>&lt;List&gt;),
+    Nil,
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">list</span> = List::<span class="title function_ invoke__">Cons</span>(<span class="number">1</span>,
+        <span class="type">Box</span>::<span class="title function_ invoke__">new</span>(List::<span class="title function_ invoke__">Cons</span>(<span class="number">2</span>,
+            <span class="type">Box</span>::<span class="title function_ invoke__">new</span>(List::<span class="title function_ invoke__">Cons</span>(<span class="number">3</span>,
+                <span class="type">Box</span>::<span class="title function_ invoke__">new</span>(List::Nil)
+            ))
+        ))
+    );
+    <span class="title function_ invoke__">print_list</span>(&amp;list);
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">print_list</span>(list: &amp;List) &#123;
+    <span class="keyword">match</span> list &#123;
+        List::<span class="title function_ invoke__">Cons</span>(val, next) =&gt; &#123;
+            <span class="built_in">print!</span>(<span class="string">&quot;&#123;&#125; -&gt; &quot;</span>, val);
+            <span class="title function_ invoke__">print_list</span>(next);
+        &#125;
+        List::Nil =&gt; <span class="built_in">println!</span>(<span class="string">&quot;Nil&quot;</span>),
+    &#125;
+&#125;
+<span class="comment">// 输出：1 -&gt; 2 -&gt; 3 -&gt; Nil</span></code></pre>
+
+<p>为什么 <code>Box</code> 能解决这个问题？因为 <code>Box&lt;List&gt;</code> 的大小是固定的——就是一个指针的大小（8 字节），不管它指向的 <code>List</code> 有多复杂。</p>
+<p><strong>场景二：Trait 对象</strong></p>
+<p>当你需要在运行时处理不同类型但它们实现了同一个 trait 时：</p>
+<pre><code class="highlight rust"><span class="keyword">trait</span> <span class="title class_">Animal</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">speak</span>(&amp;<span class="keyword">self</span>);
+&#125;
+
+<span class="keyword">struct</span> <span class="title class_">Dog</span>;
+<span class="keyword">struct</span> <span class="title class_">Cat</span>;
+
+<span class="keyword">impl</span> <span class="title class_">Animal</span> <span class="keyword">for</span> <span class="title class_">Dog</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">speak</span>(&amp;<span class="keyword">self</span>) &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;汪汪！&quot;</span>);
+    &#125;
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">Animal</span> <span class="keyword">for</span> <span class="title class_">Cat</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">speak</span>(&amp;<span class="keyword">self</span>) &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;喵喵！&quot;</span>);
+    &#125;
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">animals</span>: <span class="type">Vec</span>&lt;<span class="type">Box</span>&lt;<span class="keyword">dyn</span> Animal&gt;&gt; = <span class="built_in">vec!</span>[
+        <span class="type">Box</span>::<span class="title function_ invoke__">new</span>(Dog),
+        <span class="type">Box</span>::<span class="title function_ invoke__">new</span>(Cat),
+        <span class="type">Box</span>::<span class="title function_ invoke__">new</span>(Dog),
+    ];
+
+    <span class="keyword">for</span> <span class="variable">animal</span> <span class="keyword">in</span> &amp;animals &#123;
+        animal.<span class="title function_ invoke__">speak</span>();
+    &#125;
+&#125;
+<span class="comment">// 输出：</span>
+<span class="comment">// 汪汪！</span>
+<span class="comment">// 喵喵！</span>
+<span class="comment">// 汪汪！</span></code></pre>
+
+<p><code>Box&lt;dyn Animal&gt;</code> 是一个胖指针，包含两个指针：一个指向数据，一个指向 vtable（虚函数表）。</p>
+<p><strong>场景三：转移大型数据的所有权而不拷贝</strong></p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">large_data</span> = <span class="type">Box</span>::<span class="title function_ invoke__">new</span>([<span class="number">0u8</span>; <span class="number">1_000_000</span>]); <span class="comment">// 1MB 数据在堆上</span>
+    <span class="keyword">let</span> <span class="variable">moved</span> = large_data; <span class="comment">// 只移动了 8 字节的指针，而不是拷贝 1MB</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;len = &#123;&#125;&quot;</span>, moved.<span class="title function_ invoke__">len</span>());
+&#125;</code></pre>
+
+<h3 id="1-3-Box-的内存布局"><a href="#1-3-Box-的内存布局" class="headerlink" title="1.3 Box 的内存布局"></a>1.3 Box 的内存布局</h3><pre><code class="highlight plaintext">栈上                     堆上
+┌──────────┐            ┌──────────┐
+│ Box&lt;i32&gt; │ ────────&gt;  │   42     │
+│ (8 bytes)│            │ (4 bytes)│
+└──────────┘            └──────────┘</code></pre>
+
+<p>当 <code>Box</code> 离开作用域时：</p>
+<ol>
+<li>先调用 <code>T</code> 的 <code>drop</code>（如果 T 实现了 Drop）</li>
+<li>然后释放堆上的内存</li>
+</ol>
+<h3 id="1-4-Box-实现的关键-Trait"><a href="#1-4-Box-实现的关键-Trait" class="headerlink" title="1.4 Box 实现的关键 Trait"></a>1.4 Box 实现的关键 Trait</h3><table>
+<thead>
+<tr>
+<th>Trait</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Deref&lt;Target=T&gt;</code></td>
+<td>允许 <code>*box_val</code> 解引用到 <code>T</code></td>
+</tr>
+<tr>
+<td><code>DerefMut&lt;Target=T&gt;</code></td>
+<td>允许 <code>*box_val</code> 可变解引用到 <code>T</code></td>
+</tr>
+<tr>
+<td><code>Drop</code></td>
+<td>自动释放堆内存</td>
+</tr>
+<tr>
+<td><code>AsRef&lt;T&gt;</code></td>
+<td>可以转换为 <code>&amp;T</code></td>
+</tr>
+<tr>
+<td><code>AsMut&lt;T&gt;</code></td>
+<td>可以转换为 <code>&amp;mut T</code></td>
+</tr>
+<tr>
+<td><code>Borrow&lt;T&gt;</code></td>
+<td>可用于 HashMap 查找等场景</td>
+</tr>
+<tr>
+<td><code>Display</code>（当 T: Display）</td>
+<td>可以直接 <code>println!</code></td>
+</tr>
+<tr>
+<td><code>Clone</code>（当 T: Clone）</td>
+<td>深拷贝堆上的数据</td>
+</tr>
+<tr>
+<td><code>PartialEq</code>, <code>Eq</code>, <code>PartialOrd</code>, <code>Ord</code>, <code>Hash</code></td>
+<td>委托给内部类型</td>
+</tr>
+</tbody></table>
+<hr>
+<h2 id="二、Deref-和-Drop：智能指针的核心-Trait"><a href="#二、Deref-和-Drop：智能指针的核心-Trait" class="headerlink" title="二、Deref 和 Drop：智能指针的核心 Trait"></a>二、Deref 和 Drop：智能指针的核心 Trait</h2><p>任何类型只要实现了 <code>Deref</code> 和 <code>Drop</code> 这两个 trait，就可以被称为智能指针。这两个 trait 是智能指针的灵魂。</p>
+<h3 id="2-1-Deref-Trait：解引用与自动解引用转换"><a href="#2-1-Deref-Trait：解引用与自动解引用转换" class="headerlink" title="2.1 Deref Trait：解引用与自动解引用转换"></a>2.1 Deref Trait：解引用与自动解引用转换</h3><p><code>Deref</code> trait 定义在标准库中：</p>
+<pre><code class="highlight rust"><span class="keyword">pub</span> <span class="keyword">trait</span> <span class="title class_">Deref</span> &#123;
+    <span class="keyword">type</span> <span class="title class_">Target</span>: ?<span class="built_in">Sized</span>;
+    <span class="keyword">fn</span> <span class="title function_">deref</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> &amp;<span class="keyword">Self</span>::Target;
+&#125;
+
+<span class="keyword">pub</span> <span class="keyword">trait</span> <span class="title class_">DerefMut</span>: Deref &#123;
+    <span class="keyword">fn</span> <span class="title function_">deref_mut</span>(&amp;<span class="keyword">mut</span> <span class="keyword">self</span>) <span class="punctuation">-&gt;</span> &amp;<span class="keyword">mut</span> <span class="keyword">Self</span>::Target;
+&#125;</code></pre>
+
+<h4 id="显式解引用"><a href="#显式解引用" class="headerlink" title="显式解引用"></a>显式解引用</h4><p>当你对智能指针使用 <code>*</code> 操作符时，实际上调用的是 <code>deref()</code> 方法：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">x</span> = <span class="type">Box</span>::<span class="title function_ invoke__">new</span>(<span class="number">5</span>);
+
+    <span class="comment">// 这两行效果一样</span>
+    <span class="keyword">let</span> <span class="variable">y</span> = *x;                <span class="comment">// 语法糖</span>
+    <span class="keyword">let</span> <span class="variable">z</span> = *(x.<span class="title function_ invoke__">deref</span>());     <span class="comment">// 实际发生的事</span>
+
+    <span class="built_in">println!</span>(<span class="string">&quot;y = &#123;&#125;, z = &#123;&#125;&quot;</span>, y, z);
+&#125;</code></pre>
+
+<p>编译器遇到 <code>*x</code> 时，实际执行的是 <code>*(x.deref())</code>：先调用 <code>deref()</code> 得到 <code>&amp;T</code>，再对 <code>&amp;T</code> 解引用得到 <code>T</code>。</p>
+<h4 id="自动解引用转换（Deref-Coercion）"><a href="#自动解引用转换（Deref-Coercion）" class="headerlink" title="自动解引用转换（Deref Coercion）"></a>自动解引用转换（Deref Coercion）</h4><p>这是 Rust 中最优雅的设计之一。编译器会自动插入 <code>deref()</code> 调用来完成类型转换：</p>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">hello</span>(name: &amp;<span class="type">str</span>) &#123;
+    <span class="built_in">println!</span>(<span class="string">&quot;Hello, &#123;&#125;!&quot;</span>, name);
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">name</span> = <span class="type">Box</span>::<span class="title function_ invoke__">new</span>(<span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;Rust&quot;</span>));
+
+    <span class="comment">// name 的类型是 Box&lt;String&gt;</span>
+    <span class="comment">// 编译器自动执行：</span>
+    <span class="comment">// &amp;Box&lt;String&gt; -&gt; &amp;String（通过 Box 的 Deref）</span>
+    <span class="comment">// &amp;String -&gt; &amp;str（通过 String 的 Deref）</span>
+    <span class="title function_ invoke__">hello</span>(&amp;name);
+&#125;</code></pre>
+
+<p>自动解引用转换链条：</p>
+<pre><code class="highlight plaintext">&amp;Box&lt;String&gt;
+    │ Box::deref()
+    ▼
+&amp;String
+    │ String::deref()
+    ▼
+&amp;str</code></pre>
+
+<p><strong>转换规则：</strong></p>
+<table>
+<thead>
+<tr>
+<th>原始类型</th>
+<th>目标类型</th>
+<th>要求</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>&amp;T</code></td>
+<td><code>&amp;U</code></td>
+<td>T: Deref&lt;Target&#x3D;U&gt;</td>
+</tr>
+<tr>
+<td><code>&amp;mut T</code></td>
+<td><code>&amp;mut U</code></td>
+<td>T: DerefMut&lt;Target&#x3D;U&gt;</td>
+</tr>
+<tr>
+<td><code>&amp;mut T</code></td>
+<td><code>&amp;U</code></td>
+<td>T: Deref&lt;Target&#x3D;U&gt;</td>
+</tr>
+</tbody></table>
+<p>注意：<code>&amp;T</code> 不能自动转换为 <code>&amp;mut U</code>，因为这违反了借用规则。</p>
+<h4 id="自定义类型实现-Deref"><a href="#自定义类型实现-Deref" class="headerlink" title="自定义类型实现 Deref"></a>自定义类型实现 Deref</h4><pre><code class="highlight rust"><span class="keyword">use</span> std::ops::Deref;
+
+<span class="keyword">struct</span> <span class="title class_">MyBox</span>&lt;T&gt;(T);
+
+<span class="keyword">impl</span>&lt;T&gt; MyBox&lt;T&gt; &#123;
+    <span class="keyword">fn</span> <span class="title function_">new</span>(x: T) <span class="punctuation">-&gt;</span> MyBox&lt;T&gt; &#123;
+        <span class="title function_ invoke__">MyBox</span>(x)
+    &#125;
+&#125;
+
+<span class="keyword">impl</span>&lt;T&gt; Deref <span class="keyword">for</span> <span class="title class_">MyBox</span>&lt;T&gt; &#123;
+    <span class="keyword">type</span> <span class="title class_">Target</span> = T;
+
+    <span class="keyword">fn</span> <span class="title function_">deref</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> &amp;T &#123;
+        &amp;<span class="keyword">self</span>.<span class="number">0</span>
+    &#125;
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">x</span> = MyBox::<span class="title function_ invoke__">new</span>(<span class="number">42</span>);
+    <span class="built_in">assert_eq!</span>(*x, <span class="number">42</span>);
+
+    <span class="keyword">let</span> <span class="variable">s</span> = MyBox::<span class="title function_ invoke__">new</span>(<span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;hello&quot;</span>));
+    <span class="comment">// 自动解引用：&amp;MyBox&lt;String&gt; -&gt; &amp;String -&gt; &amp;str</span>
+    <span class="keyword">let</span> <span class="variable">r</span>: &amp;<span class="type">str</span> = &amp;s;
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, r);
+&#125;</code></pre>
+
+<h4 id="箭头操作符的原理"><a href="#箭头操作符的原理" class="headerlink" title="-&gt; 箭头操作符的原理"></a><code>-&gt;</code> 箭头操作符的原理</h4><p>在 C&#x2F;C++ 中，<code>-&gt;</code> 用于通过指针访问成员。Rust 中没有 <code>-&gt;</code> 操作符，取而代之的是 <strong>自动解引用（auto-deref）机制</strong>。</p>
+<p>当你使用 <code>.</code> 运算符调用方法时，Rust 编译器会自动进行以下尝试：</p>
+<ol>
+<li>首先尝试直接调用 <code>T</code> 的方法</li>
+<li>然后尝试 <code>&amp;T</code> 的方法</li>
+<li>然后尝试 <code>&amp;mut T</code> 的方法</li>
+<li>如果 <code>T</code> 实现了 <code>Deref</code>，则尝试 <code>&lt;T as Deref&gt;::Target</code> 的方法</li>
+<li>递归重复以上过程</li>
+</ol>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">boxed_str</span> = <span class="type">Box</span>::<span class="title function_ invoke__">new</span>(<span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;hello&quot;</span>));
+
+    <span class="comment">// 调用 String::len()</span>
+    <span class="comment">// 编译器自动执行：boxed_str.deref().len()</span>
+    <span class="comment">// 即：Box&lt;String&gt; -&gt; &amp;String -&gt; len()</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;长度：&#123;&#125;&quot;</span>, boxed_str.<span class="title function_ invoke__">len</span>());
+
+    <span class="comment">// 调用 str::is_empty()</span>
+    <span class="comment">// 编译器自动执行：boxed_str.deref().deref().is_empty()</span>
+    <span class="comment">// 即：Box&lt;String&gt; -&gt; &amp;String -&gt; &amp;str -&gt; is_empty()</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;是否为空：&#123;&#125;&quot;</span>, boxed_str.<span class="title function_ invoke__">is_empty</span>());
+&#125;</code></pre>
+
+<p>这就是为什么 Rust 不需要 <code>-&gt;</code> 操作符——<code>.</code> 运算符通过 Deref 链自动完成了。</p>
+<h3 id="2-2-Drop-Trait：自动清理资源"><a href="#2-2-Drop-Trait：自动清理资源" class="headerlink" title="2.2 Drop Trait：自动清理资源"></a>2.2 Drop Trait：自动清理资源</h3><p><code>Drop</code> trait 让你在值离开作用域时执行自定义清理逻辑：</p>
+<pre><code class="highlight rust"><span class="keyword">pub</span> <span class="keyword">trait</span> <span class="title class_">Drop</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">drop</span>(&amp;<span class="keyword">mut</span> <span class="keyword">self</span>);
+&#125;</code></pre>
+
+<pre><code class="highlight rust"><span class="keyword">struct</span> <span class="title class_">Resource</span> &#123;
+    name: <span class="type">String</span>,
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">Drop</span> <span class="keyword">for</span> <span class="title class_">Resource</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">drop</span>(&amp;<span class="keyword">mut</span> <span class="keyword">self</span>) &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;释放资源：&#123;&#125;&quot;</span>, <span class="keyword">self</span>.name);
+    &#125;
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">r1</span> = Resource &#123; name: <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;数据库连接&quot;</span>) &#125;;
+    <span class="keyword">let</span> <span class="variable">r2</span> = Resource &#123; name: <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;文件句柄&quot;</span>) &#125;;
+    <span class="built_in">println!</span>(<span class="string">&quot;资源已创建&quot;</span>);
+&#125; <span class="comment">// r2 先释放，r1 后释放（与创建顺序相反）</span>
+
+<span class="comment">// 输出：</span>
+<span class="comment">// 资源已创建</span>
+<span class="comment">// 释放资源：文件句柄</span>
+<span class="comment">// 释放资源：数据库连接</span></code></pre>
+
+<p><strong>Drop 的关键规则：</strong></p>
+<ol>
+<li><strong>不能手动调用 <code>drop</code> 方法</strong>（会导致双重释放），但可以使用 <code>std::mem::drop</code> 提前释放：</li>
+</ol>
+<pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">r</span> = Resource &#123; name: <span class="type">String</span>::<span class="title function_ invoke__">from</span>(<span class="string">&quot;临时资源&quot;</span>) &#125;;
+    <span class="built_in">println!</span>(<span class="string">&quot;使用资源&quot;</span>);
+
+    <span class="comment">// r.drop(); // 编译错误！不能手动调用 drop</span>
+
+    <span class="title function_ invoke__">drop</span>(r); <span class="comment">// 正确：使用 std::mem::drop 提前释放</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;资源已提前释放&quot;</span>);
+&#125;</code></pre>
+
+<ol start="2">
+<li><p><strong>Drop 顺序</strong>：变量按声明的逆序 drop，结构体字段按声明顺序 drop。</p>
+</li>
+<li><p><strong>Drop 与 Copy 互斥</strong>：实现了 <code>Drop</code> 的类型不能实现 <code>Copy</code>，因为 Copy 的语义是简单位拷贝，而 Drop 意味着析构时有副作用，两者冲突。</p>
+</li>
+</ol>
+<hr>
+<h2 id="三、Rc：单线程引用计数"><a href="#三、Rc：单线程引用计数" class="headerlink" title="三、Rc&lt;T&gt;：单线程引用计数"></a>三、Rc&lt;T&gt;：单线程引用计数</h2><h3 id="3-1-为什么需要-Rc"><a href="#3-1-为什么需要-Rc" class="headerlink" title="3.1 为什么需要 Rc"></a>3.1 为什么需要 Rc</h3><p>Rust 的所有权规则是：一个值只有一个所有者。但有些场景下，一份数据确实需要被多个地方同时”拥有”。</p>
+<p>比如图数据结构中，多个边可能指向同一个节点。此时就需要 <code>Rc&lt;T&gt;</code>（Reference Counting）。</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> std::rc::Rc;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">data</span> = Rc::<span class="title function_ invoke__">new</span>(<span class="built_in">vec!</span>[<span class="number">1</span>, <span class="number">2</span>, <span class="number">3</span>]);
+
+    <span class="keyword">let</span> <span class="variable">a</span> = Rc::<span class="title function_ invoke__">clone</span>(&amp;data); <span class="comment">// 引用计数 +1</span>
+    <span class="keyword">let</span> <span class="variable">b</span> = Rc::<span class="title function_ invoke__">clone</span>(&amp;data); <span class="comment">// 引用计数 +1</span>
+
+    <span class="built_in">println!</span>(<span class="string">&quot;引用计数：&#123;&#125;&quot;</span>, Rc::<span class="title function_ invoke__">strong_count</span>(&amp;data)); <span class="comment">// 3</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;a = &#123;:?&#125;&quot;</span>, a);
+    <span class="built_in">println!</span>(<span class="string">&quot;b = &#123;:?&#125;&quot;</span>, b);
+
+    <span class="title function_ invoke__">drop</span>(a);
+    <span class="built_in">println!</span>(<span class="string">&quot;drop a 后引用计数：&#123;&#125;&quot;</span>, Rc::<span class="title function_ invoke__">strong_count</span>(&amp;data)); <span class="comment">// 2</span>
+
+    <span class="title function_ invoke__">drop</span>(b);
+    <span class="built_in">println!</span>(<span class="string">&quot;drop b 后引用计数：&#123;&#125;&quot;</span>, Rc::<span class="title function_ invoke__">strong_count</span>(&amp;data)); <span class="comment">// 1</span>
+&#125; <span class="comment">// data 的引用计数降为 0，堆上的 Vec 被释放</span></code></pre>
+
+<h3 id="3-2-Rc-的内存布局"><a href="#3-2-Rc-的内存布局" class="headerlink" title="3.2 Rc 的内存布局"></a>3.2 Rc 的内存布局</h3><pre><code class="highlight plaintext">栈上                         堆上
+┌─────────┐               ┌────────────────────┐
+│ Rc&lt;T&gt; a │ ──────────&gt;   │ strong_count: 3     │
+└─────────┘       ┌────&gt;  │ weak_count: 1       │
+┌─────────┐       │       │ data: Vec&lt;1,2,3&gt;    │
+│ Rc&lt;T&gt; b │ ──────┘       └────────────────────┘
+└─────────┘       │
+┌─────────┐       │
+│ Rc&lt;T&gt; c │ ──────┘
+└─────────┘</code></pre>
+
+<p>所有 <code>Rc</code> 指针都指向同一块堆内存，该内存包含引用计数和实际数据。</p>
+<h3 id="3-3-Rc-clone-vs-clone"><a href="#3-3-Rc-clone-vs-clone" class="headerlink" title="3.3 Rc::clone vs clone"></a>3.3 Rc::clone vs clone</h3><p>需要注意，<code>Rc::clone(&amp;data)</code> 并不做深拷贝。它只是增加引用计数，这是 O(1) 操作。而 <code>data.clone()</code> 虽然效果一样，但习惯上用 <code>Rc::clone()</code> 来明确表达意图。</p>
+<h3 id="3-4-Weak-引用：打破循环引用"><a href="#3-4-Weak-引用：打破循环引用" class="headerlink" title="3.4 Weak 引用：打破循环引用"></a>3.4 Weak 引用：打破循环引用</h3><p><code>Rc</code> 的一个陷阱是循环引用会导致内存泄漏：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> std::rc::&#123;Rc, Weak&#125;;
+<span class="keyword">use</span> std::cell::RefCell;
+
+<span class="meta">#[derive(Debug)]</span>
+<span class="keyword">struct</span> <span class="title class_">Node</span> &#123;
+    value: <span class="type">i32</span>,
+    parent: RefCell&lt;Weak&lt;Node&gt;&gt;,     <span class="comment">// 弱引用指向父节点</span>
+    children: RefCell&lt;<span class="type">Vec</span>&lt;Rc&lt;Node&gt;&gt;&gt;, <span class="comment">// 强引用指向子节点</span>
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">leaf</span> = Rc::<span class="title function_ invoke__">new</span>(Node &#123;
+        value: <span class="number">3</span>,
+        parent: RefCell::<span class="title function_ invoke__">new</span>(Weak::<span class="title function_ invoke__">new</span>()),
+        children: RefCell::<span class="title function_ invoke__">new</span>(<span class="built_in">vec!</span>[]),
+    &#125;);
+
+    <span class="built_in">println!</span>(<span class="string">&quot;leaf 的强引用计数: &#123;&#125;&quot;</span>, Rc::<span class="title function_ invoke__">strong_count</span>(&amp;leaf)); <span class="comment">// 1</span>
+
+    <span class="keyword">let</span> <span class="variable">branch</span> = Rc::<span class="title function_ invoke__">new</span>(Node &#123;
+        value: <span class="number">5</span>,
+        parent: RefCell::<span class="title function_ invoke__">new</span>(Weak::<span class="title function_ invoke__">new</span>()),
+        children: RefCell::<span class="title function_ invoke__">new</span>(<span class="built_in">vec!</span>[Rc::<span class="title function_ invoke__">clone</span>(&amp;leaf)]),
+    &#125;);
+
+    <span class="comment">// 设置 leaf 的父节点为 branch（使用弱引用）</span>
+    *leaf.parent.<span class="title function_ invoke__">borrow_mut</span>() = Rc::<span class="title function_ invoke__">downgrade</span>(&amp;branch);
+
+    <span class="built_in">println!</span>(<span class="string">&quot;branch 的强引用计数: &#123;&#125;&quot;</span>, Rc::<span class="title function_ invoke__">strong_count</span>(&amp;branch)); <span class="comment">// 1</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;branch 的弱引用计数: &#123;&#125;&quot;</span>, Rc::<span class="title function_ invoke__">weak_count</span>(&amp;branch));   <span class="comment">// 1</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;leaf 的强引用计数: &#123;&#125;&quot;</span>, Rc::<span class="title function_ invoke__">strong_count</span>(&amp;leaf));     <span class="comment">// 2</span>
+
+    <span class="comment">// 通过 Weak 访问父节点</span>
+    <span class="keyword">if</span> <span class="keyword">let</span> <span class="variable">Some</span>(parent) = leaf.parent.<span class="title function_ invoke__">borrow</span>().<span class="title function_ invoke__">upgrade</span>() &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;leaf 的父节点值: &#123;&#125;&quot;</span>, parent.value); <span class="comment">// 5</span>
+    &#125;
+&#125;</code></pre>
+
+<p><strong>Weak 的关键特性：</strong></p>
+<ul>
+<li><code>Rc::downgrade(&amp;rc)</code> 创建 Weak 引用</li>
+<li><code>weak.upgrade()</code> 返回 <code>Option&lt;Rc&lt;T&gt;&gt;</code>，如果数据已释放则返回 <code>None</code></li>
+<li>Weak 引用不增加 strong_count，不阻止数据释放</li>
+<li>用于解决循环引用问题</li>
+</ul>
+<h3 id="3-5-Rc-实现的关键-Trait"><a href="#3-5-Rc-实现的关键-Trait" class="headerlink" title="3.5 Rc 实现的关键 Trait"></a>3.5 Rc 实现的关键 Trait</h3><table>
+<thead>
+<tr>
+<th>Trait</th>
+<th>作用</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Deref&lt;Target=T&gt;</code></td>
+<td>直接访问内部数据</td>
+</tr>
+<tr>
+<td><code>Drop</code></td>
+<td>减少引用计数，计数为 0 时释放</td>
+</tr>
+<tr>
+<td><code>Clone</code></td>
+<td>增加引用计数（非深拷贝）</td>
+</tr>
+<tr>
+<td><code>Display</code>（当 T: Display）</td>
+<td>委托给内部类型</td>
+</tr>
+<tr>
+<td><code>Debug</code>（当 T: Debug）</td>
+<td>委托给内部类型</td>
+</tr>
+<tr>
+<td><code>PartialEq</code>, <code>Eq</code>, <code>PartialOrd</code>, <code>Ord</code></td>
+<td>委托给内部类型</td>
+</tr>
+<tr>
+<td><code>AsRef&lt;T&gt;</code></td>
+<td>转换为 <code>&amp;T</code></td>
+</tr>
+<tr>
+<td><code>From&lt;T&gt;</code></td>
+<td>从 T 构造 Rc&lt;T&gt;</td>
+</tr>
+</tbody></table>
+<blockquote>
+<p><strong>注意：Rc 没有实现 <code>DerefMut</code></strong>，因为多个 Rc 共享数据，允许可变访问会违反借用规则。要修改 Rc 内部数据，需要搭配 <code>RefCell</code>。</p>
+</blockquote>
+<hr>
+<h2 id="四、Arc：多线程引用计数"><a href="#四、Arc：多线程引用计数" class="headerlink" title="四、Arc&lt;T&gt;：多线程引用计数"></a>四、Arc&lt;T&gt;：多线程引用计数</h2><p><code>Arc&lt;T&gt;</code>（Atomic Reference Counting）是 <code>Rc&lt;T&gt;</code> 的线程安全版本。</p>
+<h3 id="4-1-Rc-不能跨线程"><a href="#4-1-Rc-不能跨线程" class="headerlink" title="4.1 Rc 不能跨线程"></a>4.1 Rc 不能跨线程</h3><pre><code class="highlight rust"><span class="keyword">use</span> std::rc::Rc;
+<span class="keyword">use</span> std::thread;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">data</span> = Rc::<span class="title function_ invoke__">new</span>(<span class="number">42</span>);
+    <span class="comment">// let handle = thread::spawn(move || &#123;</span>
+    <span class="comment">//     println!(&quot;&#123;&#125;&quot;, data);</span>
+    <span class="comment">// &#125;);</span>
+    <span class="comment">// 编译错误：Rc&lt;i32&gt; cannot be sent between threads safely</span>
+    <span class="comment">// 因为 Rc 没有实现 Send trait</span>
+&#125;</code></pre>
+
+<h3 id="4-2-Arc-的使用"><a href="#4-2-Arc-的使用" class="headerlink" title="4.2 Arc 的使用"></a>4.2 Arc 的使用</h3><pre><code class="highlight rust"><span class="keyword">use</span> std::sync::Arc;
+<span class="keyword">use</span> std::thread;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">data</span> = Arc::<span class="title function_ invoke__">new</span>(<span class="built_in">vec!</span>[<span class="number">1</span>, <span class="number">2</span>, <span class="number">3</span>, <span class="number">4</span>, <span class="number">5</span>]);
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">handles</span> = <span class="built_in">vec!</span>[];
+
+    <span class="keyword">for</span> <span class="variable">i</span> <span class="keyword">in</span> <span class="number">0</span>..<span class="number">3</span> &#123;
+        <span class="keyword">let</span> <span class="variable">data</span> = Arc::<span class="title function_ invoke__">clone</span>(&amp;data);
+        <span class="keyword">let</span> <span class="variable">handle</span> = thread::<span class="title function_ invoke__">spawn</span>(<span class="keyword">move</span> || &#123;
+            <span class="built_in">println!</span>(<span class="string">&quot;线程 &#123;&#125; 看到: &#123;:?&#125;&quot;</span>, i, data);
+        &#125;);
+        handles.<span class="title function_ invoke__">push</span>(handle);
+    &#125;
+
+    <span class="keyword">for</span> <span class="variable">handle</span> <span class="keyword">in</span> handles &#123;
+        handle.<span class="title function_ invoke__">join</span>().<span class="title function_ invoke__">unwrap</span>();
+    &#125;
+&#125;</code></pre>
+
+<h3 id="4-3-Arc-Mutex：多线程共享可变数据"><a href="#4-3-Arc-Mutex：多线程共享可变数据" class="headerlink" title="4.3 Arc + Mutex：多线程共享可变数据"></a>4.3 Arc + Mutex：多线程共享可变数据</h3><pre><code class="highlight rust"><span class="keyword">use</span> std::sync::&#123;Arc, Mutex&#125;;
+<span class="keyword">use</span> std::thread;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">counter</span> = Arc::<span class="title function_ invoke__">new</span>(Mutex::<span class="title function_ invoke__">new</span>(<span class="number">0</span>));
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">handles</span> = <span class="built_in">vec!</span>[];
+
+    <span class="keyword">for</span> <span class="variable">_</span> <span class="keyword">in</span> <span class="number">0</span>..<span class="number">10</span> &#123;
+        <span class="keyword">let</span> <span class="variable">counter</span> = Arc::<span class="title function_ invoke__">clone</span>(&amp;counter);
+        <span class="keyword">let</span> <span class="variable">handle</span> = thread::<span class="title function_ invoke__">spawn</span>(<span class="keyword">move</span> || &#123;
+            <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">num</span> = counter.<span class="title function_ invoke__">lock</span>().<span class="title function_ invoke__">unwrap</span>();
+            *num += <span class="number">1</span>;
+        &#125;);
+        handles.<span class="title function_ invoke__">push</span>(handle);
+    &#125;
+
+    <span class="keyword">for</span> <span class="variable">handle</span> <span class="keyword">in</span> handles &#123;
+        handle.<span class="title function_ invoke__">join</span>().<span class="title function_ invoke__">unwrap</span>();
+    &#125;
+
+    <span class="built_in">println!</span>(<span class="string">&quot;最终计数: &#123;&#125;&quot;</span>, *counter.<span class="title function_ invoke__">lock</span>().<span class="title function_ invoke__">unwrap</span>()); <span class="comment">// 10</span>
+&#125;</code></pre>
+
+<h3 id="4-4-Rc-vs-Arc-对比"><a href="#4-4-Rc-vs-Arc-对比" class="headerlink" title="4.4 Rc vs Arc 对比"></a>4.4 Rc vs Arc 对比</h3><table>
+<thead>
+<tr>
+<th>特性</th>
+<th>Rc&lt;T&gt;</th>
+<th>Arc&lt;T&gt;</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>线程安全</td>
+<td>否</td>
+<td>是</td>
+</tr>
+<tr>
+<td>引用计数操作</td>
+<td>普通整数运算</td>
+<td>原子操作</td>
+</tr>
+<tr>
+<td>性能</td>
+<td>更快</td>
+<td>稍慢（原子操作开销）</td>
+</tr>
+<tr>
+<td>实现 Send</td>
+<td>否</td>
+<td>是（当 T: Send + Sync）</td>
+</tr>
+<tr>
+<td>实现 Sync</td>
+<td>否</td>
+<td>是（当 T: Send + Sync）</td>
+</tr>
+<tr>
+<td>使用场景</td>
+<td>单线程</td>
+<td>多线程</td>
+</tr>
+</tbody></table>
+<hr>
+<h2 id="五、Cell-和-RefCell：内部可变性"><a href="#五、Cell-和-RefCell：内部可变性" class="headerlink" title="五、Cell&lt;T&gt; 和 RefCell&lt;T&gt;：内部可变性"></a>五、Cell&lt;T&gt; 和 RefCell&lt;T&gt;：内部可变性</h2><h3 id="5-1-什么是内部可变性"><a href="#5-1-什么是内部可变性" class="headerlink" title="5.1 什么是内部可变性"></a>5.1 什么是内部可变性</h3><p>Rust 的借用规则是：</p>
+<ul>
+<li>同一时刻，要么有多个不可变引用，要么有一个可变引用</li>
+<li>引用必须始终有效</li>
+</ul>
+<p>内部可变性（Interior Mutability）是一种设计模式：即使持有不可变引用，也能修改内部数据。</p>
+<h3 id="5-2-Cell：适用于-Copy-类型"><a href="#5-2-Cell：适用于-Copy-类型" class="headerlink" title="5.2 Cell&lt;T&gt;：适用于 Copy 类型"></a>5.2 Cell&lt;T&gt;：适用于 Copy 类型</h3><p><code>Cell&lt;T&gt;</code> 通过”整体替换”来实现内部可变性，不涉及引用，因此是安全的：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> std::cell::Cell;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">x</span> = Cell::<span class="title function_ invoke__">new</span>(<span class="number">42</span>);
+
+    <span class="comment">// 即使 x 是不可变绑定，也能修改内部值</span>
+    x.<span class="title function_ invoke__">set</span>(<span class="number">100</span>);
+    <span class="built_in">println!</span>(<span class="string">&quot;x = &#123;&#125;&quot;</span>, x.<span class="title function_ invoke__">get</span>()); <span class="comment">// 100</span>
+
+    <span class="comment">// Cell 通过值的拷贝来读取，要求 T: Copy</span>
+    <span class="keyword">let</span> <span class="variable">val</span> = x.<span class="title function_ invoke__">get</span>();
+    <span class="built_in">println!</span>(<span class="string">&quot;val = &#123;&#125;&quot;</span>, val);
+&#125;</code></pre>
+
+<p><strong>Cell 的工作原理：</strong></p>
+<ul>
+<li><code>get()</code> 返回值的拷贝（要求 T: Copy）</li>
+<li><code>set()</code> 替换内部的值</li>
+<li>不提供内部数据的引用，从而绕开借用检查</li>
+<li>零运行时开销</li>
+</ul>
+<p><strong>Cell 在结构体中的使用：</strong></p>
+<pre><code class="highlight rust"><span class="keyword">use</span> std::cell::Cell;
+
+<span class="keyword">struct</span> <span class="title class_">Counter</span> &#123;
+    count: Cell&lt;<span class="type">u32</span>&gt;,
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">Counter</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">new</span>() <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123;
+        Counter &#123; count: Cell::<span class="title function_ invoke__">new</span>(<span class="number">0</span>) &#125;
+    &#125;
+
+    <span class="comment">// 注意：&amp;self 是不可变引用，但仍然可以修改 count</span>
+    <span class="keyword">fn</span> <span class="title function_">increment</span>(&amp;<span class="keyword">self</span>) &#123;
+        <span class="keyword">self</span>.count.<span class="title function_ invoke__">set</span>(<span class="keyword">self</span>.count.<span class="title function_ invoke__">get</span>() + <span class="number">1</span>);
+    &#125;
+
+    <span class="keyword">fn</span> <span class="title function_">get</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> <span class="type">u32</span> &#123;
+        <span class="keyword">self</span>.count.<span class="title function_ invoke__">get</span>()
+    &#125;
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">counter</span> = Counter::<span class="title function_ invoke__">new</span>();
+    counter.<span class="title function_ invoke__">increment</span>();
+    counter.<span class="title function_ invoke__">increment</span>();
+    counter.<span class="title function_ invoke__">increment</span>();
+    <span class="built_in">println!</span>(<span class="string">&quot;计数: &#123;&#125;&quot;</span>, counter.<span class="title function_ invoke__">get</span>()); <span class="comment">// 3</span>
+&#125;</code></pre>
+
+<h3 id="5-3-RefCell：运行时借用检查"><a href="#5-3-RefCell：运行时借用检查" class="headerlink" title="5.3 RefCell&lt;T&gt;：运行时借用检查"></a>5.3 RefCell&lt;T&gt;：运行时借用检查</h3><p><code>Cell</code> 只能用于 Copy 类型。对于 String、Vec 等非 Copy 类型，需要使用 <code>RefCell&lt;T&gt;</code>。</p>
+<p><code>RefCell</code> 将借用检查从编译期推迟到运行时：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> std::cell::RefCell;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">data</span> = RefCell::<span class="title function_ invoke__">new</span>(<span class="built_in">vec!</span>[<span class="number">1</span>, <span class="number">2</span>, <span class="number">3</span>]);
+
+    <span class="comment">// borrow() 返回 Ref&lt;T&gt;，类似 &amp;T</span>
+    &#123;
+        <span class="keyword">let</span> <span class="variable">borrowed</span> = data.<span class="title function_ invoke__">borrow</span>();
+        <span class="built_in">println!</span>(<span class="string">&quot;数据: &#123;:?&#125;&quot;</span>, borrowed);
+    &#125;
+
+    <span class="comment">// borrow_mut() 返回 RefMut&lt;T&gt;，类似 &amp;mut T</span>
+    &#123;
+        <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">borrowed_mut</span> = data.<span class="title function_ invoke__">borrow_mut</span>();
+        borrowed_mut.<span class="title function_ invoke__">push</span>(<span class="number">4</span>);
+        <span class="built_in">println!</span>(<span class="string">&quot;修改后: &#123;:?&#125;&quot;</span>, borrowed_mut);
+    &#125;
+
+    <span class="comment">// 运行时违反借用规则会 panic</span>
+    <span class="comment">// let r1 = data.borrow();</span>
+    <span class="comment">// let r2 = data.borrow_mut(); // panic! 已有不可变借用时不能可变借用</span>
+&#125;</code></pre>
+
+<h3 id="5-4-Rc：共享的可变数据"><a href="#5-4-Rc：共享的可变数据" class="headerlink" title="5.4 Rc&lt;RefCell&lt;T&gt;&gt;：共享的可变数据"></a>5.4 Rc&lt;RefCell&lt;T&gt;&gt;：共享的可变数据</h3><p>这是 Rust 中最常见的组合模式之一——Rc 提供多重所有权，RefCell 提供内部可变性：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> std::rc::Rc;
+<span class="keyword">use</span> std::cell::RefCell;
+
+<span class="meta">#[derive(Debug)]</span>
+<span class="keyword">struct</span> <span class="title class_">SharedList</span> &#123;
+    data: Rc&lt;RefCell&lt;<span class="type">Vec</span>&lt;<span class="type">String</span>&gt;&gt;&gt;,
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">SharedList</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">new</span>() <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123;
+        SharedList &#123;
+            data: Rc::<span class="title function_ invoke__">new</span>(RefCell::<span class="title function_ invoke__">new</span>(<span class="type">Vec</span>::<span class="title function_ invoke__">new</span>())),
+        &#125;
+    &#125;
+
+    <span class="keyword">fn</span> <span class="title function_">share</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> SharedList &#123;
+        SharedList &#123;
+            data: Rc::<span class="title function_ invoke__">clone</span>(&amp;<span class="keyword">self</span>.data),
+        &#125;
+    &#125;
+
+    <span class="keyword">fn</span> <span class="title function_">push</span>(&amp;<span class="keyword">self</span>, item: &amp;<span class="type">str</span>) &#123;
+        <span class="keyword">self</span>.data.<span class="title function_ invoke__">borrow_mut</span>().<span class="title function_ invoke__">push</span>(item.<span class="title function_ invoke__">to_string</span>());
+    &#125;
+
+    <span class="keyword">fn</span> <span class="title function_">print</span>(&amp;<span class="keyword">self</span>) &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;&#123;:?&#125;&quot;</span>, <span class="keyword">self</span>.data.<span class="title function_ invoke__">borrow</span>());
+    &#125;
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">list1</span> = SharedList::<span class="title function_ invoke__">new</span>();
+    <span class="keyword">let</span> <span class="variable">list2</span> = list1.<span class="title function_ invoke__">share</span>();
+    <span class="keyword">let</span> <span class="variable">list3</span> = list1.<span class="title function_ invoke__">share</span>();
+
+    list1.<span class="title function_ invoke__">push</span>(<span class="string">&quot;来自 list1&quot;</span>);
+    list2.<span class="title function_ invoke__">push</span>(<span class="string">&quot;来自 list2&quot;</span>);
+    list3.<span class="title function_ invoke__">push</span>(<span class="string">&quot;来自 list3&quot;</span>);
+
+    <span class="comment">// 三个列表看到的数据完全一样</span>
+    list1.<span class="title function_ invoke__">print</span>(); <span class="comment">// [&quot;来自 list1&quot;, &quot;来自 list2&quot;, &quot;来自 list3&quot;]</span>
+    list2.<span class="title function_ invoke__">print</span>(); <span class="comment">// [&quot;来自 list1&quot;, &quot;来自 list2&quot;, &quot;来自 list3&quot;]</span>
+&#125;</code></pre>
+
+<h3 id="5-5-Cell-vs-RefCell-对比"><a href="#5-5-Cell-vs-RefCell-对比" class="headerlink" title="5.5 Cell vs RefCell 对比"></a>5.5 Cell vs RefCell 对比</h3><table>
+<thead>
+<tr>
+<th>特性</th>
+<th>Cell&lt;T&gt;</th>
+<th>RefCell&lt;T&gt;</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>适用类型</td>
+<td>T: Copy</td>
+<td>任意类型</td>
+</tr>
+<tr>
+<td>借用检查</td>
+<td>无需（通过值拷贝）</td>
+<td>运行时检查</td>
+</tr>
+<tr>
+<td>获取引用</td>
+<td>不能（只能 get&#x2F;set）</td>
+<td>可以（borrow&#x2F;borrow_mut）</td>
+</tr>
+<tr>
+<td>Panic 风险</td>
+<td>无</td>
+<td>违反借用规则时会 panic</td>
+</tr>
+<tr>
+<td>线程安全</td>
+<td>否</td>
+<td>否</td>
+</tr>
+<tr>
+<td>性能开销</td>
+<td>零额外开销</td>
+<td>维护借用计数</td>
+</tr>
+</tbody></table>
+<h3 id="5-6-Cell-和-RefCell-实现的关键-Trait"><a href="#5-6-Cell-和-RefCell-实现的关键-Trait" class="headerlink" title="5.6 Cell 和 RefCell 实现的关键 Trait"></a>5.6 Cell 和 RefCell 实现的关键 Trait</h3><p><strong>Cell&lt;T&gt;：</strong></p>
+<table>
+<thead>
+<tr>
+<th>Trait</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Send</code>（当 T: Send时）</td>
+<td>可以发送到其他线程（但不是 Sync）</td>
+</tr>
+<tr>
+<td><code>Clone</code>（当 T: Copy）</td>
+<td>克隆内部值</td>
+</tr>
+<tr>
+<td><code>Default</code>（当 T: Default）</td>
+<td>创建默认值</td>
+</tr>
+<tr>
+<td><code>PartialEq</code>（当 T: PartialEq + Copy）</td>
+<td>比较内部值</td>
+</tr>
+<tr>
+<td><code>From&lt;T&gt;</code></td>
+<td>从 T 构造</td>
+</tr>
+</tbody></table>
+<p><strong>RefCell&lt;T&gt;：</strong></p>
+<table>
+<thead>
+<tr>
+<th>Trait</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Send</code>（当 T: Send）</td>
+<td>可以发送到其他线程</td>
+</tr>
+<tr>
+<td><code>!Sync</code></td>
+<td>不能跨线程共享引用</td>
+</tr>
+<tr>
+<td><code>Clone</code>（当 T: Clone）</td>
+<td>深拷贝内部数据</td>
+</tr>
+<tr>
+<td><code>Default</code>（当 T: Default）</td>
+<td>创建默认值</td>
+</tr>
+<tr>
+<td><code>From&lt;T&gt;</code></td>
+<td>从 T 构造</td>
+</tr>
+</tbody></table>
+<blockquote>
+<p><strong>注意：Cell 和 RefCell 都没有实现 <code>Deref</code></strong>。它们不是传统意义上的”指向数据”的指针，而是”包装数据”的容器。访问内部数据必须通过 <code>get()</code>&#x2F;<code>set()</code> 或 <code>borrow()</code>&#x2F;<code>borrow_mut()</code>。</p>
+</blockquote>
+<hr>
+<h2 id="六、Cow：写时克隆"><a href="#六、Cow：写时克隆" class="headerlink" title="六、Cow&lt;T&gt;：写时克隆"></a>六、Cow&lt;T&gt;：写时克隆</h2><h3 id="6-1-什么是-Cow"><a href="#6-1-什么是-Cow" class="headerlink" title="6.1 什么是 Cow"></a>6.1 什么是 Cow</h3><p><code>Cow</code>（Clone on Write）是一个枚举，可以持有借用数据或拥有数据：</p>
+<pre><code class="highlight rust"><span class="keyword">pub</span> <span class="keyword">enum</span> <span class="title class_">Cow</span>&lt;<span class="symbol">&#x27;a</span>, B: ?<span class="built_in">Sized</span> + <span class="built_in">ToOwned</span> + <span class="symbol">&#x27;a</span>&gt; &#123;
+    <span class="title function_ invoke__">Borrowed</span>(&amp;<span class="symbol">&#x27;a</span> B),
+    <span class="title function_ invoke__">Owned</span>(&lt;B <span class="keyword">as</span> <span class="built_in">ToOwned</span>&gt;::Owned),
+&#125;</code></pre>
+
+<p>核心思想是：<strong>如果只读，就用借用；需要修改时，才克隆一份拥有的副本</strong>。</p>
+<h3 id="6-2-基本使用"><a href="#6-2-基本使用" class="headerlink" title="6.2 基本使用"></a>6.2 基本使用</h3><pre><code class="highlight rust"><span class="keyword">use</span> std::borrow::Cow;
+
+<span class="keyword">fn</span> <span class="title function_">process_name</span>(name: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> Cow&lt;<span class="type">str</span>&gt; &#123;
+    <span class="keyword">if</span> name.<span class="title function_ invoke__">contains</span>(<span class="string">&#x27; &#x27;</span>) &#123;
+        <span class="comment">// 需要修改，创建新的 String</span>
+        <span class="keyword">let</span> <span class="variable">trimmed</span> = name.<span class="title function_ invoke__">trim</span>().<span class="title function_ invoke__">to_string</span>();
+        Cow::<span class="title function_ invoke__">Owned</span>(trimmed)
+    &#125; <span class="keyword">else</span> &#123;
+        <span class="comment">// 不需要修改，直接借用</span>
+        Cow::<span class="title function_ invoke__">Borrowed</span>(name)
+    &#125;
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">name1</span> = <span class="title function_ invoke__">process_name</span>(<span class="string">&quot;Rust&quot;</span>);        <span class="comment">// Borrowed，零拷贝</span>
+    <span class="keyword">let</span> <span class="variable">name2</span> = <span class="title function_ invoke__">process_name</span>(<span class="string">&quot; Rust Lang &quot;</span>); <span class="comment">// Owned，发生了克隆</span>
+
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, name1); <span class="comment">// Rust</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, name2); <span class="comment">// Rust Lang</span>
+
+    <span class="comment">// Cow 实现了 Deref，可以直接当 &amp;str 用</span>
+    <span class="keyword">let</span> <span class="variable">len</span>: <span class="type">usize</span> = name1.<span class="title function_ invoke__">len</span>();
+    <span class="built_in">println!</span>(<span class="string">&quot;长度: &#123;&#125;&quot;</span>, len);
+&#125;</code></pre>
+
+<h3 id="6-3-Cow-配合-to-mut-实现延迟克隆"><a href="#6-3-Cow-配合-to-mut-实现延迟克隆" class="headerlink" title="6.3 Cow 配合 to_mut 实现延迟克隆"></a>6.3 Cow 配合 to_mut 实现延迟克隆</h3><pre><code class="highlight rust"><span class="keyword">use</span> std::borrow::Cow;
+
+<span class="keyword">fn</span> <span class="title function_">ensure_uppercase</span>(input: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> Cow&lt;<span class="type">str</span>&gt; &#123;
+    <span class="keyword">if</span> input.<span class="title function_ invoke__">chars</span>().<span class="title function_ invoke__">all</span>(|c| c.<span class="title function_ invoke__">is_uppercase</span>() || !c.<span class="title function_ invoke__">is_alphabetic</span>()) &#123;
+        Cow::<span class="title function_ invoke__">Borrowed</span>(input)
+    &#125; <span class="keyword">else</span> &#123;
+        Cow::<span class="title function_ invoke__">Owned</span>(input.<span class="title function_ invoke__">to_uppercase</span>())
+    &#125;
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">s1</span> = <span class="title function_ invoke__">ensure_uppercase</span>(<span class="string">&quot;HELLO&quot;</span>);     <span class="comment">// 不克隆</span>
+    <span class="keyword">let</span> <span class="variable">s2</span> = <span class="title function_ invoke__">ensure_uppercase</span>(<span class="string">&quot;hello&quot;</span>);     <span class="comment">// 克隆</span>
+
+    <span class="keyword">match</span> &amp;s1 &#123;
+        Cow::<span class="title function_ invoke__">Borrowed</span>(_) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;s1 是借用的&quot;</span>),
+        Cow::<span class="title function_ invoke__">Owned</span>(_) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;s1 是拥有的&quot;</span>),
+    &#125;
+    <span class="keyword">match</span> &amp;s2 &#123;
+        Cow::<span class="title function_ invoke__">Borrowed</span>(_) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;s2 是借用的&quot;</span>),
+        Cow::<span class="title function_ invoke__">Owned</span>(_) =&gt; <span class="built_in">println!</span>(<span class="string">&quot;s2 是拥有的&quot;</span>),
+    &#125;
+&#125;
+<span class="comment">// 输出：</span>
+<span class="comment">// s1 是借用的</span>
+<span class="comment">// s2 是拥有的</span></code></pre>
+
+<h3 id="6-4-Cow-实现的关键-Trait"><a href="#6-4-Cow-实现的关键-Trait" class="headerlink" title="6.4 Cow 实现的关键 Trait"></a>6.4 Cow 实现的关键 Trait</h3><table>
+<thead>
+<tr>
+<th>Trait</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Deref&lt;Target=B&gt;</code></td>
+<td>无论 Borrowed 还是 Owned 都能当 &amp;B 用</td>
+</tr>
+<tr>
+<td><code>Clone</code></td>
+<td>克隆底层数据</td>
+</tr>
+<tr>
+<td><code>Display</code>（当 B: Display）</td>
+<td>委托给内部数据</td>
+</tr>
+<tr>
+<td><code>Eq</code>, <code>Ord</code>, <code>Hash</code> 等</td>
+<td>委托给内部数据</td>
+</tr>
+<tr>
+<td><code>From&lt;&amp;&#39;a B&gt;</code></td>
+<td>创建 Borrowed 变体</td>
+</tr>
+<tr>
+<td><code>From&lt;Owned&gt;</code></td>
+<td>创建 Owned 变体</td>
+</tr>
+<tr>
+<td><code>AsRef&lt;B&gt;</code></td>
+<td>转换为 &amp;B</td>
+</tr>
+</tbody></table>
+<hr>
+<h2 id="七、Pin：固定内存位置"><a href="#七、Pin：固定内存位置" class="headerlink" title="七、Pin&lt;T&gt;：固定内存位置"></a>七、Pin&lt;T&gt;：固定内存位置</h2><h3 id="7-1-为什么需要-Pin"><a href="#7-1-为什么需要-Pin" class="headerlink" title="7.1 为什么需要 Pin"></a>7.1 为什么需要 Pin</h3><p>Rust 中的大部分类型都可以安全地在内存中移动。但某些类型包含自引用结构（一个字段指向自身的另一个字段），移动后内部指针会失效。</p>
+<p><code>async/await</code> 是 Pin 最重要的使用场景——编译器生成的 Future 可能包含自引用。</p>
+<h3 id="7-2-Unpin-和-Unpin"><a href="#7-2-Unpin-和-Unpin" class="headerlink" title="7.2 Unpin 和 !Unpin"></a>7.2 Unpin 和 !Unpin</h3><ul>
+<li>实现了 <code>Unpin</code> 的类型可以自由移动（几乎所有类型默认实现 Unpin）</li>
+<li><code>!Unpin</code> 的类型被 Pin 后不能移动</li>
+</ul>
+<pre><code class="highlight rust"><span class="keyword">use</span> std::pin::Pin;
+<span class="keyword">use</span> std::marker::PhantomPinned;
+
+<span class="keyword">struct</span> <span class="title class_">SelfRef</span> &#123;
+    data: <span class="type">String</span>,
+    ptr: *<span class="keyword">const</span> <span class="type">String</span>, <span class="comment">// 指向 data 的裸指针</span>
+    _pin: PhantomPinned, <span class="comment">// 标记为 !Unpin</span>
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">SelfRef</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">new</span>(data: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> Pin&lt;<span class="type">Box</span>&lt;<span class="keyword">Self</span>&gt;&gt; &#123;
+        <span class="keyword">let</span> <span class="variable">s</span> = SelfRef &#123;
+            data: data.<span class="title function_ invoke__">to_string</span>(),
+            ptr: std::ptr::<span class="title function_ invoke__">null</span>(),
+            _pin: PhantomPinned,
+        &#125;;
+        <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">boxed</span> = <span class="type">Box</span>::<span class="title function_ invoke__">pin</span>(s);
+
+        <span class="comment">// 安全地设置自引用指针</span>
+        <span class="keyword">let</span> <span class="variable">self_ptr</span>: *<span class="keyword">const</span> <span class="type">String</span> = &amp;boxed.data;
+        <span class="keyword">unsafe</span> &#123;
+            <span class="keyword">let</span> <span class="variable">mut_ref</span> = Pin::<span class="title function_ invoke__">as_mut</span>(&amp;<span class="keyword">mut</span> boxed);
+            Pin::<span class="title function_ invoke__">get_unchecked_mut</span>(mut_ref).ptr = self_ptr;
+        &#125;
+
+        boxed
+    &#125;
+
+    <span class="keyword">fn</span> <span class="title function_">get_data</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> &amp;<span class="type">str</span> &#123;
+        &amp;<span class="keyword">self</span>.data
+    &#125;
+
+    <span class="keyword">fn</span> <span class="title function_">get_ptr_data</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> &amp;<span class="type">str</span> &#123;
+        <span class="keyword">unsafe</span> &#123; &amp;*<span class="keyword">self</span>.ptr &#125;
+    &#125;
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">pinned</span> = SelfRef::<span class="title function_ invoke__">new</span>(<span class="string">&quot;hello&quot;</span>);
+    <span class="built_in">println!</span>(<span class="string">&quot;data: &#123;&#125;&quot;</span>, pinned.<span class="title function_ invoke__">get_data</span>());
+    <span class="built_in">println!</span>(<span class="string">&quot;ptr -&gt; data: &#123;&#125;&quot;</span>, pinned.<span class="title function_ invoke__">get_ptr_data</span>());
+
+    <span class="comment">// 以下操作无法编译，因为 SelfRef 是 !Unpin：</span>
+    <span class="comment">// let moved = *pinned; // 错误!</span>
+&#125;</code></pre>
+
+<h3 id="7-3-Pin-在-async-中的作用"><a href="#7-3-Pin-在-async-中的作用" class="headerlink" title="7.3 Pin 在 async 中的作用"></a>7.3 Pin 在 async 中的作用</h3><pre><code class="highlight rust"><span class="keyword">use</span> std::pin::Pin;
+<span class="keyword">use</span> std::future::Future;
+
+<span class="comment">// Future trait 的定义要求 &amp;mut self 被 Pin 包裹</span>
+<span class="comment">// pub trait Future &#123;</span>
+<span class="comment">//     type Output;</span>
+<span class="comment">//     fn poll(self: Pin&lt;&amp;mut Self&gt;, cx: &amp;mut Context&lt;&#x27;_&gt;) -&gt; Poll&lt;Self::Output&gt;;</span>
+<span class="comment">// &#125;</span>
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">example</span>() <span class="punctuation">-&gt;</span> <span class="type">i32</span> &#123;
+    <span class="keyword">let</span> <span class="variable">x</span> = <span class="number">42</span>;
+    <span class="comment">// await 点之间可能产生自引用</span>
+    <span class="title function_ invoke__">some_async_fn</span>().<span class="keyword">await</span>;
+    x <span class="comment">// x 的引用必须在 await 之后依然有效</span>
+&#125;
+
+<span class="keyword">async</span> <span class="keyword">fn</span> <span class="title function_">some_async_fn</span>() &#123;&#125;
+
+<span class="keyword">fn</span> <span class="title function_">use_future</span>(fut: Pin&lt;<span class="type">Box</span>&lt;<span class="keyword">dyn</span> Future&lt;Output = <span class="type">i32</span>&gt;&gt;&gt;) &#123;
+    <span class="comment">// fut 被固定在内存中，不会被移动</span>
+    <span class="comment">// 这保证了 Future 内部的自引用是安全的</span>
+    <span class="keyword">let</span> <span class="variable">_</span> = fut;
+&#125;</code></pre>
+
+<h3 id="7-4-Pin-实现的关键-Trait"><a href="#7-4-Pin-实现的关键-Trait" class="headerlink" title="7.4 Pin 实现的关键 Trait"></a>7.4 Pin 实现的关键 Trait</h3><table>
+<thead>
+<tr>
+<th>Trait</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Deref&lt;Target=T&gt;</code>（当 P: Deref）</td>
+<td>Pin&lt;P&gt; 可以解引用访问底层数据</td>
+</tr>
+<tr>
+<td><code>DerefMut</code>（当 P: DerefMut, T: Unpin）</td>
+<td>只有 Unpin 类型才能获取 &amp;mut T</td>
+</tr>
+<tr>
+<td><code>Display</code>, <code>Debug</code> 等</td>
+<td>委托给内部指针</td>
+</tr>
+<tr>
+<td><code>Future</code>（当 P: DerefMut, P::Target: Future）</td>
+<td>Pin&lt;Box&lt;dyn Future&gt;&gt; 本身就是 Future</td>
+</tr>
+</tbody></table>
+<hr>
+<h2 id="八、自定义智能指针"><a href="#八、自定义智能指针" class="headerlink" title="八、自定义智能指针"></a>八、自定义智能指针</h2><p>了解了 Deref 和 Drop 之后，我们可以实现自己的智能指针。下面实现一个简单的带日志的 Box：</p>
+<pre><code class="highlight rust"><span class="keyword">use</span> std::ops::&#123;Deref, DerefMut&#125;;
+<span class="keyword">use</span> std::fmt;
+
+<span class="keyword">struct</span> <span class="title class_">LogBox</span>&lt;T: fmt::<span class="built_in">Debug</span>&gt; &#123;
+    name: <span class="type">String</span>,
+    data: <span class="type">Box</span>&lt;T&gt;,
+&#125;
+
+<span class="keyword">impl</span>&lt;T: fmt::<span class="built_in">Debug</span>&gt; LogBox&lt;T&gt; &#123;
+    <span class="keyword">fn</span> <span class="title function_">new</span>(name: &amp;<span class="type">str</span>, data: T) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;[&#123;&#125;] 创建，值为 &#123;:?&#125;&quot;</span>, name, data);
+        LogBox &#123;
+            name: name.<span class="title function_ invoke__">to_string</span>(),
+            data: <span class="type">Box</span>::<span class="title function_ invoke__">new</span>(data),
+        &#125;
+    &#125;
+&#125;
+
+<span class="keyword">impl</span>&lt;T: fmt::<span class="built_in">Debug</span>&gt; Deref <span class="keyword">for</span> <span class="title class_">LogBox</span>&lt;T&gt; &#123;
+    <span class="keyword">type</span> <span class="title class_">Target</span> = T;
+
+    <span class="keyword">fn</span> <span class="title function_">deref</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> &amp;T &#123;
+        &amp;<span class="keyword">self</span>.data
+    &#125;
+&#125;
+
+<span class="keyword">impl</span>&lt;T: fmt::<span class="built_in">Debug</span>&gt; DerefMut <span class="keyword">for</span> <span class="title class_">LogBox</span>&lt;T&gt; &#123;
+    <span class="keyword">fn</span> <span class="title function_">deref_mut</span>(&amp;<span class="keyword">mut</span> <span class="keyword">self</span>) <span class="punctuation">-&gt;</span> &amp;<span class="keyword">mut</span> T &#123;
+        &amp;<span class="keyword">mut</span> <span class="keyword">self</span>.data
+    &#125;
+&#125;
+
+<span class="keyword">impl</span>&lt;T: fmt::<span class="built_in">Debug</span>&gt; <span class="built_in">Drop</span> <span class="keyword">for</span> <span class="title class_">LogBox</span>&lt;T&gt; &#123;
+    <span class="keyword">fn</span> <span class="title function_">drop</span>(&amp;<span class="keyword">mut</span> <span class="keyword">self</span>) &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;[&#123;&#125;] 释放，最终值为 &#123;:?&#125;&quot;</span>, <span class="keyword">self</span>.name, <span class="keyword">self</span>.data);
+    &#125;
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">x</span> = LogBox::<span class="title function_ invoke__">new</span>(<span class="string">&quot;计数器&quot;</span>, <span class="number">0i32</span>);
+
+    *x += <span class="number">1</span>;
+    *x += <span class="number">1</span>;
+    *x += <span class="number">1</span>;
+
+    <span class="built_in">println!</span>(<span class="string">&quot;当前值: &#123;&#125;&quot;</span>, *x);
+
+    <span class="comment">// 自动解引用：直接调用 i32 的方法</span>
+    <span class="built_in">println!</span>(<span class="string">&quot;绝对值: &#123;&#125;&quot;</span>, x.<span class="title function_ invoke__">abs</span>());
+&#125;
+
+<span class="comment">// 输出：</span>
+<span class="comment">// [计数器] 创建，值为 0</span>
+<span class="comment">// 当前值: 3</span>
+<span class="comment">// 绝对值: 3</span>
+<span class="comment">// [计数器] 释放，最终值为 3</span></code></pre>
+
+<hr>
+<h2 id="九、智能指针-Trait-实现总览"><a href="#九、智能指针-Trait-实现总览" class="headerlink" title="九、智能指针 Trait 实现总览"></a>九、智能指针 Trait 实现总览</h2><p>下面汇总所有主要智能指针实现的 trait：</p>
+<table>
+<thead>
+<tr>
+<th>Trait</th>
+<th>Box&lt;T&gt;</th>
+<th>Rc&lt;T&gt;</th>
+<th>Arc&lt;T&gt;</th>
+<th>Cell&lt;T&gt;</th>
+<th>RefCell&lt;T&gt;</th>
+<th>Cow&lt;B&gt;</th>
+<th>Pin&lt;P&gt;</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Deref</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+<td>❌</td>
+<td>❌</td>
+<td>✅</td>
+<td>✅</td>
+</tr>
+<tr>
+<td>DerefMut</td>
+<td>✅</td>
+<td>❌</td>
+<td>❌</td>
+<td>❌</td>
+<td>❌</td>
+<td>❌*</td>
+<td>✅**</td>
+</tr>
+<tr>
+<td>Drop</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+<td>❌</td>
+<td>❌</td>
+<td>❌</td>
+<td>❌</td>
+</tr>
+<tr>
+<td>Clone</td>
+<td>✅***</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅****</td>
+<td>✅****</td>
+<td>✅</td>
+<td>✅</td>
+</tr>
+<tr>
+<td>Send</td>
+<td>✅</td>
+<td>❌</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+</tr>
+<tr>
+<td>Sync</td>
+<td>✅</td>
+<td>❌</td>
+<td>✅</td>
+<td>❌</td>
+<td>❌</td>
+<td>✅</td>
+<td>✅</td>
+</tr>
+<tr>
+<td>Display</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+<td>❌</td>
+<td>❌</td>
+<td>✅</td>
+<td>✅</td>
+</tr>
+<tr>
+<td>Debug</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+</tr>
+<tr>
+<td>AsRef&lt;T&gt;</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+<td>❌</td>
+<td>❌</td>
+<td>✅</td>
+<td>❌</td>
+</tr>
+<tr>
+<td>From&lt;T&gt;</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+<td>✅</td>
+</tr>
+</tbody></table>
+<p>说明：</p>
+<ul>
+<li>* Cow 的 <code>to_mut()</code> 方法可以获取 <code>&amp;mut</code>，但不是通过 DerefMut trait</li>
+<li>** Pin&lt;P&gt; 只在 T: Unpin 时实现 DerefMut</li>
+<li>*** Box::clone 是深拷贝（当 T: Clone）</li>
+<li>**** 需要 T: Copy（Cell）或 T: Clone（RefCell）</li>
+</ul>
+<hr>
+<h2 id="十、如何选择智能指针"><a href="#十、如何选择智能指针" class="headerlink" title="十、如何选择智能指针"></a>十、如何选择智能指针</h2><p>根据场景选择合适的智能指针：</p>
+<pre><code class="highlight plaintext">需要堆分配？
+├── 是，且只有一个所有者 ─────────&gt; Box&lt;T&gt;
+├── 是，且需要多个所有者
+│   ├── 单线程 ──────────────────&gt; Rc&lt;T&gt;
+│   └── 多线程 ──────────────────&gt; Arc&lt;T&gt;
+└── 不需要堆分配
+
+需要内部可变性？
+├── T 是 Copy 类型 ──────────────&gt; Cell&lt;T&gt;
+├── T 不是 Copy 类型（单线程）───&gt; RefCell&lt;T&gt;
+└── 多线程 ──────────────────────&gt; Mutex&lt;T&gt; / RwLock&lt;T&gt;
+
+需要共享 + 可变？
+├── 单线程 ──────────────────────&gt; Rc&lt;RefCell&lt;T&gt;&gt;
+└── 多线程 ──────────────────────&gt; Arc&lt;Mutex&lt;T&gt;&gt;
+
+有时候只读有时候需要修改？──────&gt; Cow&lt;T&gt;
+
+需要固定内存位置（async）？─────&gt; Pin&lt;Box&lt;T&gt;&gt;</code></pre>
+
+<hr>
+<h2 id="十一、常见误区与最佳实践"><a href="#十一、常见误区与最佳实践" class="headerlink" title="十一、常见误区与最佳实践"></a>十一、常见误区与最佳实践</h2><h3 id="误区一：到处用-Rc"><a href="#误区一：到处用-Rc" class="headerlink" title="误区一：到处用 Rc&lt;RefCell&lt;T&gt;&gt;"></a>误区一：到处用 Rc&lt;RefCell&lt;T&gt;&gt;</h3><p>有些从 GC 语言转来的开发者会把 <code>Rc&lt;RefCell&lt;T&gt;&gt;</code> 当成万能方案。这样做的问题是：</p>
+<ul>
+<li>把编译期检查推迟到了运行时</li>
+<li>RefCell 违反借用规则时直接 panic</li>
+<li>失去了 Rust 最大的优势</li>
+</ul>
+<p><strong>推荐做法：</strong> 先尝试用所有权和借用解决问题，只在确实需要共享可变性时才使用 <code>Rc&lt;RefCell&lt;T&gt;&gt;</code>。</p>
+<h3 id="误区二：用-Box-包装所有东西"><a href="#误区二：用-Box-包装所有东西" class="headerlink" title="误区二：用 Box 包装所有东西"></a>误区二：用 Box 包装所有东西</h3><pre><code class="highlight rust"><span class="comment">// 不推荐</span>
+<span class="keyword">fn</span> <span class="title function_">process</span>(data: <span class="type">Box</span>&lt;<span class="type">Vec</span>&lt;<span class="type">i32</span>&gt;&gt;) &#123; ... &#125;
+
+<span class="comment">// 推荐：Vec 本身已经在堆上分配了数据</span>
+<span class="keyword">fn</span> <span class="title function_">process</span>(data: <span class="type">Vec</span>&lt;<span class="type">i32</span>&gt;) &#123; ... &#125;
+<span class="comment">// 或者只是借用</span>
+<span class="keyword">fn</span> <span class="title function_">process</span>(data: &amp;[<span class="type">i32</span>]) &#123; ... &#125;</code></pre>
+
+<h3 id="误区三：混淆-Rc-clone-和深拷贝"><a href="#误区三：混淆-Rc-clone-和深拷贝" class="headerlink" title="误区三：混淆 Rc::clone 和深拷贝"></a>误区三：混淆 Rc::clone 和深拷贝</h3><pre><code class="highlight rust"><span class="keyword">use</span> std::rc::Rc;
+
+<span class="keyword">let</span> <span class="variable">a</span> = Rc::<span class="title function_ invoke__">new</span>(<span class="built_in">vec!</span>[<span class="number">1</span>, <span class="number">2</span>, <span class="number">3</span>]);
+<span class="keyword">let</span> <span class="variable">b</span> = Rc::<span class="title function_ invoke__">clone</span>(&amp;a);  <span class="comment">// 只增加引用计数，a 和 b 指向同一数据</span>
+<span class="keyword">let</span> <span class="variable">c</span> = (*a).<span class="title function_ invoke__">clone</span>();    <span class="comment">// 深拷贝：c 是一个全新的 Vec&lt;i32&gt;</span></code></pre>
+
+<h3 id="最佳实践总结"><a href="#最佳实践总结" class="headerlink" title="最佳实践总结"></a>最佳实践总结</h3><ol>
+<li><strong>默认用栈</strong>：除非有明确需求，不要用 Box</li>
+<li><strong>优先编译时检查</strong>：尽量避免 RefCell，让编译器帮你抓 bug</li>
+<li><strong>单线程用 Rc，多线程用 Arc</strong>：不要在单线程中使用 Arc（有不必要的原子操作开销）</li>
+<li><strong>用 Cow 优化频繁的条件克隆</strong>：减少不必要的内存分配</li>
+<li><strong>使用 Weak 打破循环引用</strong>：任何图状数据结构都应考虑 Weak</li>
+</ol>
+<hr>
+<h2 id="总结"><a href="#总结" class="headerlink" title="总结"></a>总结</h2><p>Rust 的智能指针体系是围绕所有权、借用、生命周期这三大核心概念构建的。每种智能指针都在解决特定的问题：</p>
+<table>
+<thead>
+<tr>
+<th>智能指针</th>
+<th>核心能力</th>
+<th>关键限制</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>Box&lt;T&gt;</code></td>
+<td>堆分配 + 唯一所有权</td>
+<td>单一所有者</td>
+</tr>
+<tr>
+<td><code>Rc&lt;T&gt;</code></td>
+<td>共享所有权（引用计数）</td>
+<td>单线程、不可变</td>
+</tr>
+<tr>
+<td><code>Arc&lt;T&gt;</code></td>
+<td>线程安全的共享所有权</td>
+<td>不可变（需配合 Mutex）</td>
+</tr>
+<tr>
+<td><code>Cell&lt;T&gt;</code></td>
+<td>内部可变性（Copy 类型）</td>
+<td>T 必须是 Copy</td>
+</tr>
+<tr>
+<td><code>RefCell&lt;T&gt;</code></td>
+<td>内部可变性（运行时检查）</td>
+<td>可能 panic</td>
+</tr>
+<tr>
+<td><code>Cow&lt;B&gt;</code></td>
+<td>写时克隆</td>
+<td>需要 ToOwned</td>
+</tr>
+<tr>
+<td><code>Pin&lt;P&gt;</code></td>
+<td>固定内存位置</td>
+<td>主要用于 async</td>
+</tr>
+</tbody></table>
+<p>理解智能指针的关键：</p>
+<ol>
+<li><strong>Deref</strong> 让智能指针透明地行为如引用，支持自动解引用转换</li>
+<li><strong>Drop</strong> 确保资源正确释放，实现 RAII</li>
+<li>选择智能指针的依据是<strong>所有权语义</strong>和<strong>线程安全需求</strong></li>
+</ol>
+<p>当你不确定该用哪种智能指针时，回到最基本的问题：<strong>谁拥有这份数据？有多少人需要访问它？需要跨线程吗？需要修改吗？</strong></p>
+<p>答案自然就出来了。</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
