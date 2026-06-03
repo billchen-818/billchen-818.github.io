@@ -1,0 +1,359 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust unsafe 入门：边界、约束与几个典型使用场景</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust unsafe 入门：边界、约束与几个典型使用场景</h1><div class="time">2026-06-03</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>很多人对 Rust <code>unsafe</code> 的第一印象是：</p>
+<blockquote>
+<p>这是一个关闭安全检查的开关，用了之后程序就可能崩溃。</p>
+</blockquote>
+<p>这个理解有一半对，有一半不对。</p>
+<p><code>unsafe</code> 确实意味着”编译器不再帮你检查某些事情”，但它不是”关掉所有保护”。</p>
+<p>更准确的理解是：</p>
+<blockquote>
+<p><code>unsafe</code> 是一份协议。它告诉编译器：”这里有一些你无法验证的约束，我来负责保证它们成立。”</p>
+</blockquote>
+<p>所以 <code>unsafe</code> 的本质不是”危险代码”，而是”责任转移”。</p>
+<p>这一篇我想围绕几个问题把 <code>unsafe</code> 讲清楚：</p>
+<ol>
+<li><code>unsafe</code> 到底解锁了哪几项能力</li>
+<li>为什么 Rust 需要这个机制</li>
+<li>如何正确使用 <code>unsafe</code>：不是”别用”，而是”怎么用对”</li>
+<li>几个典型使用场景，配完整可运行示例</li>
+</ol>
+<p>文中的完整示例工程在 <a href="workspaces/unsafe-demo">workspaces&#x2F;unsafe-demo</a>。</p>
+<hr>
+<h2 id="一、先说结论：unsafe-只解锁五项能力"><a href="#一、先说结论：unsafe-只解锁五项能力" class="headerlink" title="一、先说结论：unsafe 只解锁五项能力"></a>一、先说结论：<code>unsafe</code> 只解锁五项能力</h2><p>Rust 的 <code>unsafe</code> 并不是一个开关，把所有安全检查都关掉。</p>
+<p>它只额外允许你做五件事：</p>
+<ol>
+<li><strong>解引用裸指针</strong>（<code>*const T</code> &#x2F; <code>*mut T</code>）</li>
+<li><strong>调用 <code>unsafe</code> 函数或方法</strong>（包括 C FFI）</li>
+<li><strong>访问或修改 <code>static mut</code> 全局变量</strong></li>
+<li><strong>实现 <code>unsafe trait</code></strong>（比如手动实现 <code>Send</code> &#x2F; <code>Sync</code>）</li>
+<li><strong>在 <code>union</code> 中访问字段</strong></li>
+</ol>
+<p>除了这五项之外，<code>unsafe</code> 块里的代码和普通代码没有任何区别：</p>
+<ul>
+<li>借用检查仍然生效（除非你用裸指针绕过）</li>
+<li>类型系统仍然工作</li>
+<li>生命周期推断仍然运行</li>
+</ul>
+<p>所以这五项能力是精确的、有限的，不是”什么都可以做”。</p>
+<hr>
+<h2 id="二、为什么-Rust-需要-unsafe？"><a href="#二、为什么-Rust-需要-unsafe？" class="headerlink" title="二、为什么 Rust 需要 unsafe？"></a>二、为什么 Rust 需要 <code>unsafe</code>？</h2><p>Rust 的借用检查器非常强大，但它的能力有一个边界：</p>
+<blockquote>
+<p>它只能证明”在给定的规则下是安全的”，无法证明”在更广泛的不变量下也是安全的”。</p>
+</blockquote>
+<p>有些操作，安全性依赖于某些<strong>程序员知道、但编译器无法验证</strong>的前提条件。</p>
+<p>几个典型的例子：</p>
+<p><strong>裸指针解引用</strong></p>
+<pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">x</span> = <span class="number">42</span>;
+<span class="keyword">let</span> <span class="variable">ptr</span>: *<span class="keyword">const</span> <span class="type">i32</span> = &amp;x;
+<span class="keyword">unsafe</span> &#123; <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, *ptr); &#125;</code></pre>
+
+<p>编译器不知道 <code>ptr</code> 是否有效、是否对齐、是否已经悬空。这些性质取决于运行时状态，静态分析无法判断。你必须自己保证这些条件成立，然后用 <code>unsafe</code> 声明这个事实。</p>
+<p><strong>FFI 调用</strong></p>
+<pre><code class="highlight rust"><span class="keyword">unsafe</span> <span class="keyword">extern</span> <span class="string">&quot;C&quot;</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">abs</span>(x: <span class="type">i32</span>) <span class="punctuation">-&gt;</span> <span class="type">i32</span>;
+&#125;</code></pre>
+
+<p>外部 C 函数的行为是 Rust 编译器无法知道的。类型签名是你声明的，而不是从 C 代码里自动推导出来的。它是否真的存在、是否真的有这个签名，编译器无法验证。</p>
+<p><strong><code>static mut</code> 全局变量</strong></p>
+<p>全局可变状态在多线程环境下会有数据竞争。编译器无法在静态分析阶段确定你是否真的在单线程里用它。</p>
+<p><strong>手动实现 <code>Send</code> &#x2F; <code>Sync</code></strong></p>
+<p><code>Send</code> 和 <code>Sync</code> 是 <code>unsafe trait</code>，它们的含义是一个关于线程安全的承诺。编译器没有办法检查这个承诺是否成立，只能靠程序员来保证。</p>
+<hr>
+<h2 id="三、unsafe-的正确使用方式：封装，不是暴露"><a href="#三、unsafe-的正确使用方式：封装，不是暴露" class="headerlink" title="三、unsafe 的正确使用方式：封装，不是暴露"></a>三、<code>unsafe</code> 的正确使用方式：封装，不是暴露</h2><p><code>unsafe</code> 最重要的使用原则是：</p>
+<blockquote>
+<p><strong>把 <code>unsafe</code> 封装在安全的接口后面，而不是直接暴露给调用方。</strong></p>
+</blockquote>
+<p>这是 Rust 标准库处理 <code>unsafe</code> 的核心策略，也是大部分优秀库的通行做法。</p>
+<p>具体来说：</p>
+<ul>
+<li>模块或函数的<strong>公开接口</strong>应该是安全的</li>
+<li><code>unsafe</code> 的具体操作藏在实现内部</li>
+<li>实现内部必须维护”安全不变量”（Safety Invariant）</li>
+<li>每个 <code>unsafe</code> 块旁边应该有注释，解释<strong>为什么</strong>这样做是安全的</li>
+</ul>
+<p>举一个最简单的例子。</p>
+<p>如果你直接把裸指针暴露给调用方：</p>
+<pre><code class="highlight rust"><span class="comment">// 危险：调用方可以任意解引用，没有任何保证</span>
+<span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">get_raw_ptr</span>(v: &amp;<span class="type">Vec</span>&lt;<span class="type">i32</span>&gt;) <span class="punctuation">-&gt;</span> *<span class="keyword">const</span> <span class="type">i32</span> &#123;
+    v.<span class="title function_ invoke__">as_ptr</span>()
+&#125;</code></pre>
+
+<p>那安全性就完全依赖于调用方能不能正确使用裸指针，这是不可维护的。</p>
+<p>但如果你把裸指针操作封装起来，只暴露安全的接口：</p>
+<pre><code class="highlight rust"><span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">MySlice</span>&lt;<span class="symbol">&#x27;a</span>, T&gt; &#123;
+    ptr: *<span class="keyword">const</span> T,
+    len: <span class="type">usize</span>,
+    _marker: std::marker::PhantomData&lt;&amp;<span class="symbol">&#x27;a</span> T&gt;,
+&#125;
+
+<span class="keyword">impl</span>&lt;<span class="symbol">&#x27;a</span>, T&gt; MySlice&lt;<span class="symbol">&#x27;a</span>, T&gt; &#123;
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">from_slice</span>(s: &amp;<span class="symbol">&#x27;a</span> [T]) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123;
+        MySlice &#123; ptr: s.<span class="title function_ invoke__">as_ptr</span>(), len: s.<span class="title function_ invoke__">len</span>(), _marker: std::marker::PhantomData &#125;
+    &#125;
+
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">get</span>(&amp;<span class="keyword">self</span>, index: <span class="type">usize</span>) <span class="punctuation">-&gt;</span> <span class="type">Option</span>&lt;&amp;T&gt; &#123;
+        <span class="keyword">if</span> index &gt;= <span class="keyword">self</span>.len &#123;
+            <span class="keyword">return</span> <span class="literal">None</span>;
+        &#125;
+        <span class="comment">// Safety: index &lt; self.len，ptr 指向有效的对齐内存，</span>
+        <span class="comment">// 生命周期由 PhantomData 绑定到 &#x27;a</span>
+        <span class="keyword">unsafe</span> &#123; <span class="title function_ invoke__">Some</span>(&amp;*<span class="keyword">self</span>.ptr.<span class="title function_ invoke__">add</span>(index)) &#125;
+    &#125;
+&#125;</code></pre>
+
+<p>现在 <code>get</code> 是完全安全的：</p>
+<ul>
+<li>超出范围会返回 <code>None</code>，不会越界</li>
+<li>生命周期由编译器保证，不会悬空</li>
+<li>调用方完全不需要关心内部有 <code>unsafe</code></li>
+</ul>
+<p>这就是”封装 <code>unsafe</code>“的意义。</p>
+<hr>
+<h2 id="四、五项能力逐一讲解"><a href="#四、五项能力逐一讲解" class="headerlink" title="四、五项能力逐一讲解"></a>四、五项能力逐一讲解</h2><h3 id="4-1-解引用裸指针"><a href="#4-1-解引用裸指针" class="headerlink" title="4.1 解引用裸指针"></a>4.1 解引用裸指针</h3><p>裸指针是 Rust 里唯一不受借用规则约束的指针类型。</p>
+<p><strong>创建</strong>裸指针是安全的，因为你还没有使用它：</p>
+<pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">x</span> = <span class="number">42_i32</span>;
+<span class="keyword">let</span> <span class="variable">ptr_const</span>: *<span class="keyword">const</span> <span class="type">i32</span> = &amp;x;          <span class="comment">// 从共享引用创建</span>
+<span class="keyword">let</span> <span class="variable">ptr_mut</span>: *<span class="keyword">mut</span> <span class="type">i32</span> = &amp;<span class="keyword">mut</span> y;          <span class="comment">// 从可变引用创建</span>
+<span class="keyword">let</span> <span class="variable">ptr_dangling</span> = <span class="number">0x1234usize</span> <span class="keyword">as</span> *<span class="keyword">const</span> <span class="type">i32</span>;  <span class="comment">// 直接从地址创建，潜在危险</span></code></pre>
+
+<p><strong>解引用</strong>裸指针才需要 <code>unsafe</code>，因为此时编译器无法保证它有效：</p>
+<pre><code class="highlight rust"><span class="keyword">unsafe</span> &#123;
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, *ptr_const);  <span class="comment">// 必须自己保证 ptr_const 有效、对齐、不悬空</span>
+&#125;</code></pre>
+
+<p>裸指针还允许你绕过借用规则，同时持有多个可变指针：</p>
+<pre><code class="highlight rust"><span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">val</span> = <span class="number">100_i32</span>;
+<span class="keyword">let</span> <span class="variable">p1</span>: *<span class="keyword">mut</span> <span class="type">i32</span> = &amp;<span class="keyword">mut</span> val;
+<span class="keyword">let</span> <span class="variable">p2</span>: *<span class="keyword">mut</span> <span class="type">i32</span> = &amp;<span class="keyword">mut</span> val;  <span class="comment">// 编译器不阻止</span>
+
+<span class="keyword">unsafe</span> &#123;
+    *p1 = <span class="number">200</span>;
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, *p2);  <span class="comment">// 200，同一块内存</span>
+&#125;</code></pre>
+
+<p>这在 Rust 普通代码里是不允许的（不能同时有两个 <code>&amp;mut val</code>），但裸指针可以。这也是它危险的地方：使用不当会导致数据竞争或未定义行为。</p>
+<p><strong>指针算术</strong>也是裸指针的典型用法：</p>
+<pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">data</span>: [<span class="type">i32</span>; <span class="number">5</span>] = [<span class="number">10</span>, <span class="number">20</span>, <span class="number">30</span>, <span class="number">40</span>, <span class="number">50</span>];
+<span class="keyword">let</span> <span class="variable">ptr</span>: *<span class="keyword">const</span> <span class="type">i32</span> = data.<span class="title function_ invoke__">as_ptr</span>();
+
+<span class="keyword">unsafe</span> &#123;
+    <span class="keyword">for</span> <span class="variable">i</span> <span class="keyword">in</span> <span class="number">0</span>..<span class="number">5_usize</span> &#123;
+        <span class="built_in">println!</span>(<span class="string">&quot;data[&#123;&#125;] = &#123;&#125;&quot;</span>, i, *ptr.<span class="title function_ invoke__">add</span>(i));
+    &#125;
+&#125;</code></pre>
+
+<p><code>ptr.add(i)</code> 把指针向后移动 <code>i * sizeof(i32)</code> 个字节。这是标准库内部遍历内存的常见模式。</p>
+<p>完整代码见 <a href="workspaces/unsafe-demo/src/main.rs">workspaces&#x2F;unsafe-demo&#x2F;src&#x2F;main.rs</a>。</p>
+<h3 id="4-2-调用-unsafe-函数"><a href="#4-2-调用-unsafe-函数" class="headerlink" title="4.2 调用 unsafe 函数"></a>4.2 调用 <code>unsafe</code> 函数</h3><p>声明为 <code>unsafe fn</code> 的函数，要求调用方在调用时承诺满足该函数的前提条件（precondition）。</p>
+<p>最简单的例子：</p>
+<pre><code class="highlight rust"><span class="comment">// Safety 文档：调用方必须保证 ptr 非空、对齐、且指向有效的 i32</span>
+<span class="keyword">unsafe</span> <span class="keyword">fn</span> <span class="title function_">read_unchecked</span>(ptr: *<span class="keyword">const</span> <span class="type">i32</span>) <span class="punctuation">-&gt;</span> <span class="type">i32</span> &#123;
+    <span class="keyword">unsafe</span> &#123; *ptr &#125;
+&#125;</code></pre>
+
+<p>在 <code>unsafe</code> 块里调用它：</p>
+<pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">x</span>: <span class="type">i32</span> = <span class="number">777</span>;
+<span class="keyword">let</span> <span class="variable">result</span> = <span class="keyword">unsafe</span> &#123; <span class="title function_ invoke__">read_unchecked</span>(&amp;x <span class="keyword">as</span> *<span class="keyword">const</span> <span class="type">i32</span>) &#125;;
+<span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, result);  <span class="comment">// 777</span></code></pre>
+
+<p>标准库里有大量这类函数，最常见的是跳过检查的快速路径版本：</p>
+<pre><code class="highlight rust"><span class="comment">// 有检查版本（安全）</span>
+<span class="keyword">let</span> <span class="variable">s</span> = std::<span class="type">str</span>::<span class="title function_ invoke__">from_utf8</span>(bytes)?;
+
+<span class="comment">// 无检查版本（unsafe），调用方保证 bytes 是合法 UTF-8</span>
+<span class="keyword">let</span> <span class="variable">s</span> = <span class="keyword">unsafe</span> &#123; std::<span class="type">str</span>::<span class="title function_ invoke__">from_utf8_unchecked</span>(bytes) &#125;;</code></pre>
+
+<p><code>from_utf8_unchecked</code> 在字节序列确实是有效 UTF-8 的前提下，省去了 O(n) 的检查开销。标准库用它来优化热路径。</p>
+<h3 id="4-3-FFI（外部函数接口）"><a href="#4-3-FFI（外部函数接口）" class="headerlink" title="4.3 FFI（外部函数接口）"></a>4.3 FFI（外部函数接口）</h3><p>调用 C 函数是 <code>unsafe</code> 最常见的使用场景之一：</p>
+<pre><code class="highlight rust"><span class="keyword">unsafe</span> <span class="keyword">extern</span> <span class="string">&quot;C&quot;</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">abs</span>(x: <span class="type">i32</span>) <span class="punctuation">-&gt;</span> <span class="type">i32</span>;
+&#125;
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="keyword">let</span> <span class="variable">result</span> = <span class="keyword">unsafe</span> &#123; <span class="title function_ invoke__">abs</span>(-<span class="number">42</span>) &#125;;
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, result);  <span class="comment">// 42</span>
+&#125;</code></pre>
+
+<p>为什么是 <code>unsafe</code>？</p>
+<p>因为 C 函数的行为、调用约定、内存布局，Rust 编译器全都无法验证。<code>unsafe extern &quot;C&quot;</code> 这个声明是你对编译器的承诺：</p>
+<blockquote>
+<p>我知道这个函数存在，它的签名就是这样，它的行为符合我的预期。</p>
+</blockquote>
+<p>这个承诺如果错了，后果由你负责。</p>
+<h3 id="4-4-unsafe-trait-与-unsafe-impl"><a href="#4-4-unsafe-trait-与-unsafe-impl" class="headerlink" title="4.4 unsafe trait 与 unsafe impl"></a>4.4 <code>unsafe trait</code> 与 <code>unsafe impl</code></h3><p>有些 trait 的实现本身携带了某种”无法被编译器自动验证的契约”。</p>
+<p>最典型的就是 <code>Send</code> 和 <code>Sync</code>。</p>
+<pre><code class="highlight rust"><span class="comment">// Send 和 Sync 在标准库里是这样定义的：</span>
+<span class="keyword">pub</span> <span class="keyword">unsafe</span> auto <span class="keyword">trait</span> <span class="title class_">Send</span> &#123; &#125;
+<span class="keyword">pub</span> <span class="keyword">unsafe</span> auto <span class="keyword">trait</span> <span class="title class_">Sync</span> &#123; &#125;</code></pre>
+
+<p><code>unsafe trait</code> 意味着：实现这个 trait 的代码，必须手动保证某个编译器无法检查的约束。</p>
+<p>比如，假设你有一个包含裸指针的类型，默认不是 <code>Send</code>，但你确定它的使用模式是线程安全的：</p>
+<pre><code class="highlight rust"><span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">RawBuffer</span> &#123;
+    ptr: *<span class="keyword">mut</span> <span class="type">u8</span>,
+    len: <span class="type">usize</span>,
+&#125;
+
+<span class="comment">// Safety: RawBuffer 独占其内存，不与任何其他所有者共享</span>
+<span class="keyword">unsafe</span> <span class="keyword">impl</span> <span class="title class_">Send</span> <span class="keyword">for</span> <span class="title class_">RawBuffer</span> &#123;&#125;
+
+<span class="comment">// Safety: as_slice() 只提供只读访问，多线程同时读取是安全的</span>
+<span class="keyword">unsafe</span> <span class="keyword">impl</span> <span class="title class_">Sync</span> <span class="keyword">for</span> <span class="title class_">RawBuffer</span> &#123;&#125;</code></pre>
+
+<p>写了 <code>unsafe impl Send</code> 之后，这个类型就可以跨线程传递：</p>
+<pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">buf</span> = RawBuffer::<span class="title function_ invoke__">new</span>(<span class="number">8</span>);
+std::thread::<span class="title function_ invoke__">spawn</span>(<span class="keyword">move</span> || &#123;
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;:?&#125;&quot;</span>, buf.<span class="title function_ invoke__">as_slice</span>());
+&#125;).<span class="title function_ invoke__">join</span>().<span class="title function_ invoke__">unwrap</span>();</code></pre>
+
+<p>如果没有 <code>unsafe impl Send</code>，上面的 <code>spawn</code> 会编译报错。</p>
+<h3 id="4-5-访问-static-mut"><a href="#4-5-访问-static-mut" class="headerlink" title="4.5 访问 static mut"></a>4.5 访问 <code>static mut</code></h3><p>全局可变状态需要在 <code>unsafe</code> 里访问：</p>
+<pre><code class="highlight rust"><span class="keyword">static</span> <span class="keyword">mut</span> COUNTER: <span class="type">u64</span> = <span class="number">0</span>;
+
+<span class="keyword">unsafe</span> &#123;
+    COUNTER += <span class="number">1</span>;
+    <span class="keyword">let</span> <span class="variable">val</span> = std::ptr::addr_of!(COUNTER).<span class="title function_ invoke__">read</span>();
+    <span class="built_in">println!</span>(<span class="string">&quot;&#123;&#125;&quot;</span>, val);
+&#125;</code></pre>
+
+<p>为什么危险？</p>
+<p>因为 <code>static mut</code> 在整个程序生命周期里都存在，如果多个线程同时访问，就会出现数据竞争（这是未定义行为）。编译器静态分析阶段无法知道你是否真的在单线程环境里使用它。</p>
+<p><strong>实践建议</strong>：绝大多数时候，应该用 <code>AtomicU64</code> 或 <code>Mutex&lt;u64&gt;</code> 替代 <code>static mut</code>。<code>static mut</code> 只适合确实不需要并发保护的极少数场景（比如嵌入式中断处理程序里的单核状态）。</p>
+<hr>
+<h2 id="五、最重要的实践：写-Safety-注释"><a href="#五、最重要的实践：写-Safety-注释" class="headerlink" title="五、最重要的实践：写 Safety 注释"></a>五、最重要的实践：写 Safety 注释</h2><p>每一个 <code>unsafe</code> 块或 <code>unsafe fn</code>，旁边都应该有一段注释，解释<strong>为什么这里是安全的</strong>。</p>
+<p>这不仅仅是风格问题，而是工程必须。原因有三：</p>
+<p><strong>强迫你自己想清楚</strong></p>
+<p>写注释的过程会逼你明确：我依赖的前提条件是什么，这些条件是否真的成立。</p>
+<p><strong>让后来的人能审查</strong></p>
+<p>三个月后，别人（或者你自己）再来看这段代码，需要知道当初写这个 <code>unsafe</code> 的依据是什么，才能判断后续修改有没有破坏这个前提。</p>
+<p><strong>帮助找 Bug</strong></p>
+<p>很多 <code>unsafe</code> 相关的 bug，正是因为某个隐含的前提被后来的代码修改给打破了。有了 Safety 注释，就有了检查点。</p>
+<p>通行的格式是在 <code>unsafe</code> 块上方写 <code>// Safety:</code> 开头的注释：</p>
+<pre><code class="highlight rust"><span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">get</span>(&amp;<span class="keyword">self</span>, index: <span class="type">usize</span>) <span class="punctuation">-&gt;</span> <span class="type">Option</span>&lt;&amp;T&gt; &#123;
+    <span class="keyword">if</span> index &gt;= <span class="keyword">self</span>.len &#123;
+        <span class="keyword">return</span> <span class="literal">None</span>;
+    &#125;
+    <span class="comment">// Safety: 上方已经做了边界检查，index &lt; self.len；</span>
+    <span class="comment">// self.ptr 在整个生命周期内有效；</span>
+    <span class="comment">// PhantomData&lt;&amp;&#x27;a T&gt; 保证返回引用的生命周期不超过 self</span>
+    <span class="keyword">unsafe</span> &#123; <span class="title function_ invoke__">Some</span>(&amp;*<span class="keyword">self</span>.ptr.<span class="title function_ invoke__">add</span>(index)) &#125;
+&#125;</code></pre>
+
+<hr>
+<h2 id="六、典型使用场景"><a href="#六、典型使用场景" class="headerlink" title="六、典型使用场景"></a>六、典型使用场景</h2><h3 id="6-1-实现自定义数据结构（手动内存管理）"><a href="#6-1-实现自定义数据结构（手动内存管理）" class="headerlink" title="6.1 实现自定义数据结构（手动内存管理）"></a>6.1 实现自定义数据结构（手动内存管理）</h3><p>标准库里的 <code>Vec</code>、<code>HashMap</code>、<code>String</code> 内部都大量使用了 <code>unsafe</code>。这是因为高性能的数据结构往往需要直接操控内存布局，而这超出了借用检查器的能力范围。</p>
+<p>示例工程里有一个简化版的 <code>MyVec&lt;T&gt;</code>，演示了核心思路：</p>
+<pre><code class="highlight rust"><span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">MyVec</span>&lt;T&gt; &#123;
+    ptr: *<span class="keyword">mut</span> T,
+    len: <span class="type">usize</span>,
+    cap: <span class="type">usize</span>,
+&#125;
+
+<span class="keyword">impl</span>&lt;T&gt; MyVec&lt;T&gt; &#123;
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">push</span>(&amp;<span class="keyword">mut</span> <span class="keyword">self</span>, value: T) &#123;
+        <span class="keyword">if</span> <span class="keyword">self</span>.len == <span class="keyword">self</span>.cap &#123;
+            <span class="keyword">self</span>.<span class="title function_ invoke__">grow</span>();  <span class="comment">// 内部用 alloc/realloc，全部 unsafe</span>
+        &#125;
+        <span class="comment">// Safety: grow() 保证 self.len &lt; self.cap，</span>
+        <span class="comment">// ptr.add(self.len) 在分配范围内</span>
+        <span class="keyword">unsafe</span> &#123;
+            <span class="keyword">self</span>.ptr.<span class="title function_ invoke__">add</span>(<span class="keyword">self</span>.len).<span class="title function_ invoke__">write</span>(value);
+        &#125;
+        <span class="keyword">self</span>.len += <span class="number">1</span>;
+    &#125;
+
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">get</span>(&amp;<span class="keyword">self</span>, index: <span class="type">usize</span>) <span class="punctuation">-&gt;</span> <span class="type">Option</span>&lt;&amp;T&gt; &#123;
+        <span class="keyword">if</span> index &gt;= <span class="keyword">self</span>.len &#123; <span class="keyword">return</span> <span class="literal">None</span>; &#125;
+        <span class="comment">// Safety: index &lt; self.len，ptr 有效，生命周期绑定 &amp;self</span>
+        <span class="keyword">unsafe</span> &#123; <span class="title function_ invoke__">Some</span>(&amp;*<span class="keyword">self</span>.ptr.<span class="title function_ invoke__">add</span>(index)) &#125;
+    &#125;
+&#125;</code></pre>
+
+<p>关键点：</p>
+<ul>
+<li><code>push</code> 和 <code>get</code> 都是<strong>安全的公开接口</strong></li>
+<li><code>unsafe</code> 在内部，调用方完全感知不到</li>
+<li>每个 <code>unsafe</code> 块旁边都有明确的 Safety 注释</li>
+</ul>
+<p>完整实现包括 <code>grow</code>、<code>Drop</code>、<code>Send</code>&#x2F;<code>Sync</code> 标记，见 <a href="workspaces/unsafe-demo/src/main.rs">workspaces&#x2F;unsafe-demo&#x2F;src&#x2F;main.rs</a>。</p>
+<h3 id="6-2-封装裸指针切片"><a href="#6-2-封装裸指针切片" class="headerlink" title="6.2 封装裸指针切片"></a>6.2 封装裸指针切片</h3><p><code>std::slice::from_raw_parts</code> 是另一个常见场景：把一段裸内存变成 Rust 切片。</p>
+<pre><code class="highlight rust"><span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">as_slice</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> &amp;[<span class="type">u8</span>] &#123;
+    <span class="comment">// Safety: ptr 由 Vec::as_mut_ptr() 分配，len 与分配大小匹配，</span>
+    <span class="comment">// 生命周期绑定到 &amp;self，不会悬空</span>
+    <span class="keyword">unsafe</span> &#123; std::slice::<span class="title function_ invoke__">from_raw_parts</span>(<span class="keyword">self</span>.ptr, <span class="keyword">self</span>.len) &#125;
+&#125;</code></pre>
+
+<p>这是 FFI 接收 C 数组时非常常见的用法：C 函数返回一个指针和长度，Rust 侧把它包装成安全的切片。</p>
+<h3 id="6-3-FFI-与-C-库集成"><a href="#6-3-FFI-与-C-库集成" class="headerlink" title="6.3 FFI 与 C 库集成"></a>6.3 FFI 与 C 库集成</h3><p>调用 C 标准库、系统调用，或者集成第三方 C 库，都需要 <code>unsafe extern &quot;C&quot;</code>：</p>
+<pre><code class="highlight rust"><span class="keyword">unsafe</span> <span class="keyword">extern</span> <span class="string">&quot;C&quot;</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">abs</span>(x: <span class="type">i32</span>) <span class="punctuation">-&gt;</span> <span class="type">i32</span>;
+&#125;
+
+<span class="keyword">let</span> <span class="variable">result</span> = <span class="keyword">unsafe</span> &#123; <span class="title function_ invoke__">abs</span>(-<span class="number">42</span>) &#125;;  <span class="comment">// 42</span></code></pre>
+
+<p>大型 C 库的 FFI 绑定（如 <code>openssl-sys</code>、<code>libz-sys</code>）通常都是一层薄薄的 <code>unsafe</code> 声明，然后在上面再建一层安全的 Rust API。</p>
+<h3 id="6-4-手动实现-Send-Sync"><a href="#6-4-手动实现-Send-Sync" class="headerlink" title="6.4 手动实现 Send &#x2F; Sync"></a>6.4 手动实现 <code>Send</code> &#x2F; <code>Sync</code></h3><p>当你的类型包含裸指针、或者包裹了 <code>*-sys</code> 类型时，编译器会因为裸指针不是 <code>Send</code> 而拒绝让你的类型跨线程。</p>
+<p>如果你能保证并发安全性（比如通过外部同步、独占所有权、只读访问等），就可以手动标记：</p>
+<pre><code class="highlight rust"><span class="comment">// Safety: 独占所有权，不与其他线程共享内存</span>
+<span class="keyword">unsafe</span> <span class="keyword">impl</span> <span class="title class_">Send</span> <span class="keyword">for</span> <span class="title class_">MyBuffer</span> &#123;&#125;
+
+<span class="comment">// Safety: 只提供不可变引用的只读视图</span>
+<span class="keyword">unsafe</span> <span class="keyword">impl</span> <span class="title class_">Sync</span> <span class="keyword">for</span> <span class="title class_">MyBuffer</span> &#123;&#125;</code></pre>
+
+<p>这是异步运行时、网络库、嵌入式框架里的常见做法。</p>
+<h3 id="6-5-std-mem-系列工具"><a href="#6-5-std-mem-系列工具" class="headerlink" title="6.5 std::mem 系列工具"></a>6.5 <code>std::mem</code> 系列工具</h3><p><code>std::mem</code> 模块里有几个 <code>unsafe</code> 工具值得了解：</p>
+<pre><code class="highlight rust"><span class="comment">// forget：放弃 drop，把内存管理权交出去（不是 unsafe，但要谨慎）</span>
+std::mem::forget(value);
+
+<span class="comment">// transmute：把一个类型强制重新解释为另一种类型（非常危险）</span>
+<span class="comment">// Safety: 两种类型的内存布局必须完全兼容</span>
+<span class="keyword">let</span> <span class="variable">bytes</span>: [<span class="type">u8</span>; <span class="number">4</span>] = <span class="keyword">unsafe</span> &#123; std::mem::<span class="title function_ invoke__">transmute</span>(<span class="number">42_u32</span>) &#125;;
+
+<span class="comment">// zeroed：分配零内存（主要用于 FFI，调用方必须保证零值对该类型有意义）</span>
+<span class="keyword">let</span> <span class="variable">raw</span>: <span class="type">i32</span> = <span class="keyword">unsafe</span> &#123; std::mem::<span class="title function_ invoke__">zeroed</span>() &#125;;</code></pre>
+
+<p><code>transmute</code> 是 <code>unsafe</code> 里风险最高的工具之一，使用前必须确认两种类型的 ABI 布局完全匹配，否则会产生极难调试的 UB（未定义行为）。</p>
+<hr>
+<h2 id="七、常见误区"><a href="#七、常见误区" class="headerlink" title="七、常见误区"></a>七、常见误区</h2><h3 id="误区一：”能不用-unsafe-就不用”等于”完全不用”"><a href="#误区一：”能不用-unsafe-就不用”等于”完全不用”" class="headerlink" title="误区一：”能不用 unsafe 就不用”等于”完全不用”"></a>误区一：”能不用 unsafe 就不用”等于”完全不用”</h3><p>有人把这条建议理解成：凡是能用 safe Rust 写的就绝对不碰 <code>unsafe</code>。</p>
+<p>这方向是对的，但结论不够准确。</p>
+<p>正确的理解是：</p>
+<blockquote>
+<p>不要用 <code>unsafe</code> 去做 safe Rust 已经能做的事情。如果某个能力只有 <code>unsafe</code> 才能表达，并且它是合理的设计，那就应该用，同时做好封装和文档。</p>
+</blockquote>
+<p>Rust 的整个内存分配器、标准库容器、操作系统接口，都建立在 <code>unsafe</code> 之上。<code>unsafe</code> 不是洪水猛兽，而是有限度的能力扩展口。</p>
+<h3 id="误区二：unsafe-块里的所有代码都是”危险的”"><a href="#误区二：unsafe-块里的所有代码都是”危险的”" class="headerlink" title="误区二：unsafe 块里的所有代码都是”危险的”"></a>误区二：<code>unsafe</code> 块里的所有代码都是”危险的”</h3><p>这也是常见的误解。</p>
+<p><code>unsafe</code> 块里的代码，安全检查大部分仍然生效。只有那五项特定能力（解引用裸指针、调用 unsafe 函数等）是”被解锁的”，其余的类型检查、借用规则（针对普通引用）、生命周期推断，一样在运行。</p>
+<h3 id="误区三：unsafe-会关闭所有优化保护"><a href="#误区三：unsafe-会关闭所有优化保护" class="headerlink" title="误区三：unsafe 会关闭所有优化保护"></a>误区三：<code>unsafe</code> 会关闭所有优化保护</h3><p>不会。</p>
+<p><code>unsafe</code> 只是声明”我知道这件事是安全的，我来负责”。编译器仍然会做所有常规的优化，Rust 的 LLVM 后端也会做 UB 相关的优化假设。</p>
+<p>事实上，错误使用 <code>unsafe</code> 导致未定义行为（UB），往往正是因为优化器发现了 UB 并做了”合理的”但不符合你预期的优化。这也是为什么 <code>unsafe</code> 一定要维护正确的 Safety Invariant。</p>
+<hr>
+<h2 id="八、总结"><a href="#八、总结" class="headerlink" title="八、总结"></a>八、总结</h2><p><code>unsafe</code> 只有五项能力：</p>
+<ol>
+<li>解引用裸指针</li>
+<li>调用 <code>unsafe</code> 函数（含 FFI）</li>
+<li>访问 <code>static mut</code></li>
+<li>实现 <code>unsafe trait</code></li>
+<li>在 <code>union</code> 中访问字段</li>
+</ol>
+<p>使用 <code>unsafe</code> 的核心原则只有一条：</p>
+<blockquote>
+<p><strong>封装</strong>。把 <code>unsafe</code> 封装在安全接口后面，对外暴露安全的 API，对内维护 Safety Invariant，每个 <code>unsafe</code> 块配 Safety 注释。</p>
+</blockquote>
+<p>什么时候该用 <code>unsafe</code>：</p>
+<ul>
+<li>性能关键路径，需要跳过已知不必要的检查</li>
+<li>与 C 库集成（FFI）</li>
+<li>实现自定义数据结构（手动内存管理）</li>
+<li>类型包含裸指针，需要手动实现 <code>Send</code> &#x2F; <code>Sync</code></li>
+<li>标准库提供了 unsafe 版本的 API，且你能保证前提条件成立</li>
+</ul>
+<p>什么时候不该用 <code>unsafe</code>：</p>
+<ul>
+<li>safe Rust 完全能表达这个逻辑，只是写法稍微麻烦一点</li>
+<li>还没搞清楚具体的 Safety Invariant 是什么</li>
+<li>只是想绕过借用检查器”试试看能不能跑”</li>
+</ul>
+<p><code>unsafe</code> 是一扇门。门本身不危险，危险的是不知道门后面有什么就走进去。</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
