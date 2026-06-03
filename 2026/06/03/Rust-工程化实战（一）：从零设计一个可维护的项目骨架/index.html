@@ -1,0 +1,504 @@
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust 工程化实战（一）：从零设计一个可维护的项目骨架</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
+  document.body.classList.add('mobile')
+}</script><div><div class="inner"><h1>Rust 工程化实战（一）：从零设计一个可维护的项目骨架</h1><div class="time">2026-06-03</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>这是 Rust 工程化实战系列的第一篇。</p>
+<p>这个系列的出发点不是”写出能跑的代码”，而是”写出能长期维护的代码”。</p>
+<p>能跑和能维护，这两件事差距很大。</p>
+<p>很多 Rust 项目写到一定规模之后，都会碰到同样的问题：</p>
+<ul>
+<li>模块之间的依赖越来越乱，改一处牵动多处</li>
+<li>业务逻辑和基础设施代码搅在一起，想换数据库要改一堆业务代码</li>
+<li>测试越来越难写，因为业务方法里直接依赖了数据库连接</li>
+<li>新人接手项目，读完代码还是不清楚哪层负责什么</li>
+<li><code>main.rs</code> 越来越大，什么都往里塞</li>
+</ul>
+<p>这些问题不是 Rust 特有的，但 Rust 的类型系统和模块系统提供了一套非常好的工具来解决它们——前提是你得在项目早期就把骨架设计清楚。</p>
+<p>这一篇我会围绕几个核心问题展开：</p>
+<ol>
+<li>可维护项目骨架的核心原则是什么</li>
+<li>单 crate 项目内部应该怎么组织</li>
+<li>什么时候该升级到 workspace 多 crate</li>
+<li>多 crate 下的层次划分和依赖方向应该怎么定</li>
+<li>公开接口边界怎么控制</li>
+</ol>
+<p>文章配套的完整示例工程在 <a href="workspaces/skeleton-demo">workspaces&#x2F;skeleton-demo</a>，可以直接运行和参考。</p>
+<hr>
+<h2 id="一、先说结论：三条基本原则"><a href="#一、先说结论：三条基本原则" class="headerlink" title="一、先说结论：三条基本原则"></a>一、先说结论：三条基本原则</h2><p>可维护的项目骨架，核心就三条：</p>
+<p><strong>1. 依赖方向必须单向</strong></p>
+<p>业务逻辑不应该依赖具体的基础设施实现。应该反过来：基础设施去实现业务定义的接口。</p>
+<p><strong>2. 边界用编译器来守</strong></p>
+<p>不要靠”约定”或者”注意不要这样写”来维护边界。在需要边界的地方，用模块可见性或 crate 拆分来让编译器强制执行。</p>
+<p><strong>3. 公开接口显式控制</strong></p>
+<p>对外暴露的 API 应该是经过设计的，而不是”反正没写 <code>pub(crate)</code> 就默认对外可见了”。每个 <code>pub</code> 都应该是有意识的决定。</p>
+<p>后面所有的具体做法都是这三条原则的落地。</p>
+<hr>
+<h2 id="二、从一个”失控的项目”看问题"><a href="#二、从一个”失控的项目”看问题" class="headerlink" title="二、从一个”失控的项目”看问题"></a>二、从一个”失控的项目”看问题</h2><p>先看一个典型的”能跑但难维护”的项目结构：</p>
+<pre><code class="highlight plaintext">src/
+├── main.rs
+├── db.rs        // 直接包含 sqlx 调用
+├── handler.rs   // HTTP handler，直接 import db.rs 里的函数
+├── model.rs     // 数据模型，但同时有数据库映射和业务逻辑
+├── config.rs    // 配置，直接用 std::env::var
+└── error.rs     // 错误类型，但耦合了 sqlx::Error</code></pre>
+
+<p>这种结构的问题在于：</p>
+<ul>
+<li><code>handler.rs</code> 直接调用 <code>db.rs</code> 里的函数 → 没有业务层，业务逻辑散落各处</li>
+<li><code>model.rs</code> 既有 <code>#[derive(sqlx::FromRow)]</code>，又有业务方法 → 数据库结构和业务模型没有分离</li>
+<li><code>error.rs</code> 里有 <code>sqlx::Error</code> → 想换数据库，错误类型也要跟着改</li>
+<li>测试：你没办法在不启动数据库的情况下测试 handler，因为它直接依赖了 <code>db.rs</code></li>
+</ul>
+<p>这些问题在项目小的时候感觉不明显，但它们是未来所有维护痛苦的根源。</p>
+<hr>
+<h2 id="三、单-crate-项目的内部组织"><a href="#三、单-crate-项目的内部组织" class="headerlink" title="三、单 crate 项目的内部组织"></a>三、单 crate 项目的内部组织</h2><p>不是所有项目都需要多 crate。</p>
+<p>如果你的项目：</p>
+<ul>
+<li>只有一个运行入口</li>
+<li>没有被其他项目复用的需求</li>
+<li>规模还不算大（几千行以内）</li>
+</ul>
+<p>那单 crate 就完全够用，关键是<strong>模块内部的层次划分</strong>要清晰。</p>
+<p>一个清晰的单 crate 结构应该长这样：</p>
+<pre><code class="highlight plaintext">src/
+├── main.rs        // 只做组装：创建依赖、启动服务
+├── error.rs       // 统一错误类型
+│
+├── domain/        // 纯业务逻辑：不 import 任何基础设施
+│   ├── mod.rs
+│   ├── user.rs    // 用户实体和业务规则
+│   └── service.rs // 业务操作的入口
+│
+├── port/          // 接口定义：domain 需要什么，在这里声明
+│   ├── mod.rs
+│   └── user_repo.rs  // trait UserRepository
+│
+└── infra/         // 具体实现：实现 port 里定义的 trait
+    ├── mod.rs
+    └── memory.rs  // InMemoryUserStore</code></pre>
+
+<p>每一层的职责是清晰的：</p>
+<table>
+<thead>
+<tr>
+<th>目录</th>
+<th>职责</th>
+<th>允许依赖</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>domain/</code></td>
+<td>业务实体、规则、服务</td>
+<td>只依赖 <code>error.rs</code> 和 <code>port/</code></td>
+</tr>
+<tr>
+<td><code>port/</code></td>
+<td>trait 接口定义</td>
+<td>只依赖 <code>domain/</code> 里的类型</td>
+</tr>
+<tr>
+<td><code>infra/</code></td>
+<td>具体实现</td>
+<td>可以依赖外部 crate（sqlx、redis 等）</td>
+</tr>
+<tr>
+<td><code>main.rs</code></td>
+<td>组装和启动</td>
+<td>可以依赖所有层</td>
+</tr>
+</tbody></table>
+<p>这个结构重要的地方在于<strong>依赖方向</strong>：</p>
+<pre><code class="highlight plaintext">infra → port ← domain
+          ↑
+        main</code></pre>
+
+<p><code>domain</code> 定义规则，<code>port</code> 声明接口，<code>infra</code> 实现接口。<code>domain</code> 完全不知道 <code>infra</code> 的存在。</p>
+<h3 id="3-1-用可见性控制边界"><a href="#3-1-用可见性控制边界" class="headerlink" title="3.1 用可见性控制边界"></a>3.1 用可见性控制边界</h3><p>在单 crate 里，可以用 Rust 的可见性修饰来替代 crate 边界：</p>
+<pre><code class="highlight rust"><span class="comment">// domain/user.rs</span>
+
+<span class="comment">// 对外完全可见</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">User</span> &#123; ... &#125;
+
+<span class="comment">// 只在 domain 模块内可见，不泄漏给 infra 或 main</span>
+<span class="title function_ invoke__">pub</span>(<span class="keyword">super</span>) <span class="keyword">fn</span> <span class="title function_">validate_email</span>(email: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">bool</span> &#123; ... &#125;
+
+<span class="comment">// 只在 crate 内可见，不能被外部 crate 依赖（如果后来变成库）</span>
+<span class="title function_ invoke__">pub</span>(<span class="keyword">crate</span>) <span class="keyword">struct</span> <span class="title class_">UserBuilder</span> &#123; ... &#125;</code></pre>
+
+<p>Rust 可见性体系：</p>
+<table>
+<thead>
+<tr>
+<th>修饰符</th>
+<th>可见范围</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>无修饰（<code>pub</code>）</td>
+<td>对所有人可见</td>
+</tr>
+<tr>
+<td><code>pub(crate)</code></td>
+<td>只在本 crate 内可见</td>
+</tr>
+<tr>
+<td><code>pub(super)</code></td>
+<td>只在父模块可见</td>
+</tr>
+<tr>
+<td>无修饰（私有）</td>
+<td>只在当前模块可见</td>
+</tr>
+</tbody></table>
+<p>好的实践是：<strong>默认私有，按需开放</strong>。不要因为懒得想就把所有东西都写 <code>pub</code>。</p>
+<hr>
+<h2 id="四、什么时候升级到-workspace-多-crate"><a href="#四、什么时候升级到-workspace-多-crate" class="headerlink" title="四、什么时候升级到 workspace 多 crate"></a>四、什么时候升级到 workspace 多 crate</h2><p>单 crate 项目有几个明确的升级信号：</p>
+<p><strong>1. 出现了稳定、需要跨项目复用的能力</strong></p>
+<p>比如：你写了一套业务规则，另一个服务也要用。这时候把它提取成独立 crate，就可以像普通依赖一样引用。</p>
+<p><strong>2. 有多个二进制入口</strong></p>
+<p>比如：一个 HTTP 服务 + 一个后台任务 CLI + 一个数据库迁移工具。它们共用相同的业务逻辑，但入口不同。这时候业务逻辑作为库 crate，三个入口作为独立的 bin crate 更合理。</p>
+<p><strong>3. 需要用边界来强制隔离</strong></p>
+<p>单 crate 里，你可以用 <code>pub(crate)</code> 来”软隔离”，但仍然可以绕过。一旦拆成不同 crate，你就没法访问其他 crate 里不是 <code>pub</code> 的东西——这是<strong>硬边界</strong>，编译器强制执行。</p>
+<p><strong>4. 编译速度开始影响开发效率</strong></p>
+<p>Rust 按 crate 做增量编译。把很少变化的稳定代码（比如核心业务逻辑）拆成独立 crate，能显著减少不必要的重编译。</p>
+<hr>
+<h2 id="五、多-crate-workspace-的目录结构"><a href="#五、多-crate-workspace-的目录结构" class="headerlink" title="五、多 crate workspace 的目录结构"></a>五、多 crate workspace 的目录结构</h2><p>本文示例工程 <a href="workspaces/skeleton-demo">workspaces&#x2F;skeleton-demo</a> 就是一个完整的多 crate workspace。</p>
+<p>整体结构：</p>
+<pre><code class="highlight plaintext">skeleton-demo/
+├── Cargo.toml          # workspace 根配置
+├── apps/               # 二进制入口层
+│   └── server/
+│       ├── Cargo.toml
+│       └── src/
+│           └── main.rs
+└── crates/             # 库 crate 层
+    ├── core/           # 业务核心，无外部依赖
+    │   ├── Cargo.toml
+    │   ├── src/
+    │   │   ├── lib.rs
+    │   │   ├── error.rs
+    │   │   ├── model/
+    │   │   │   └── user.rs
+    │   │   ├── port/
+    │   │   │   └── user_repo.rs
+    │   │   └── service/
+    │   │       └── user.rs
+    │   └── tests/
+    │       └── user_service_test.rs
+    └── infra/          # 具体实现，依赖 core
+        ├── Cargo.toml
+        └── src/
+            ├── lib.rs
+            └── memory/
+                └── user_store.rs</code></pre>
+
+<p>目录约定：</p>
+<ul>
+<li><code>apps/</code>：放所有二进制入口。每个 app 是一个独立的 Cargo package，负责”组装”。</li>
+<li><code>crates/</code>：放所有库 crate。这里的东西不包含 main，只提供能力。</li>
+</ul>
+<h3 id="5-1-workspace-根配置"><a href="#5-1-workspace-根配置" class="headerlink" title="5.1 workspace 根配置"></a>5.1 workspace 根配置</h3><pre><code class="highlight toml"><span class="comment"># Cargo.toml（workspace 根）</span>
+<span class="section">[workspace]</span>
+<span class="attr">members</span> = [
+    <span class="string">&quot;apps/server&quot;</span>,
+    <span class="string">&quot;crates/core&quot;</span>,
+    <span class="string">&quot;crates/infra&quot;</span>,
+]
+<span class="attr">resolver</span> = <span class="string">&quot;2&quot;</span>
+
+<span class="section">[workspace.package]</span>
+<span class="attr">edition</span> = <span class="string">&quot;2024&quot;</span>
+<span class="attr">version</span> = <span class="string">&quot;0.1.0&quot;</span>
+
+<span class="comment"># 在根 Cargo.toml 统一声明内部依赖，所有 member 共用</span>
+<span class="section">[workspace.dependencies]</span>
+<span class="attr">core</span> = &#123; path = <span class="string">&quot;crates/core&quot;</span> &#125;
+<span class="attr">infra</span> = &#123; path = <span class="string">&quot;crates/infra&quot;</span> &#125;</code></pre>
+
+<p>把版本和路径集中管理，所有 member 使用 <code>core.workspace = true</code> 引用，避免重复声明。</p>
+<hr>
+<h2 id="六、核心层（core-crate）的设计"><a href="#六、核心层（core-crate）的设计" class="headerlink" title="六、核心层（core crate）的设计"></a>六、核心层（core crate）的设计</h2><p><code>core</code> crate 是整个项目的心脏。</p>
+<p>它的关键属性是：</p>
+<blockquote>
+<p><strong>不依赖任何外部 crate</strong>（除标准库）。</p>
+</blockquote>
+<p><code>core/Cargo.toml</code> 里 <code>[dependencies]</code> 应该是空的（或只包含纯数据类型工具，如 <code>chrono</code>、<code>uuid</code>）。这个约束让你随时可以独立编译、独立测试 core，而不需要启动任何基础设施。</p>
+<h3 id="6-1-领域模型：用强类型表达业务概念"><a href="#6-1-领域模型：用强类型表达业务概念" class="headerlink" title="6.1 领域模型：用强类型表达业务概念"></a>6.1 领域模型：用强类型表达业务概念</h3><pre><code class="highlight rust"><span class="comment">// crates/core/src/model/user.rs</span>
+
+<span class="comment">// 用强类型表达 ID，避免 u64 满天飞导致的语义混淆</span>
+<span class="meta">#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">UserId</span>(<span class="type">u64</span>);
+
+<span class="keyword">impl</span> <span class="title class_">UserId</span> &#123;
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">new</span>(id: <span class="type">u64</span>) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123; <span class="title function_ invoke__">UserId</span>(id) &#125;
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">value</span>(<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> <span class="type">u64</span> &#123; <span class="keyword">self</span>.<span class="number">0</span> &#125;
+&#125;
+
+<span class="meta">#[derive(Debug, Clone, PartialEq, Eq)]</span>
+<span class="keyword">pub</span> <span class="keyword">enum</span> <span class="title class_">UserRole</span> &#123; Regular, Admin &#125;
+
+<span class="comment">/// 用户实体：字段私有，只能通过方法访问</span>
+<span class="comment">/// 构造时统一验证，不允许创建出不合法的 User</span>
+<span class="meta">#[derive(Debug, Clone, PartialEq, Eq)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">User</span> &#123;
+    id: UserId,
+    name: <span class="type">String</span>,
+    email: <span class="type">String</span>,
+    role: UserRole,
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">User</span> &#123;
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">new</span>(
+        id: UserId,
+        name: <span class="keyword">impl</span> <span class="title class_">Into</span>&lt;<span class="type">String</span>&gt;,
+        email: <span class="keyword">impl</span> <span class="title class_">Into</span>&lt;<span class="type">String</span>&gt;,
+        role: UserRole,
+    ) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;<span class="keyword">Self</span>, CoreError&gt; &#123;
+        <span class="keyword">let</span> <span class="variable">name</span> = name.<span class="title function_ invoke__">into</span>();
+        <span class="keyword">let</span> <span class="variable">name</span> = name.<span class="title function_ invoke__">trim</span>();
+        <span class="keyword">if</span> name.<span class="title function_ invoke__">is_empty</span>() &#123;
+            <span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(CoreError::EmptyName);
+        &#125;
+        <span class="comment">// ...邮箱格式验证...</span>
+        <span class="title function_ invoke__">Ok</span>(<span class="keyword">Self</span> &#123; id, name: name.<span class="title function_ invoke__">to_string</span>(), email: email.<span class="title function_ invoke__">into</span>(), role &#125;)
+    &#125;
+
+    <span class="comment">// 业务操作：不是简单的字段赋值，而是包含业务规则</span>
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">promote_to_admin</span>(&amp;<span class="keyword">mut</span> <span class="keyword">self</span>) &#123;
+        <span class="keyword">self</span>.role = UserRole::Admin;
+    &#125;
+&#125;</code></pre>
+
+<p>这里有几个值得注意的细节：</p>
+<p><strong>字段全部私有</strong>：<code>User</code> 的字段没有任何 <code>pub</code>。这意味着不能在 <code>core</code> 外部直接构造或修改 <code>User</code>，必须通过方法。这样可以保证”不合法的 User 永远不存在”。</p>
+<p><strong>强类型 ID</strong>：<code>UserId(u64)</code> 而不是裸 <code>u64</code>。这在编译期就能防止把 <code>OrderId</code> 误传给需要 <code>UserId</code> 的函数。</p>
+<h3 id="6-2-端口（Port）：定义接口，不实现"><a href="#6-2-端口（Port）：定义接口，不实现" class="headerlink" title="6.2 端口（Port）：定义接口，不实现"></a>6.2 端口（Port）：定义接口，不实现</h3><pre><code class="highlight rust"><span class="comment">// crates/core/src/port/user_repo.rs</span>
+
+<span class="keyword">use</span> crate::&#123;CoreError, model::user::&#123;User, UserId&#125;&#125;;
+
+<span class="comment">/// 用户仓储接口</span>
+<span class="comment">///</span>
+<span class="comment">/// core crate 声明&quot;需要什么&quot;，不管&quot;怎么实现&quot;。</span>
+<span class="comment">/// 这是依赖倒置原则在 Rust 里最直接的表达。</span>
+<span class="keyword">pub</span> <span class="keyword">trait</span> <span class="title class_">UserRepository</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">next_id</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> UserId;
+    <span class="keyword">fn</span> <span class="title function_">save</span>(&amp;<span class="keyword">mut</span> <span class="keyword">self</span>, user: User) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;(), CoreError&gt;;
+    <span class="keyword">fn</span> <span class="title function_">find_by_id</span>(&amp;<span class="keyword">self</span>, id: UserId) <span class="punctuation">-&gt;</span> <span class="type">Option</span>&lt;User&gt;;
+    <span class="keyword">fn</span> <span class="title function_">find_by_email</span>(&amp;<span class="keyword">self</span>, email: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">Option</span>&lt;User&gt;;
+    <span class="keyword">fn</span> <span class="title function_">update</span>(&amp;<span class="keyword">mut</span> <span class="keyword">self</span>, user: User) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;(), CoreError&gt;;
+    <span class="keyword">fn</span> <span class="title function_">list</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> <span class="type">Vec</span>&lt;User&gt;;
+&#125;</code></pre>
+
+<p>这个 trait 完全在 <code>core</code> crate 里定义。<code>infra</code> crate 去实现它，<code>core</code> 完全不知道 <code>infra</code> 的存在。</p>
+<h3 id="6-3-服务层：业务逻辑的入口"><a href="#6-3-服务层：业务逻辑的入口" class="headerlink" title="6.3 服务层：业务逻辑的入口"></a>6.3 服务层：业务逻辑的入口</h3><pre><code class="highlight rust"><span class="comment">// crates/core/src/service/user.rs</span>
+
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">UserService</span>&lt;R&gt; &#123;
+    repo: R,
+&#125;
+
+<span class="keyword">impl</span>&lt;R: UserRepository&gt; UserService&lt;R&gt; &#123;
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">new</span>(repo: R) <span class="punctuation">-&gt;</span> <span class="keyword">Self</span> &#123; <span class="keyword">Self</span> &#123; repo &#125; &#125;
+
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">register</span>(&amp;<span class="keyword">mut</span> <span class="keyword">self</span>, name: &amp;<span class="type">str</span>, email: &amp;<span class="type">str</span>) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;User, CoreError&gt; &#123;
+        <span class="comment">// 业务规则：邮箱不能重复</span>
+        <span class="keyword">if</span> <span class="keyword">self</span>.repo.<span class="title function_ invoke__">find_by_email</span>(email).<span class="title function_ invoke__">is_some</span>() &#123;
+            <span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(CoreError::EmailAlreadyExists &#123; email: email.<span class="title function_ invoke__">to_string</span>() &#125;);
+        &#125;
+        <span class="keyword">let</span> <span class="variable">id</span> = <span class="keyword">self</span>.repo.<span class="title function_ invoke__">next_id</span>();
+        <span class="keyword">let</span> <span class="variable">user</span> = User::<span class="title function_ invoke__">new</span>(id, name, email, UserRole::Regular)?;
+        <span class="keyword">self</span>.repo.<span class="title function_ invoke__">save</span>(user.<span class="title function_ invoke__">clone</span>())?;
+        <span class="title function_ invoke__">Ok</span>(user)
+    &#125;
+
+    <span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">promote_to_admin</span>(&amp;<span class="keyword">mut</span> <span class="keyword">self</span>, id: UserId) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;User, CoreError&gt; &#123;
+        <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">user</span> = <span class="keyword">self</span>.<span class="title function_ invoke__">get</span>(id)?;
+        user.<span class="title function_ invoke__">promote_to_admin</span>();
+        <span class="keyword">self</span>.repo.<span class="title function_ invoke__">update</span>(user.<span class="title function_ invoke__">clone</span>())?;
+        <span class="title function_ invoke__">Ok</span>(user)
+    &#125;
+    <span class="comment">// ...</span>
+&#125;</code></pre>
+
+<p><code>UserService&lt;R&gt;</code> 对 <code>R: UserRepository</code> 泛型。它只和接口打交道，不知道背后是内存存储、SQLite 还是 PostgreSQL。</p>
+<h3 id="6-4-core-的公开接口"><a href="#6-4-core-的公开接口" class="headerlink" title="6.4 core 的公开接口"></a>6.4 core 的公开接口</h3><pre><code class="highlight rust"><span class="comment">// crates/core/src/lib.rs</span>
+
+<span class="keyword">mod</span> error;
+<span class="keyword">pub</span> <span class="keyword">mod</span> model;
+<span class="keyword">mod</span> port;
+<span class="keyword">mod</span> service;
+
+<span class="comment">// 只暴露外层真正需要的符号</span>
+<span class="keyword">pub</span> <span class="keyword">use</span> error::CoreError;
+<span class="keyword">pub</span> <span class="keyword">use</span> model::user::&#123;User, UserId, UserRole&#125;;
+<span class="keyword">pub</span> <span class="keyword">use</span> port::user_repo::UserRepository;
+<span class="keyword">pub</span> <span class="keyword">use</span> service::user::UserService;</code></pre>
+
+<p><code>port</code> 和 <code>service</code> 模块本身是私有的（没有 <code>pub mod</code>），但通过 <code>pub use</code> 把需要暴露的类型重新导出。外层 crate 看到的是一个扁平的 API，而不是内部的模块树。</p>
+<hr>
+<h2 id="七、基础设施层（infra-crate）的设计"><a href="#七、基础设施层（infra-crate）的设计" class="headerlink" title="七、基础设施层（infra crate）的设计"></a>七、基础设施层（infra crate）的设计</h2><p><code>infra</code> crate 的职责是实现 <code>core</code> 定义的接口。</p>
+<pre><code class="highlight toml"><span class="comment"># crates/infra/Cargo.toml</span>
+<span class="section">[dependencies]</span>
+<span class="attr">core.workspace</span> = <span class="literal">true</span>
+<span class="comment"># 如果是真实项目，这里还会有：</span>
+<span class="comment"># sqlx = &#123; version = &quot;...&quot;, features = [...] &#125;</span>
+<span class="comment"># redis = &quot;...&quot;</span></code></pre>
+
+<p>具体实现：</p>
+<pre><code class="highlight rust"><span class="comment">// crates/infra/src/memory/user_store.rs</span>
+
+<span class="keyword">use</span> core::&#123;CoreError, UserRepository, model::user::&#123;User, UserId&#125;&#125;;
+
+<span class="meta">#[derive(Debug, Default)]</span>
+<span class="keyword">pub</span> <span class="keyword">struct</span> <span class="title class_">InMemoryUserStore</span> &#123;
+    next_id: <span class="type">u64</span>,
+    users: BTreeMap&lt;<span class="type">u64</span>, User&gt;,
+&#125;
+
+<span class="keyword">impl</span> <span class="title class_">UserRepository</span> <span class="keyword">for</span> <span class="title class_">InMemoryUserStore</span> &#123;
+    <span class="keyword">fn</span> <span class="title function_">next_id</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> UserId &#123; UserId::<span class="title function_ invoke__">new</span>(<span class="keyword">self</span>.next_id) &#125;
+
+    <span class="keyword">fn</span> <span class="title function_">save</span>(&amp;<span class="keyword">mut</span> <span class="keyword">self</span>, user: User) <span class="punctuation">-&gt;</span> <span class="type">Result</span>&lt;(), CoreError&gt; &#123;
+        <span class="comment">// 检查邮箱唯一性</span>
+        <span class="keyword">let</span> <span class="variable">email</span> = user.<span class="title function_ invoke__">email</span>().<span class="title function_ invoke__">to_string</span>();
+        <span class="keyword">if</span> <span class="keyword">self</span>.users.<span class="title function_ invoke__">values</span>().<span class="title function_ invoke__">any</span>(|u| u.<span class="title function_ invoke__">email</span>() == email) &#123;
+            <span class="keyword">return</span> <span class="title function_ invoke__">Err</span>(CoreError::EmailAlreadyExists &#123; email &#125;);
+        &#125;
+        <span class="keyword">self</span>.users.<span class="title function_ invoke__">insert</span>(user.<span class="title function_ invoke__">id</span>().<span class="title function_ invoke__">value</span>(), user);
+        <span class="keyword">self</span>.next_id += <span class="number">1</span>;
+        <span class="title function_ invoke__">Ok</span>(())
+    &#125;
+    <span class="comment">// ...</span>
+&#125;</code></pre>
+
+<p>未来需要换成真实数据库时，只需要：</p>
+<ol>
+<li>在 <code>infra</code> 里新增 <code>postgres/user_store.rs</code>，实现同样的 <code>UserRepository</code> trait</li>
+<li>在 <code>apps/server/src/main.rs</code> 里把 <code>InMemoryUserStore::new()</code> 换成 <code>PostgresUserStore::new(pool)</code></li>
+</ol>
+<p>业务逻辑代码（<code>core</code> crate）零修改。</p>
+<hr>
+<h2 id="八、组装层（apps-server）：唯一知道”用谁”的地方"><a href="#八、组装层（apps-server）：唯一知道”用谁”的地方" class="headerlink" title="八、组装层（apps&#x2F;server）：唯一知道”用谁”的地方"></a>八、组装层（apps&#x2F;server）：唯一知道”用谁”的地方</h2><p>入口层（Composition Root）有一个关键原则：</p>
+<blockquote>
+<p>它是整个程序里**唯一需要知道”用哪个具体实现”**的地方。</p>
+</blockquote>
+<pre><code class="highlight rust"><span class="comment">// apps/server/src/main.rs</span>
+
+<span class="keyword">use</span> core::UserService;
+<span class="keyword">use</span> infra::InMemoryUserStore;  <span class="comment">// 只有这里知道用 InMemoryUserStore</span>
+
+<span class="keyword">fn</span> <span class="title function_">main</span>() &#123;
+    <span class="comment">// 创建具体实现</span>
+    <span class="keyword">let</span> <span class="variable">store</span> = InMemoryUserStore::<span class="title function_ invoke__">new</span>();
+
+    <span class="comment">// 注入到业务服务（UserService 只知道 R: UserRepository，不知道具体类型）</span>
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">service</span> = UserService::<span class="title function_ invoke__">new</span>(store);
+
+    <span class="comment">// 从这里开始，全部是业务操作，不再出现任何 infra 相关的名字</span>
+    <span class="keyword">let</span> <span class="variable">alice</span> = service.<span class="title function_ invoke__">register</span>(<span class="string">&quot;alice&quot;</span>, <span class="string">&quot;alice@example.com&quot;</span>).<span class="title function_ invoke__">unwrap</span>();
+    <span class="keyword">let</span> <span class="variable">promoted</span> = service.<span class="title function_ invoke__">promote_to_admin</span>(alice.<span class="title function_ invoke__">id</span>()).<span class="title function_ invoke__">unwrap</span>();
+    <span class="comment">// ...</span>
+&#125;</code></pre>
+
+<p>这个文件通常很短，因为它做的事情很单一：创建依赖 → 注入 → 启动。</p>
+<hr>
+<h2 id="九、测试应该在哪里写"><a href="#九、测试应该在哪里写" class="headerlink" title="九、测试应该在哪里写"></a>九、测试应该在哪里写</h2><p>骨架设计正确之后，测试会变得很容易写。</p>
+<h3 id="9-1-core-的测试：不需要任何基础设施"><a href="#9-1-core-的测试：不需要任何基础设施" class="headerlink" title="9.1 core 的测试：不需要任何基础设施"></a>9.1 core 的测试：不需要任何基础设施</h3><p>由于 <code>UserService&lt;R&gt;</code> 对 R 是泛型的，测试时可以直接在测试文件里定义一个最简单的 <code>TestStore</code>，完全不依赖 <code>infra</code> crate：</p>
+<pre><code class="highlight rust"><span class="comment">// crates/core/tests/user_service_test.rs</span>
+
+<span class="keyword">use</span> core::&#123;CoreError, UserService, model::user::UserId&#125;;
+
+<span class="comment">// 测试用的极简存储</span>
+<span class="keyword">struct</span> <span class="title class_">TestStore</span> &#123; ... &#125;
+<span class="keyword">impl</span> <span class="title class_">UserRepository</span> <span class="keyword">for</span> <span class="title class_">TestStore</span> &#123; ... &#125;
+
+<span class="meta">#[test]</span>
+<span class="keyword">fn</span> <span class="title function_">register_creates_regular_user</span>() &#123;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">svc</span> = UserService::<span class="title function_ invoke__">new</span>(TestStore::<span class="title function_ invoke__">new</span>());
+    <span class="keyword">let</span> <span class="variable">user</span> = svc.<span class="title function_ invoke__">register</span>(<span class="string">&quot;alice&quot;</span>, <span class="string">&quot;alice@example.com&quot;</span>).<span class="title function_ invoke__">unwrap</span>();
+    <span class="built_in">assert_eq!</span>(user.<span class="title function_ invoke__">name</span>(), <span class="string">&quot;alice&quot;</span>);
+    <span class="built_in">assert_eq!</span>(user.<span class="title function_ invoke__">role</span>(), &amp;UserRole::Regular);
+&#125;
+
+<span class="meta">#[test]</span>
+<span class="keyword">fn</span> <span class="title function_">register_rejects_duplicate_email</span>() &#123;
+    <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">svc</span> = UserService::<span class="title function_ invoke__">new</span>(TestStore::<span class="title function_ invoke__">new</span>());
+    svc.<span class="title function_ invoke__">register</span>(<span class="string">&quot;alice&quot;</span>, <span class="string">&quot;alice@example.com&quot;</span>).<span class="title function_ invoke__">unwrap</span>();
+    <span class="keyword">let</span> <span class="variable">err</span> = svc.<span class="title function_ invoke__">register</span>(<span class="string">&quot;alice2&quot;</span>, <span class="string">&quot;alice@example.com&quot;</span>).<span class="title function_ invoke__">unwrap_err</span>();
+    <span class="built_in">assert_eq!</span>(err, CoreError::EmailAlreadyExists &#123;
+        email: <span class="string">&quot;alice@example.com&quot;</span>.<span class="title function_ invoke__">to_string</span>(),
+    &#125;);
+&#125;</code></pre>
+
+<p>这 6 个测试（见 <a href="workspaces/skeleton-demo/crates/core/tests/user_service_test.rs">workspaces&#x2F;skeleton-demo&#x2F;crates&#x2F;core&#x2F;tests&#x2F;user_service_test.rs</a>）在不启动任何数据库的情况下覆盖了所有核心业务规则，运行极快。</p>
+<h3 id="9-2-测试放在哪里"><a href="#9-2-测试放在哪里" class="headerlink" title="9.2 测试放在哪里"></a>9.2 测试放在哪里</h3><table>
+<thead>
+<tr>
+<th>测试类型</th>
+<th>位置</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>单元测试（测内部细节）</td>
+<td><code>src/</code> 里的 <code>#[cfg(test)] mod tests</code></td>
+<td>可以访问私有接口</td>
+</tr>
+<tr>
+<td>集成测试（测公开 API）</td>
+<td><code>tests/</code> 目录</td>
+<td>只通过公开接口测试，更贴近使用者视角</td>
+</tr>
+<tr>
+<td>端到端测试</td>
+<td><code>apps/</code> 下或单独 crate</td>
+<td>需要真实基础设施</td>
+</tr>
+</tbody></table>
+<p>本文示例选择了集成测试（<code>tests/</code> 目录），因为业务规则应该通过公开 API 来验证，而不是直接访问内部细节。</p>
+<hr>
+<h2 id="十、整体依赖方向回顾"><a href="#十、整体依赖方向回顾" class="headerlink" title="十、整体依赖方向回顾"></a>十、整体依赖方向回顾</h2><p>把所有 crate 的依赖关系画出来，应该是这样的：</p>
+<pre><code class="highlight plaintext">apps/server
+    ├── depends on → crates/core
+    └── depends on → crates/infra
+
+crates/infra
+    └── depends on → crates/core
+
+crates/core
+    └── (no external dependencies)</code></pre>
+
+<p>关键点：</p>
+<ol>
+<li><strong>箭头方向单向</strong>：没有循环依赖</li>
+<li><strong><code>core</code> 在最底层</strong>：它不依赖任何人，只被别人依赖</li>
+<li><strong><code>infra</code> 只依赖 <code>core</code></strong>：不依赖 <code>apps</code>，不会因为入口层的变化而改变</li>
+<li><strong><code>apps</code> 在最顶层</strong>：它可以依赖所有人，但也只在这一层做”组装”</li>
+</ol>
+<hr>
+<h2 id="十一、总结：可维护骨架的检查清单"><a href="#十一、总结：可维护骨架的检查清单" class="headerlink" title="十一、总结：可维护骨架的检查清单"></a>十一、总结：可维护骨架的检查清单</h2><p>设计完项目骨架，可以对照这个清单检查：</p>
+<p><strong>依赖方向</strong></p>
+<ul>
+<li><input disabled="" type="checkbox"> <code>domain</code>（或 <code>core</code>）不依赖任何具体的基础设施库</li>
+<li><input disabled="" type="checkbox"> 没有循环依赖</li>
+<li><input disabled="" type="checkbox"> 入口层是唯一知道”用哪个具体实现”的地方</li>
+</ul>
+<p><strong>边界管理</strong></p>
+<ul>
+<li><input disabled="" type="checkbox"> 不同职责（业务 &#x2F; 接口 &#x2F; 实现 &#x2F; 启动）在不同的模块或 crate 里</li>
+<li><input disabled="" type="checkbox"> 公开 API 是经过设计的 <code>pub use</code> 列表，而不是所有东西都 <code>pub</code></li>
+</ul>
+<p><strong>可测试性</strong></p>
+<ul>
+<li><input disabled="" type="checkbox"> 业务逻辑可以在不启动任何外部服务的情况下测试</li>
+<li><input disabled="" type="checkbox"> trait 接口是否足够薄，可以用简单的测试实现替换</li>
+</ul>
+<p><strong>可替换性</strong></p>
+<ul>
+<li><input disabled="" type="checkbox"> 基础设施实现可以被替换（换数据库、换缓存）而不需要改业务代码</li>
+</ul>
+<p>满足这四类条件的骨架，才算是”可维护的”。</p>
+<hr>
+<p>这一篇建立了项目骨架的基础。</p>
+<p>下一篇 [Rust 工程化实战（二）：配置、日志、错误处理如何统一起来]，会在这个骨架基础上，把配置加载、日志初始化、跨层错误处理这三件事系统地接入进来。</p>
+</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-XXXXXXXXX');</script></html>
