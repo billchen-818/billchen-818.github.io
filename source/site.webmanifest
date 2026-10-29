@@ -1,0 +1,16 @@
+{
+  "name": "billchen的博客",
+  "short_name": "billchen",
+  "description": "记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#171717",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
