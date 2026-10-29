@@ -63,11 +63,33 @@ H4 {
   color: #666666;
 }
 
-.time {
+.post-meta {
   text-align: center;
-  line-height: 1.0;
+  color: #777;
+  line-height: 1.5;
   font-size: 90%;
   margin-bottom: 20px;
+}
+
+.post-meta .time {
+  display: inline;
+}
+
+.meta-separator {
+  padding: 0 8px;
+  color: #bbb;
+}
+
+.post-reading {
+  display: inline-flex;
+  gap: 4px;
+  align-items: baseline;
+}
+
+.post-reading strong {
+  color: #555;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
 }
 
 .box {

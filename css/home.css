@@ -156,10 +156,39 @@ div.word-count {
     font-size: 100%;
 }
 
-/* footer */
-.footer {
-    margin-top: 35px;
-    margin-bottom: 25px;
+/* footer and public visitor counters */
+.site-footer {
+    max-width: 960px;
+    margin: 48px auto 28px;
+    padding: 24px 20px 0;
+    border-top: 1px solid #e8e8e8;
+    color: #888;
+    font-size: 14px;
+    text-align: center;
+}
+
+.site-statistics {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 10px 24px;
+}
+
+.statistic-item {
+    display: inline-flex;
+    gap: 6px;
+    align-items: baseline;
+    white-space: nowrap;
+}
+
+.statistic-value {
+    color: #555;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+}
+
+.site-copyright {
+    margin: 12px 0 0;
 }
 
 #articleCounts {
@@ -190,6 +219,15 @@ div.word-count {
 
     .paginator {
         margin: 24px 12px 40px;
+    }
+
+    .site-footer {
+        margin: 36px 16px 24px;
+        padding: 20px 8px 0;
+    }
+
+    .site-statistics {
+        gap: 8px 16px;
     }
 }
 
