@@ -1,6 +1,4 @@
-<!DOCTYPE html><html lang="zh-cn"><head><title>Rust 配置管理实战：环境变量、配置文件与多环境组织方式</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
-  document.body.classList.add('mobile')
-}</script><div><div class="inner"><h1>Rust 配置管理实战：环境变量、配置文件与多环境组织方式</h1><div class="time">2026-05-11</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><h2 id="引言"><a href="#引言" class="headerlink" title="引言"></a>引言</h2><p>很多人刚开始写 Rust 项目时，对配置的处理方式都比较直接。</p>
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust 配置管理实战：环境变量、配置文件与多环境组织方式 | billchen的博客</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。"><meta name="author" content="billchen"><link rel="canonical" href="https://billchen-818.github.io/2026/05/11/Rust-%E9%85%8D%E7%BD%AE%E7%AE%A1%E7%90%86%E5%AE%9E%E6%88%98%EF%BC%9A%E7%8E%AF%E5%A2%83%E5%8F%98%E9%87%8F%E3%80%81%E9%85%8D%E7%BD%AE%E6%96%87%E4%BB%B6%E4%B8%8E%E5%A4%9A%E7%8E%AF%E5%A2%83%E7%BB%84%E7%BB%87%E6%96%B9%E5%BC%8F/"><meta property="og:title" content="Rust 配置管理实战：环境变量、配置文件与多环境组织方式 | billchen的博客"><meta property="og:description" content="记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。"><meta property="og:type" content="article"><meta property="og:url" content="https://billchen-818.github.io/2026/05/11/Rust-%E9%85%8D%E7%BD%AE%E7%AE%A1%E7%90%86%E5%AE%9E%E6%88%98%EF%BC%9A%E7%8E%AF%E5%A2%83%E5%8F%98%E9%87%8F%E3%80%81%E9%85%8D%E7%BD%AE%E6%96%87%E4%BB%B6%E4%B8%8E%E5%A4%9A%E7%8E%AF%E5%A2%83%E7%BB%84%E7%BB%87%E6%96%B9%E5%BC%8F/"><meta property="og:site_name" content="billchen的博客"><meta name="twitter:card" content="summary"><link rel="alternate" type="application/atom+xml" title="billchen的博客" href="https://billchen-818.github.io/atom.xml"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-theme.min.css"><link rel="stylesheet" href="/css/home.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><nav class="navbar navbar-default" style="opacity:.9;" role="navigation" aria-label="主导航"><div class="container-fluid"><div class="navbar-header"><button class="navbar-toggle collapsed" type="button" data-toggle="collapse" data-target="#navbar-bs" aria-expanded="false" aria-controls="navbar-bs" aria-label="展开导航"><span class="icon-bar"></span><span class="icon-bar"></span><span class="icon-bar"></span></button><a class="navbar-brand" href="/" data-toggle="tooltip" data-placement="right">billchen的博客</a></div><div class="navbar-collapse collapse" id="navbar-bs"><ul class="nav navbar-nav navbar-right"><li><a href="/" target="_self">首页</a></li><li><a href="/archives/" target="_self">归档</a></li><li><a href="/tags/" target="_self">标签</a></li></ul></div></div></nav><div><div class="inner"><h1>Rust 配置管理实战：环境变量、配置文件与多环境组织方式</h1><div class="time">2026-05-11</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><h2 id="引言"><a href="#引言" class="headerlink" title="引言"></a>引言</h2><p>很多人刚开始写 Rust 项目时，对配置的处理方式都比较直接。</p>
 <p>比如：</p>
 <ul>
 <li>端口直接写死在代码里</li>
@@ -37,7 +35,7 @@
 <li>如何把配置加载写成结构清晰、可维护的代码</li>
 <li>怎样避免把敏感信息硬编码进仓库</li>
 </ol>
-<p>文章最后会给出一套可以直接运行的示例工程，目录已经放在 <a href="workspaces/config-demo">workspaces&#x2F;config-demo</a>。</p>
+<p>文章最后会给出一套可以直接运行的示例工程，目录已经放在 <code>workspaces/config-demo</code>。</p>
 <hr>
 <h2 id="一、先回答根问题：配置到底在解决什么？"><a href="#一、先回答根问题：配置到底在解决什么？" class="headerlink" title="一、先回答根问题：配置到底在解决什么？"></a>一、先回答根问题：配置到底在解决什么？</h2><p>很多人说“配置”，其实脑子里只想到数据库连接串和端口号。</p>
 <p>但从工程角度看，配置真正解决的是这几类问题：</p>
@@ -231,7 +229,7 @@ APP_LOG_LEVEL=info</code></pre>
 </ol>
 <hr>
 <h2 id="五、示例工程：一套可运行的-Rust-配置管理方案"><a href="#五、示例工程：一套可运行的-Rust-配置管理方案" class="headerlink" title="五、示例工程：一套可运行的 Rust 配置管理方案"></a>五、示例工程：一套可运行的 Rust 配置管理方案</h2><p>这一节我们直接看可运行实现。</p>
-<p>完整示例目录在 <a href="workspaces/config-demo">workspaces&#x2F;config-demo</a>。</p>
+<p>完整示例目录在 <code>workspaces/config-demo</code>。</p>
 <h3 id="5-1-Cargo-toml"><a href="#5-1-Cargo-toml" class="headerlink" title="5.1 Cargo.toml"></a>5.1 <code>Cargo.toml</code></h3><pre><code class="highlight toml"><span class="section">[package]</span>
 <span class="attr">name</span> = <span class="string">&quot;config-demo&quot;</span>
 <span class="attr">version</span> = <span class="string">&quot;0.1.0&quot;</span>
@@ -500,7 +498,7 @@ APP__DATABASE__MAX_CONNECTIONS=50</code></pre>
 <li>后续加 tracing、数据库连接池、HTTP server 初始化时，不会把入口挤爆</li>
 </ul>
 <hr>
-<h2 id="八、如何运行这个示例"><a href="#八、如何运行这个示例" class="headerlink" title="八、如何运行这个示例"></a>八、如何运行这个示例</h2><p>示例目录在 <a href="workspaces/config-demo">workspaces&#x2F;config-demo</a>。</p>
+<h2 id="八、如何运行这个示例"><a href="#八、如何运行这个示例" class="headerlink" title="八、如何运行这个示例"></a>八、如何运行这个示例</h2><p>示例目录在 <code>workspaces/config-demo</code>。</p>
 <h3 id="8-1-默认本地环境运行"><a href="#8-1-默认本地环境运行" class="headerlink" title="8.1 默认本地环境运行"></a>8.1 默认本地环境运行</h3><pre><code class="highlight bash"><span class="built_in">cd</span> workspaces/config-demo
 cargo run</code></pre>
 
@@ -661,7 +659,4 @@ APP__SERVER__PORT=3100</code></pre>
 <li>错误处理决定程序失败时怎么表达</li>
 </ul>
 <p>这三者放在一起，基本就是一个 Rust 服务项目最核心的工程基础设施。</p>
-</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
-function gtag(){dataLayer.push(arguments);}
-gtag('js', new Date());
-gtag('config', 'G-XXXXXXXXX');</script></html>
+<hr/><p><span>↶ </span><a href="/">返回首页</a><span></span></p></div></div><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script></body></html>

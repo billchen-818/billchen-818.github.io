@@ -1,6 +1,4 @@
-<!DOCTYPE html><html lang="zh-cn"><head><title>Rust 网络编程入门：TcpListener、TcpStream 与协议拆包粘包问题</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
-  document.body.classList.add('mobile')
-}</script><div><div class="inner"><h1>Rust 网络编程入门：TcpListener、TcpStream 与协议拆包粘包问题</h1><div class="time">2026-05-26</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>很多人第一次写 Rust 网络程序，通常会先从这两类 API 开始：</p>
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust 网络编程入门：TcpListener、TcpStream 与协议拆包粘包问题 | billchen的博客</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。"><meta name="author" content="billchen"><link rel="canonical" href="https://billchen-818.github.io/2026/05/26/Rust-%E7%BD%91%E7%BB%9C%E7%BC%96%E7%A8%8B%E5%85%A5%E9%97%A8%EF%BC%9ATcpListener%E3%80%81TcpStream-%E4%B8%8E%E5%8D%8F%E8%AE%AE%E6%8B%86%E5%8C%85%E7%B2%98%E5%8C%85%E9%97%AE%E9%A2%98/"><meta property="og:title" content="Rust 网络编程入门：TcpListener、TcpStream 与协议拆包粘包问题 | billchen的博客"><meta property="og:description" content="记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。"><meta property="og:type" content="article"><meta property="og:url" content="https://billchen-818.github.io/2026/05/26/Rust-%E7%BD%91%E7%BB%9C%E7%BC%96%E7%A8%8B%E5%85%A5%E9%97%A8%EF%BC%9ATcpListener%E3%80%81TcpStream-%E4%B8%8E%E5%8D%8F%E8%AE%AE%E6%8B%86%E5%8C%85%E7%B2%98%E5%8C%85%E9%97%AE%E9%A2%98/"><meta property="og:site_name" content="billchen的博客"><meta name="twitter:card" content="summary"><link rel="alternate" type="application/atom+xml" title="billchen的博客" href="https://billchen-818.github.io/atom.xml"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-theme.min.css"><link rel="stylesheet" href="/css/home.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><nav class="navbar navbar-default" style="opacity:.9;" role="navigation" aria-label="主导航"><div class="container-fluid"><div class="navbar-header"><button class="navbar-toggle collapsed" type="button" data-toggle="collapse" data-target="#navbar-bs" aria-expanded="false" aria-controls="navbar-bs" aria-label="展开导航"><span class="icon-bar"></span><span class="icon-bar"></span><span class="icon-bar"></span></button><a class="navbar-brand" href="/" data-toggle="tooltip" data-placement="right">billchen的博客</a></div><div class="navbar-collapse collapse" id="navbar-bs"><ul class="nav navbar-nav navbar-right"><li><a href="/" target="_self">首页</a></li><li><a href="/archives/" target="_self">归档</a></li><li><a href="/tags/" target="_self">标签</a></li></ul></div></div></nav><div><div class="inner"><h1>Rust 网络编程入门：TcpListener、TcpStream 与协议拆包粘包问题</h1><div class="time">2026-05-26</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>很多人第一次写 Rust 网络程序，通常会先从这两类 API 开始：</p>
 <ul>
 <li><code>TcpListener</code></li>
 <li><code>TcpStream</code></li>
@@ -30,7 +28,7 @@
 <li>为什么 TCP 会出现拆包和粘包</li>
 <li>最基本的协议边界应该怎么设计</li>
 </ol>
-<p>文中的完整示例工程在 <a href="workspaces/network-demo">workspaces&#x2F;network-demo</a>。</p>
+<p>文中的完整示例工程在 <code>workspaces/network-demo</code>。</p>
 <hr>
 <h2 id="一、先说结论：TCP-提供的是“可靠字节流”，不是“消息通道”"><a href="#一、先说结论：TCP-提供的是“可靠字节流”，不是“消息通道”" class="headerlink" title="一、先说结论：TCP 提供的是“可靠字节流”，不是“消息通道”"></a>一、先说结论：TCP 提供的是“可靠字节流”，不是“消息通道”</h2><p>很多人第一次写 socket 程序时，脑子里默认想的是：</p>
 <blockquote>
@@ -81,7 +79,7 @@
 <p>这个区分虽然基础，但很重要。</p>
 <p>很多刚开始写网络程序的人，会把“监听”和“连接内通信”混成一层思考，结果后面一加并发或多连接就开始混乱。</p>
 <hr>
-<h2 id="三、一个最小-TCP-程序是怎么跑起来的？"><a href="#三、一个最小-TCP-程序是怎么跑起来的？" class="headerlink" title="三、一个最小 TCP 程序是怎么跑起来的？"></a>三、一个最小 TCP 程序是怎么跑起来的？</h2><p>示例工程 <a href="workspaces/network-demo/src/main.rs">workspaces&#x2F;network-demo&#x2F;src&#x2F;main.rs</a> 里给了一套最小 server &#x2F; client。</p>
+<h2 id="三、一个最小-TCP-程序是怎么跑起来的？"><a href="#三、一个最小-TCP-程序是怎么跑起来的？" class="headerlink" title="三、一个最小 TCP 程序是怎么跑起来的？"></a>三、一个最小 TCP 程序是怎么跑起来的？</h2><p>示例工程 <code>workspaces/network-demo/src/main.rs</code> 里给了一套最小 server &#x2F; client。</p>
 <p>程序入口会先启动 server 线程，再启动 client：</p>
 <pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">main</span>() <span class="punctuation">-&gt;</span> io::<span class="type">Result</span>&lt;()&gt; &#123;
     <span class="keyword">let</span> <span class="variable">server</span> = thread::<span class="title function_ invoke__">spawn</span>(run_server);
@@ -313,13 +311,13 @@ world</code></pre>
 <p>这也是为什么拆包粘包问题值得在入门阶段就讲清楚。</p>
 <p>因为如果你一开始就误以为“TCP 会替你按消息收发”，后面做聊天、RPC、自定义协议时会一直踩坑。</p>
 <hr>
-<h2 id="十、完整示例：一个最小可运行的-TCP-framing-demo"><a href="#十、完整示例：一个最小可运行的-TCP-framing-demo" class="headerlink" title="十、完整示例：一个最小可运行的 TCP framing demo"></a>十、完整示例：一个最小可运行的 TCP framing demo</h2><p>示例工程 <a href="workspaces/network-demo">workspaces&#x2F;network-demo</a> 的核心逻辑包括：</p>
+<h2 id="十、完整示例：一个最小可运行的-TCP-framing-demo"><a href="#十、完整示例：一个最小可运行的-TCP-framing-demo" class="headerlink" title="十、完整示例：一个最小可运行的 TCP framing demo"></a>十、完整示例：一个最小可运行的 TCP framing demo</h2><p>示例工程 <code>workspaces/network-demo</code> 的核心逻辑包括：</p>
 <ol>
-<li>服务端监听 <a href="workspaces/network-demo/src/main.rs">workspaces&#x2F;network-demo&#x2F;src&#x2F;main.rs</a></li>
-<li>客户端连接 <a href="workspaces/network-demo/src/main.rs">workspaces&#x2F;network-demo&#x2F;src&#x2F;main.rs</a></li>
-<li>长度前缀写帧 <a href="workspaces/network-demo/src/main.rs">workspaces&#x2F;network-demo&#x2F;src&#x2F;main.rs</a></li>
-<li>按协议读帧 <a href="workspaces/network-demo/src/main.rs">workspaces&#x2F;network-demo&#x2F;src&#x2F;main.rs</a></li>
-<li>故意分片发送，演示拆包仍能被协议层恢复 <a href="workspaces/network-demo/src/main.rs">workspaces&#x2F;network-demo&#x2F;src&#x2F;main.rs</a></li>
+<li>服务端监听 <code>workspaces/network-demo/src/main.rs</code></li>
+<li>客户端连接 <code>workspaces/network-demo/src/main.rs</code></li>
+<li>长度前缀写帧 <code>workspaces/network-demo/src/main.rs</code></li>
+<li>按协议读帧 <code>workspaces/network-demo/src/main.rs</code></li>
+<li>故意分片发送，演示拆包仍能被协议层恢复 <code>workspaces/network-demo/src/main.rs</code></li>
 </ol>
 <p>它虽然很小，但已经把入门 TCP 最该先理解的几个点串起来了：</p>
 <ul>
@@ -329,7 +327,7 @@ world</code></pre>
 <li>协议 framing 才负责消息恢复</li>
 </ul>
 <hr>
-<h2 id="十一、实际运行结果"><a href="#十一、实际运行结果" class="headerlink" title="十一、实际运行结果"></a>十一、实际运行结果</h2><p>在 <a href="workspaces/network-demo">workspaces&#x2F;network-demo</a> 下执行：</p>
+<h2 id="十一、实际运行结果"><a href="#十一、实际运行结果" class="headerlink" title="十一、实际运行结果"></a>十一、实际运行结果</h2><p>在 <code>workspaces/network-demo</code> 下执行：</p>
 <pre><code class="highlight bash">cargo run</code></pre>
 
 <p>当前示例会输出类似结果：</p>
@@ -378,7 +376,4 @@ client closed connection</code></pre>
 <p>写 TCP 程序时，不要先问“我这次 read 到了什么”，而要先问“我的协议如何定义一条完整消息”。</p>
 </blockquote>
 <p>把这件事想清楚，后面的聊天协议、RPC、自定义二进制协议都会顺很多。</p>
-</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
-function gtag(){dataLayer.push(arguments);}
-gtag('js', new Date());
-gtag('config', 'G-XXXXXXXXX');</script></html>
+<hr/><p><span>↶ </span><a href="/">返回首页</a><span></span></p></div></div><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script></body></html>

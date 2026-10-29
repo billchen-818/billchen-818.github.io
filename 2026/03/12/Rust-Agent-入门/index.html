@@ -1,6 +1,4 @@
-<!DOCTYPE html><html lang="zh-cn"><head><title>Rust Agent 入门</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
-  document.body.classList.add('mobile')
-}</script><div><div class="inner"><h1>Rust Agent 入门</h1><div class="time">2026-03-12</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>AI Agent 是当下最火的技术方向之一，但大多数教程都在用 Python。其实 Rust 生态中已经有了成熟的 Agent 框架——<code>rig-core</code>，它让我们可以用 Rust 的高性能和类型安全优势来构建 AI 智能体。本文将带你从零开始，使用 rig-core + 本地 Ollama 模型，用不到 20 行 Rust 代码跑通你的第一个 AI Agent。</p>
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust Agent 入门 | billchen的博客</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。"><meta name="author" content="billchen"><link rel="canonical" href="https://billchen-818.github.io/2026/03/12/Rust-Agent-%E5%85%A5%E9%97%A8/"><meta property="og:title" content="Rust Agent 入门 | billchen的博客"><meta property="og:description" content="记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。"><meta property="og:type" content="article"><meta property="og:url" content="https://billchen-818.github.io/2026/03/12/Rust-Agent-%E5%85%A5%E9%97%A8/"><meta property="og:site_name" content="billchen的博客"><meta name="twitter:card" content="summary"><link rel="alternate" type="application/atom+xml" title="billchen的博客" href="https://billchen-818.github.io/atom.xml"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-theme.min.css"><link rel="stylesheet" href="/css/home.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><nav class="navbar navbar-default" style="opacity:.9;" role="navigation" aria-label="主导航"><div class="container-fluid"><div class="navbar-header"><button class="navbar-toggle collapsed" type="button" data-toggle="collapse" data-target="#navbar-bs" aria-expanded="false" aria-controls="navbar-bs" aria-label="展开导航"><span class="icon-bar"></span><span class="icon-bar"></span><span class="icon-bar"></span></button><a class="navbar-brand" href="/" data-toggle="tooltip" data-placement="right">billchen的博客</a></div><div class="navbar-collapse collapse" id="navbar-bs"><ul class="nav navbar-nav navbar-right"><li><a href="/" target="_self">首页</a></li><li><a href="/archives/" target="_self">归档</a></li><li><a href="/tags/" target="_self">标签</a></li></ul></div></div></nav><div><div class="inner"><h1>Rust Agent 入门</h1><div class="time">2026-03-12</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>AI Agent 是当下最火的技术方向之一，但大多数教程都在用 Python。其实 Rust 生态中已经有了成熟的 Agent 框架——<code>rig-core</code>，它让我们可以用 Rust 的高性能和类型安全优势来构建 AI 智能体。本文将带你从零开始，使用 rig-core + 本地 Ollama 模型，用不到 20 行 Rust 代码跑通你的第一个 AI Agent。</p>
 <h2 id="rig-core介绍"><a href="#rig-core介绍" class="headerlink" title="rig-core介绍"></a>rig-core介绍</h2><p><code>rig-core</code> 是 Rust 生态中一个用于构建 LLM 应用和 AI Agent 的开源框架，由 <a href="https://github.com/0xPlaygrounds/rig">Rig</a> 项目提供。它的设计目标是让 Rust 开发者能够以类型安全、高性能的方式快速集成大语言模型能力。</p>
 <h3 id="核心特性"><a href="#核心特性" class="headerlink" title="核心特性"></a>核心特性</h3><ul>
 <li><strong>多模型支持</strong>：内置对 OpenAI、Anthropic、Cohere、Google Gemini 等主流模型提供商的支持，同时兼容任何 OpenAI API 格式的服务（如本地 Ollama）。</li>
@@ -60,7 +58,7 @@ ollama run deepseek-r1:8b
 <span class="comment"># 查看本地已下载的模型列表</span>
 ollama list</code></pre>
 
-<p><img src="/../img/ollama-run.png" alt="图片"></p>
+<p><img src="/img/ollama-run.png" alt="图片"></p>
 <h3 id="以服务方式启动"><a href="#以服务方式启动" class="headerlink" title="以服务方式启动"></a>以服务方式启动</h3><p>如果你需要通过 API 调用模型（我们后面的 Rust 代码就是这种方式），需要确保 Ollama 服务正在运行：</p>
 <pre><code class="highlight bash"><span class="comment"># 启动 Ollama 服务（macOS 安装后通常会自动在后台运行）</span>
 ollama serve</code></pre>
@@ -72,7 +70,7 @@ ollama serve</code></pre>
 <span class="string">  &quot;stream&quot;: false</span>
 <span class="string">&#125;&#x27;</span></code></pre>
 
-<p><img src="/../img/deep-seek.png"></p>
+<p><img src="/img/deep-seek.png" alt="DeepSeek 模型调用示例"></p>
 <h2 id="项目搭建"><a href="#项目搭建" class="headerlink" title="项目搭建"></a>项目搭建</h2><p>我们新建cargo new agent-demo项目。</p>
 <h3 id="示例代码实现"><a href="#示例代码实现" class="headerlink" title="示例代码实现"></a>示例代码实现</h3><p>新建一个examples目录，我们只在examples中写测试代码。</p>
 <p>在examples里面新建文件<code>my_agent.rs</code>，在里面添加下面代码：</p>
@@ -105,9 +103,9 @@ tokio = &#123; version = &quot;1.50.0&quot;, features = [&quot;macros&quot;, &qu
 
 <h4 id="运行示例测试"><a href="#运行示例测试" class="headerlink" title="运行示例测试"></a>运行示例测试</h4><pre><code class="highlight plaintext">cargo run --example my_agent</code></pre>
 
-<p><img src="/../img/example1.png"></p>
-<p><img src="/../img/example2.png"></p>
-<p><img src="/../img/example3.png"></p>
+<p><img src="/img/example1.png" alt="Rust Agent 示例一"></p>
+<p><img src="/img/example2.png" alt="Rust Agent 示例二"></p>
+<p><img src="/img/example3.png" alt="Rust Agent 示例三"></p>
 <h3 id="修改命令传参"><a href="#修改命令传参" class="headerlink" title="修改命令传参"></a>修改命令传参</h3><p>我们再把代码修改下，移到main.rs中，如下：</p>
 <pre><code class="highlight rust"><span class="keyword">use</span> anyhow::<span class="type">Result</span>;
 <span class="keyword">use</span> rig::&#123;
@@ -139,8 +137,8 @@ tokio = &#123; version = &quot;1.50.0&quot;, features = [&quot;macros&quot;, &qu
 <pre><code class="highlight plaintext">cargo run -- &quot;Rust中Copy是啥？&quot;</code></pre>
 
 <p>模型回复：</p>
-<p><img src="/../img/copy1.png"></p>
-<p><img src="/../img/copy2.png"></p>
+<p><img src="/img/copy1.png" alt="Rust Agent 运行结果一"></p>
+<p><img src="/img/copy2.png" alt="Rust Agent 运行结果二"></p>
 <h2 id="总结"><a href="#总结" class="headerlink" title="总结"></a>总结</h2><p>本文我们从零完成了一个 Rust AI Agent 的搭建，整个过程可以归纳为三步：</p>
 <ol>
 <li><strong>认识 rig-core</strong>：了解了这个 Rust Agent 框架的核心特性——多模型支持、统一接口抽象、类型安全、异步优先，它让 Rust 开发者也能便捷地构建 AI 应用。</li>
@@ -150,7 +148,4 @@ tokio = &#123; version = &quot;1.50.0&quot;, features = [&quot;macros&quot;, &qu
 <p>可以看到，借助 rig-core + Ollama 的组合，用 Rust 开发 AI Agent 的门槛并不高。而 Rust 带来的内存安全、高性能和零成本抽象，使其在构建生产级 Agent 服务时具备天然优势。</p>
 <p>当然，本文只是入门的第一步。rig-core 还支持 <strong>Tool 调用</strong>（让 LLM 执行自定义函数）、<strong>RAG</strong>（检索增强生成）、<strong>多轮对话</strong>等高级能力，后续文章我们会继续深入探索。</p>
 <p>如果你对 Rust + AI 感兴趣，不妨动手跑一跑，欢迎在评论区交流你的实践心得！</p>
-</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
-function gtag(){dataLayer.push(arguments);}
-gtag('js', new Date());
-gtag('config', 'G-XXXXXXXXX');</script></html>
+<hr/><p><span>↶ </span><a href="/">返回首页</a><span></span></p></div></div><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script></body></html>

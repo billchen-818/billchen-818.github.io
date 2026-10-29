@@ -1,6 +1,4 @@
-<!DOCTYPE html><html lang="zh-cn"><head><title>Rust 泛型与单态化深入解析：泛型为什么快，代价又是什么</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
-  document.body.classList.add('mobile')
-}</script><div><div class="inner"><h1>Rust 泛型与单态化深入解析：泛型为什么快，代价又是什么</h1><div class="time">2026-05-27</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>很多人学 Rust 泛型时，最先记住的往往是几句话：</p>
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust 泛型与单态化深入解析：泛型为什么快，代价又是什么 | billchen的博客</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。"><meta name="author" content="billchen"><link rel="canonical" href="https://billchen-818.github.io/2026/05/27/Rust-%E6%B3%9B%E5%9E%8B%E4%B8%8E%E5%8D%95%E6%80%81%E5%8C%96%E6%B7%B1%E5%85%A5%E8%A7%A3%E6%9E%90%EF%BC%9A%E6%B3%9B%E5%9E%8B%E4%B8%BA%E4%BB%80%E4%B9%88%E5%BF%AB%EF%BC%8C%E4%BB%A3%E4%BB%B7%E5%8F%88%E6%98%AF%E4%BB%80%E4%B9%88/"><meta property="og:title" content="Rust 泛型与单态化深入解析：泛型为什么快，代价又是什么 | billchen的博客"><meta property="og:description" content="记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。"><meta property="og:type" content="article"><meta property="og:url" content="https://billchen-818.github.io/2026/05/27/Rust-%E6%B3%9B%E5%9E%8B%E4%B8%8E%E5%8D%95%E6%80%81%E5%8C%96%E6%B7%B1%E5%85%A5%E8%A7%A3%E6%9E%90%EF%BC%9A%E6%B3%9B%E5%9E%8B%E4%B8%BA%E4%BB%80%E4%B9%88%E5%BF%AB%EF%BC%8C%E4%BB%A3%E4%BB%B7%E5%8F%88%E6%98%AF%E4%BB%80%E4%B9%88/"><meta property="og:site_name" content="billchen的博客"><meta name="twitter:card" content="summary"><link rel="alternate" type="application/atom+xml" title="billchen的博客" href="https://billchen-818.github.io/atom.xml"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-theme.min.css"><link rel="stylesheet" href="/css/home.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><nav class="navbar navbar-default" style="opacity:.9;" role="navigation" aria-label="主导航"><div class="container-fluid"><div class="navbar-header"><button class="navbar-toggle collapsed" type="button" data-toggle="collapse" data-target="#navbar-bs" aria-expanded="false" aria-controls="navbar-bs" aria-label="展开导航"><span class="icon-bar"></span><span class="icon-bar"></span><span class="icon-bar"></span></button><a class="navbar-brand" href="/" data-toggle="tooltip" data-placement="right">billchen的博客</a></div><div class="navbar-collapse collapse" id="navbar-bs"><ul class="nav navbar-nav navbar-right"><li><a href="/" target="_self">首页</a></li><li><a href="/archives/" target="_self">归档</a></li><li><a href="/tags/" target="_self">标签</a></li></ul></div></div></nav><div><div class="inner"><h1>Rust 泛型与单态化深入解析：泛型为什么快，代价又是什么</h1><div class="time">2026-05-27</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>很多人学 Rust 泛型时，最先记住的往往是几句话：</p>
 <ul>
 <li>泛型很重要</li>
 <li>泛型是零成本抽象</li>
@@ -25,7 +23,7 @@
 <li>为什么它又可能带来编译时间和二进制体积的代价</li>
 <li>工程里什么时候应该优先泛型，什么时候反而该克制</li>
 </ol>
-<p>文中的完整示例工程在 <a href="workspaces/monomorphization-demo">workspaces&#x2F;monomorphization-demo</a>。</p>
+<p>文中的完整示例工程在 <code>workspaces/monomorphization-demo</code>。</p>
 <hr>
 <h2 id="一、先说结论：Rust-泛型的“快”，本质上来自编译期具体化"><a href="#一、先说结论：Rust-泛型的“快”，本质上来自编译期具体化" class="headerlink" title="一、先说结论：Rust 泛型的“快”，本质上来自编译期具体化"></a>一、先说结论：Rust 泛型的“快”，本质上来自编译期具体化</h2><p>很多语言里，泛型或模板背后的实现机制并不完全一样。</p>
 <p>Rust 里最关键的一点是：</p>
@@ -65,7 +63,7 @@
 <span class="built_in">println!</span>(<span class="string">&quot;identity::&lt;u32&gt; fn ptr = &#123;:p&#125;&quot;</span>, u32_<span class="keyword">fn</span> <span class="title function_">as</span> *<span class="title function_ invoke__">const</span> ());
 <span class="built_in">println!</span>(<span class="string">&quot;identity::&lt;u64&gt; fn ptr = &#123;:p&#125;&quot;</span>, u64_<span class="keyword">fn</span> <span class="title function_">as</span> *<span class="title function_ invoke__">const</span> ());</code></pre>
 
-<p>在 <a href="workspaces/monomorphization-demo/src/main.rs">workspaces&#x2F;monomorphization-demo&#x2F;src&#x2F;main.rs</a> 里运行后，可以看到两组不同的函数地址。</p>
+<p>在 <code>workspaces/monomorphization-demo/src/main.rs</code> 里运行后，可以看到两组不同的函数地址。</p>
 <p>这不是在证明所有平台和所有优化等级下地址都一定不同，而是想帮助你建立一个直觉：</p>
 <blockquote>
 <p>编译器不是在运行时拿一个“泛型函数解释器”去处理不同类型，而是在编译期把它们落成了不同的具体实例。</p>
@@ -258,11 +256,11 @@
 <li>抽象稳定性</li>
 </ul>
 <hr>
-<h2 id="九、完整示例：一个最小单态化演示工程"><a href="#九、完整示例：一个最小单态化演示工程" class="headerlink" title="九、完整示例：一个最小单态化演示工程"></a>九、完整示例：一个最小单态化演示工程</h2><p>示例工程 <a href="workspaces/monomorphization-demo">workspaces&#x2F;monomorphization-demo</a> 里放了几类代码：</p>
+<h2 id="九、完整示例：一个最小单态化演示工程"><a href="#九、完整示例：一个最小单态化演示工程" class="headerlink" title="九、完整示例：一个最小单态化演示工程"></a>九、完整示例：一个最小单态化演示工程</h2><p>示例工程 <code>workspaces/monomorphization-demo</code> 里放了几类代码：</p>
 <ol>
-<li>泛型函数实例化地址示意 <a href="workspaces/monomorphization-demo/src/main.rs">workspaces&#x2F;monomorphization-demo&#x2F;src&#x2F;main.rs</a></li>
-<li>基于泛型的静态分发 <a href="workspaces/monomorphization-demo/src/main.rs">workspaces&#x2F;monomorphization-demo&#x2F;src&#x2F;main.rs</a></li>
-<li>基于 <code>dyn Trait</code> 的动态分发对照 <a href="workspaces/monomorphization-demo/src/main.rs">workspaces&#x2F;monomorphization-demo&#x2F;src&#x2F;main.rs</a></li>
+<li>泛型函数实例化地址示意 <code>workspaces/monomorphization-demo/src/main.rs</code></li>
+<li>基于泛型的静态分发 <code>workspaces/monomorphization-demo/src/main.rs</code></li>
+<li>基于 <code>dyn Trait</code> 的动态分发对照 <code>workspaces/monomorphization-demo/src/main.rs</code></li>
 </ol>
 <p>其中这两行尤其适合拿来建立直觉：</p>
 <pre><code class="highlight rust"><span class="keyword">let</span> <span class="variable">u32_fn</span>: <span class="title function_ invoke__">fn</span>(<span class="type">u32</span>) <span class="punctuation">-&gt;</span> <span class="type">u32</span> = generic_identity;
@@ -274,7 +272,7 @@
 </blockquote>
 <p>这就是单态化最值得先理解的第一层含义。</p>
 <hr>
-<h2 id="十、实际运行结果"><a href="#十、实际运行结果" class="headerlink" title="十、实际运行结果"></a>十、实际运行结果</h2><p>在 <a href="workspaces/monomorphization-demo">workspaces&#x2F;monomorphization-demo</a> 下执行：</p>
+<h2 id="十、实际运行结果"><a href="#十、实际运行结果" class="headerlink" title="十、实际运行结果"></a>十、实际运行结果</h2><p>在 <code>workspaces/monomorphization-demo</code> 下执行：</p>
 <pre><code class="highlight bash">cargo run</code></pre>
 
 <p>当前示例会输出类似结果：</p>
@@ -320,7 +318,4 @@ repeat static =&gt; user:3</code></pre>
 <p>不要只记住“泛型快”，要记住“泛型为什么快，以及它把成本挪到了哪里”。</p>
 </blockquote>
 <p>这比单独背“零成本抽象”四个字更有用。</p>
-</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
-function gtag(){dataLayer.push(arguments);}
-gtag('js', new Date());
-gtag('config', 'G-XXXXXXXXX');</script></html>
+<hr/><p><span>↶ </span><a href="/">返回首页</a><span></span></p></div></div><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script></body></html>

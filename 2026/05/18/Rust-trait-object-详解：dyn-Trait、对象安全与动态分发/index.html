@@ -1,6 +1,4 @@
-<!DOCTYPE html><html lang="zh-cn"><head><title>Rust trait object 详解：dyn Trait、对象安全与动态分发</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
-  document.body.classList.add('mobile')
-}</script><div><div class="inner"><h1>Rust trait object 详解：dyn Trait、对象安全与动态分发</h1><div class="time">2026-05-18</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>很多人第一次接触 Rust trait object，都会觉得它有点别扭。</p>
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust trait object 详解：dyn Trait、对象安全与动态分发 | billchen的博客</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。"><meta name="author" content="billchen"><link rel="canonical" href="https://billchen-818.github.io/2026/05/18/Rust-trait-object-%E8%AF%A6%E8%A7%A3%EF%BC%9Adyn-Trait%E3%80%81%E5%AF%B9%E8%B1%A1%E5%AE%89%E5%85%A8%E4%B8%8E%E5%8A%A8%E6%80%81%E5%88%86%E5%8F%91/"><meta property="og:title" content="Rust trait object 详解：dyn Trait、对象安全与动态分发 | billchen的博客"><meta property="og:description" content="记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。"><meta property="og:type" content="article"><meta property="og:url" content="https://billchen-818.github.io/2026/05/18/Rust-trait-object-%E8%AF%A6%E8%A7%A3%EF%BC%9Adyn-Trait%E3%80%81%E5%AF%B9%E8%B1%A1%E5%AE%89%E5%85%A8%E4%B8%8E%E5%8A%A8%E6%80%81%E5%88%86%E5%8F%91/"><meta property="og:site_name" content="billchen的博客"><meta name="twitter:card" content="summary"><link rel="alternate" type="application/atom+xml" title="billchen的博客" href="https://billchen-818.github.io/atom.xml"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-theme.min.css"><link rel="stylesheet" href="/css/home.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><nav class="navbar navbar-default" style="opacity:.9;" role="navigation" aria-label="主导航"><div class="container-fluid"><div class="navbar-header"><button class="navbar-toggle collapsed" type="button" data-toggle="collapse" data-target="#navbar-bs" aria-expanded="false" aria-controls="navbar-bs" aria-label="展开导航"><span class="icon-bar"></span><span class="icon-bar"></span><span class="icon-bar"></span></button><a class="navbar-brand" href="/" data-toggle="tooltip" data-placement="right">billchen的博客</a></div><div class="navbar-collapse collapse" id="navbar-bs"><ul class="nav navbar-nav navbar-right"><li><a href="/" target="_self">首页</a></li><li><a href="/archives/" target="_self">归档</a></li><li><a href="/tags/" target="_self">标签</a></li></ul></div></div></nav><div><div class="inner"><h1>Rust trait object 详解：dyn Trait、对象安全与动态分发</h1><div class="time">2026-05-18</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>很多人第一次接触 Rust trait object，都会觉得它有点别扭。</p>
 <p>一方面，它看起来像“接口对象”：</p>
 <ul>
 <li><code>&amp;dyn Trait</code></li>
@@ -22,7 +20,7 @@
 <li>工程里什么时候该用，什么时候不该用</li>
 </ol>
 <p>这一篇我不打算把它写成“语法罗列”，而是尽量从运行模型和设计取舍上把 trait object 讲清楚。</p>
-<p>文中的完整可运行示例在 <a href="workspaces/trait-object-demo">workspaces&#x2F;trait-object-demo</a>。</p>
+<p>文中的完整可运行示例在 <code>workspaces/trait-object-demo</code>。</p>
 <hr>
 <h2 id="一、先说结论：trait-object-解决的是“异构值的统一处理”"><a href="#一、先说结论：trait-object-解决的是“异构值的统一处理”" class="headerlink" title="一、先说结论：trait object 解决的是“异构值的统一处理”"></a>一、先说结论：trait object 解决的是“异构值的统一处理”</h2><p>Trait 很多人已经熟悉了。</p>
 <p>比如我们先定义一个绘制接口：</p>
@@ -308,7 +306,7 @@
 <p>如果你希望边界保持动态抽象，那返回值也往往要继续停留在这个动态抽象层里，而不是试图“突然回到具体类型”。</p>
 </blockquote>
 <hr>
-<h2 id="八、一个完整可运行示例：异构集合为什么必须靠-trait-object"><a href="#八、一个完整可运行示例：异构集合为什么必须靠-trait-object" class="headerlink" title="八、一个完整可运行示例：异构集合为什么必须靠 trait object"></a>八、一个完整可运行示例：异构集合为什么必须靠 trait object</h2><p>下面这段代码来自 <a href="workspaces/trait-object-demo/src/main.rs">workspaces&#x2F;trait-object-demo&#x2F;src&#x2F;main.rs</a>。</p>
+<h2 id="八、一个完整可运行示例：异构集合为什么必须靠-trait-object"><a href="#八、一个完整可运行示例：异构集合为什么必须靠-trait-object" class="headerlink" title="八、一个完整可运行示例：异构集合为什么必须靠 trait object"></a>八、一个完整可运行示例：异构集合为什么必须靠 trait object</h2><p>下面这段代码来自 <code>workspaces/trait-object-demo/src/main.rs</code>。</p>
 <pre><code class="highlight rust"><span class="keyword">trait</span> <span class="title class_">Draw</span> &#123;
     <span class="keyword">fn</span> <span class="title function_">draw</span>(&amp;<span class="keyword">self</span>);
 &#125;
@@ -463,7 +461,7 @@
 </ul>
 <p>这些原本零散的规则就会变得统一起来。</p>
 <hr>
-<h2 id="十四、本文示例运行结果"><a href="#十四、本文示例运行结果" class="headerlink" title="十四、本文示例运行结果"></a>十四、本文示例运行结果</h2><p>在 <a href="workspaces/trait-object-demo">workspaces&#x2F;trait-object-demo</a> 目录执行：</p>
+<h2 id="十四、本文示例运行结果"><a href="#十四、本文示例运行结果" class="headerlink" title="十四、本文示例运行结果"></a>十四、本文示例运行结果</h2><p>在 <code>workspaces/trait-object-demo</code> 目录执行：</p>
 <pre><code class="highlight bash">cargo run</code></pre>
 
 <p>可以看到类似输出：</p>
@@ -487,7 +485,4 @@ serialized =&gt; &#123;&quot;type&quot;:&quot;robot&quot;,&quot;id&quot;:7&#125;
 <li>一旦碰到对象安全问题，不要急着绕语法，先检查 trait 职责是不是混了</li>
 </ol>
 <p>这一套思路，比单纯记住几条规则更重要。</p>
-</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
-function gtag(){dataLayer.push(arguments);}
-gtag('js', new Date());
-gtag('config', 'G-XXXXXXXXX');</script></html>
+<hr/><p><span>↶ </span><a href="/">返回首页</a><span></span></p></div></div><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script></body></html>

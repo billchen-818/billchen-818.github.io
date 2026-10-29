@@ -1,6 +1,4 @@
-<!DOCTYPE html><html lang="zh-cn"><head><title>Rust 文件 I/O 实战：缓冲读写、分块处理、临时文件与原子重命名</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
-  document.body.classList.add('mobile')
-}</script><div><div class="inner"><h1>Rust 文件 I/O 实战：缓冲读写、分块处理、临时文件与原子重命名</h1><div class="time">2026-05-26</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>很多人第一次写 Rust 文件 I&#x2F;O，通常就是几行代码：</p>
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust 文件 I/O 实战：缓冲读写、分块处理、临时文件与原子重命名 | billchen的博客</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。"><meta name="author" content="billchen"><link rel="canonical" href="https://billchen-818.github.io/2026/05/26/Rust-%E6%96%87%E4%BB%B6-I-O-%E5%AE%9E%E6%88%98%EF%BC%9A%E7%BC%93%E5%86%B2%E8%AF%BB%E5%86%99%E3%80%81%E5%88%86%E5%9D%97%E5%A4%84%E7%90%86%E3%80%81%E4%B8%B4%E6%97%B6%E6%96%87%E4%BB%B6%E4%B8%8E%E5%8E%9F%E5%AD%90%E9%87%8D%E5%91%BD%E5%90%8D/"><meta property="og:title" content="Rust 文件 I/O 实战：缓冲读写、分块处理、临时文件与原子重命名 | billchen的博客"><meta property="og:description" content="记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。"><meta property="og:type" content="article"><meta property="og:url" content="https://billchen-818.github.io/2026/05/26/Rust-%E6%96%87%E4%BB%B6-I-O-%E5%AE%9E%E6%88%98%EF%BC%9A%E7%BC%93%E5%86%B2%E8%AF%BB%E5%86%99%E3%80%81%E5%88%86%E5%9D%97%E5%A4%84%E7%90%86%E3%80%81%E4%B8%B4%E6%97%B6%E6%96%87%E4%BB%B6%E4%B8%8E%E5%8E%9F%E5%AD%90%E9%87%8D%E5%91%BD%E5%90%8D/"><meta property="og:site_name" content="billchen的博客"><meta name="twitter:card" content="summary"><link rel="alternate" type="application/atom+xml" title="billchen的博客" href="https://billchen-818.github.io/atom.xml"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-theme.min.css"><link rel="stylesheet" href="/css/home.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><nav class="navbar navbar-default" style="opacity:.9;" role="navigation" aria-label="主导航"><div class="container-fluid"><div class="navbar-header"><button class="navbar-toggle collapsed" type="button" data-toggle="collapse" data-target="#navbar-bs" aria-expanded="false" aria-controls="navbar-bs" aria-label="展开导航"><span class="icon-bar"></span><span class="icon-bar"></span><span class="icon-bar"></span></button><a class="navbar-brand" href="/" data-toggle="tooltip" data-placement="right">billchen的博客</a></div><div class="navbar-collapse collapse" id="navbar-bs"><ul class="nav navbar-nav navbar-right"><li><a href="/" target="_self">首页</a></li><li><a href="/archives/" target="_self">归档</a></li><li><a href="/tags/" target="_self">标签</a></li></ul></div></div></nav><div><div class="inner"><h1>Rust 文件 I/O 实战：缓冲读写、分块处理、临时文件与原子重命名</h1><div class="time">2026-05-26</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>很多人第一次写 Rust 文件 I&#x2F;O，通常就是几行代码：</p>
 <ul>
 <li><code>std::fs::read_to_string</code></li>
 <li><code>std::fs::write</code></li>
@@ -26,7 +24,7 @@
 <li>临时文件为什么是“安全写入”的基础手法</li>
 <li>原子重命名为什么比“直接覆盖”更稳妥</li>
 </ol>
-<p>文中的完整示例工程在 <a href="workspaces/io-demo">workspaces&#x2F;io-demo</a>。</p>
+<p>文中的完整示例工程在 <code>workspaces/io-demo</code>。</p>
 <hr>
 <h2 id="一、先说结论：文件-I-O-不是一个动作，而是一组策略选择"><a href="#一、先说结论：文件-I-O-不是一个动作，而是一组策略选择" class="headerlink" title="一、先说结论：文件 I&#x2F;O 不是一个动作，而是一组策略选择"></a>一、先说结论：文件 I&#x2F;O 不是一个动作，而是一组策略选择</h2><p>很多初学者把文件 I&#x2F;O 理解成一件事：</p>
 <blockquote>
@@ -74,7 +72,7 @@
 <p>很多工程问题不是“你用了简单 API”，而是“文件场景已经复杂了，你还在沿用最简单的策略”。</p>
 <p>所以更重要的不是背诵“哪个 API 高级”，而是知道什么时候该升级读写方式。</p>
 <hr>
-<h2 id="三、缓冲读写：它解决的不是语法问题，而是系统调用频率问题"><a href="#三、缓冲读写：它解决的不是语法问题，而是系统调用频率问题" class="headerlink" title="三、缓冲读写：它解决的不是语法问题，而是系统调用频率问题"></a>三、缓冲读写：它解决的不是语法问题，而是系统调用频率问题</h2><p>先看示例工程里的这段代码 <a href="workspaces/io-demo/src/main.rs">workspaces&#x2F;io-demo&#x2F;src&#x2F;main.rs</a>：</p>
+<h2 id="三、缓冲读写：它解决的不是语法问题，而是系统调用频率问题"><a href="#三、缓冲读写：它解决的不是语法问题，而是系统调用频率问题" class="headerlink" title="三、缓冲读写：它解决的不是语法问题，而是系统调用频率问题"></a>三、缓冲读写：它解决的不是语法问题，而是系统调用频率问题</h2><p>先看示例工程里的这段代码 <code>workspaces/io-demo/src/main.rs</code>：</p>
 <pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">seed_input_file</span>(path: &amp;Path) <span class="punctuation">-&gt;</span> io::<span class="type">Result</span>&lt;()&gt; &#123;
     <span class="keyword">let</span> <span class="keyword">mut </span><span class="variable">writer</span> = BufWriter::<span class="title function_ invoke__">new</span>(File::<span class="title function_ invoke__">create</span>(path)?);
     writer.<span class="title function_ invoke__">write_all</span>(<span class="string">b&quot;Rust file io demo\n&quot;</span>)?;
@@ -290,13 +288,13 @@
 <p>这张“判断表”比死记某个 API 名字更重要。</p>
 <p>因为工程里最常见的问题，从来都不是“不知道 Rust 有这个函数”，而是“场景已经变了，策略却还没变”。</p>
 <hr>
-<h2 id="九、完整示例：一个最小但覆盖关键场景的-I-O-demo"><a href="#九、完整示例：一个最小但覆盖关键场景的-I-O-demo" class="headerlink" title="九、完整示例：一个最小但覆盖关键场景的 I&#x2F;O demo"></a>九、完整示例：一个最小但覆盖关键场景的 I&#x2F;O demo</h2><p>示例工程 <a href="workspaces/io-demo">workspaces&#x2F;io-demo</a> 包含的几段逻辑分别对应：</p>
+<h2 id="九、完整示例：一个最小但覆盖关键场景的-I-O-demo"><a href="#九、完整示例：一个最小但覆盖关键场景的-I-O-demo" class="headerlink" title="九、完整示例：一个最小但覆盖关键场景的 I&#x2F;O demo"></a>九、完整示例：一个最小但覆盖关键场景的 I&#x2F;O demo</h2><p>示例工程 <code>workspaces/io-demo</code> 包含的几段逻辑分别对应：</p>
 <ol>
-<li>缓冲写入种子文件 <a href="workspaces/io-demo/src/main.rs">workspaces&#x2F;io-demo&#x2F;src&#x2F;main.rs</a></li>
-<li>缓冲读取前几行 <a href="workspaces/io-demo/src/main.rs">workspaces&#x2F;io-demo&#x2F;src&#x2F;main.rs</a></li>
-<li>分块复制文件 <a href="workspaces/io-demo/src/main.rs">workspaces&#x2F;io-demo&#x2F;src&#x2F;main.rs</a></li>
-<li>原子方式写入配置 <a href="workspaces/io-demo/src/main.rs">workspaces&#x2F;io-demo&#x2F;src&#x2F;main.rs</a></li>
-<li>追加写入日志 <a href="workspaces/io-demo/src/main.rs">workspaces&#x2F;io-demo&#x2F;src&#x2F;main.rs</a></li>
+<li>缓冲写入种子文件 <code>workspaces/io-demo/src/main.rs</code></li>
+<li>缓冲读取前几行 <code>workspaces/io-demo/src/main.rs</code></li>
+<li>分块复制文件 <code>workspaces/io-demo/src/main.rs</code></li>
+<li>原子方式写入配置 <code>workspaces/io-demo/src/main.rs</code></li>
+<li>追加写入日志 <code>workspaces/io-demo/src/main.rs</code></li>
 </ol>
 <p>虽然示例不大，但已经能把文件 I&#x2F;O 里最常见的几个工程判断串起来：</p>
 <ul>
@@ -306,7 +304,7 @@
 <li>什么时候要把写入和切换分开</li>
 </ul>
 <hr>
-<h2 id="十、实际运行结果"><a href="#十、实际运行结果" class="headerlink" title="十、实际运行结果"></a>十、实际运行结果</h2><p>在 <a href="workspaces/io-demo">workspaces&#x2F;io-demo</a> 下执行：</p>
+<h2 id="十、实际运行结果"><a href="#十、实际运行结果" class="headerlink" title="十、实际运行结果"></a>十、实际运行结果</h2><p>在 <code>workspaces/io-demo</code> 下执行：</p>
 <pre><code class="highlight bash">cargo run</code></pre>
 
 <p>当前示例会输出类似结果：</p>
@@ -351,7 +349,4 @@ workspace: /tmp/...</code></pre>
 <p>文件 I&#x2F;O 不是在选函数，而是在选失败成本和资源边界都更可控的策略。</p>
 </blockquote>
 <p>这比单纯记住几个 API 名字重要得多。</p>
-</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
-function gtag(){dataLayer.push(arguments);}
-gtag('js', new Date());
-gtag('config', 'G-XXXXXXXXX');</script></html>
+<hr/><p><span>↶ </span><a href="/">返回首页</a><span></span></p></div></div><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script></body></html>

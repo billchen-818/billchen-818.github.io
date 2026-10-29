@@ -1,9 +1,7 @@
-<!DOCTYPE html><html lang="zh-cn"><head><title>Go语言之GMP原理</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
-  document.body.classList.add('mobile')
-}</script><div><div class="inner"><h1>Go语言之GMP原理</h1><div class="time">2025-09-05</div><ul class="tags"><li><span>#</span><a href="/tags/Go语言/">Go语言</a></li></ul><h2 id="协程的设计"><a href="#协程的设计" class="headerlink" title="协程的设计"></a>协程的设计</h2><p>线程是操作系统调度CPU中执行的基本单元，多线程总是交替的抢占CPU时间片，线程在上下文的切换过程中需要经过操作系统的用户态和内核态的切换。</p>
+<!DOCTYPE html><html lang="zh-cn"><head><title>Go语言之GMP原理 | billchen的博客</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。"><meta name="author" content="billchen"><link rel="canonical" href="https://billchen-818.github.io/2025/09/05/Go%E8%AF%AD%E8%A8%80%E4%B9%8BGMP%E5%8E%9F%E7%90%86/"><meta property="og:title" content="Go语言之GMP原理 | billchen的博客"><meta property="og:description" content="记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。"><meta property="og:type" content="article"><meta property="og:url" content="https://billchen-818.github.io/2025/09/05/Go%E8%AF%AD%E8%A8%80%E4%B9%8BGMP%E5%8E%9F%E7%90%86/"><meta property="og:site_name" content="billchen的博客"><meta name="twitter:card" content="summary"><link rel="alternate" type="application/atom+xml" title="billchen的博客" href="https://billchen-818.github.io/atom.xml"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-theme.min.css"><link rel="stylesheet" href="/css/home.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><nav class="navbar navbar-default" style="opacity:.9;" role="navigation" aria-label="主导航"><div class="container-fluid"><div class="navbar-header"><button class="navbar-toggle collapsed" type="button" data-toggle="collapse" data-target="#navbar-bs" aria-expanded="false" aria-controls="navbar-bs" aria-label="展开导航"><span class="icon-bar"></span><span class="icon-bar"></span><span class="icon-bar"></span></button><a class="navbar-brand" href="/" data-toggle="tooltip" data-placement="right">billchen的博客</a></div><div class="navbar-collapse collapse" id="navbar-bs"><ul class="nav navbar-nav navbar-right"><li><a href="/" target="_self">首页</a></li><li><a href="/archives/" target="_self">归档</a></li><li><a href="/tags/" target="_self">标签</a></li></ul></div></div></nav><div><div class="inner"><h1>Go语言之GMP原理</h1><div class="time">2025-09-05</div><ul class="tags"><li><span>#</span><a href="/tags/Go/">Go</a></li></ul><h2 id="协程的设计"><a href="#协程的设计" class="headerlink" title="协程的设计"></a>协程的设计</h2><p>线程是操作系统调度CPU中执行的基本单元，多线程总是交替的抢占CPU时间片，线程在上下文的切换过程中需要经过操作系统的用户态和内核态的切换。</p>
 <p>Go语言中的协程（G）依然是运行在线程之上的，但是借助语言的调度器，协程只需要在用户态即可完成切换，工作线程是感受不到协程存在的。</p>
 <p>Go在设计上通过逻辑处理器（P）建立起了工作线程与协程之间的关系，最简单的关系模型如下图：</p>
-<p><img src="/../img/gmp.png" alt="GMP关系模型"></p>
+<p><img src="/img/gmp.png" alt="GMP关系模型"></p>
 <h3 id="工作线程M"><a href="#工作线程M" class="headerlink" title="工作线程M"></a>工作线程M</h3><p>工作线程是最终运行协程的实体。操作系统中的线程与在运行时代表线程的m结构体进行了绑定：</p>
 <pre><code class="highlight go"><span class="comment">// go/src/runtime/runtime2.go</span>
 
@@ -109,7 +107,7 @@
 
 <p>schedt中维护了空闲的工作线程midle、空闲的工作线程数量nmidle、等待被释放的线程列表freem、系统协程g的数量ngsys、空闲逻辑处理器pidle、空闲逻辑处理器的数量npidle以及全局运行队列runq及全局运行队列的大小runqsize和处于新建或者被销毁状态的协程g列表gFree等信息。</p>
 <p>schedt中的信息是全局共享的，例如全局运行队列runq被所有p共享，所以schedt中也持有一个锁lock以保证原子性访问。</p>
-<p><img src="/../img/gmp-detail.png" alt="GMP详细示意图"></p>
+<p><img src="/img/gmp-detail.png" alt="GMP详细示意图"></p>
 <h2 id="协程调度"><a href="#协程调度" class="headerlink" title="协程调度"></a>协程调度</h2><p>我们已经知晓每个工作线程都有一个调度协程g0，专门执行协程的循环调度（g-&gt;g0-&gt;g-&gt;g0），在循环调度中，协程g具体被怎么调度的呢，go语言调度器实现了自己的调度策略。</p>
 <h3 id="调度策略"><a href="#调度策略" class="headerlink" title="调度策略"></a>调度策略</h3><p>工作线程m需要通过协程调度获得具体可运行的某一协程g。获得协程g的一般策略主要包含三大步：</p>
 <ul>
@@ -220,7 +218,7 @@
 
 <p><strong>获取全局运行队列</strong></p>
 <p>当p每执行61次调度，或者p本地运行队列不存在可运行的协程时，需要从全局队列中获取一批协程分配给本地运行队列。由于每个p共享了全局运行队列，因此为了保证公平性，需要将全局运行队列中的g按照p的数量进行平分，平分后数量也不能超过局部运行队列的容量的一半（即256&#x2F;2&#x3D;128）。最后通过循环调用runqput将全局队列中的g放入到p的局部运行队列中。</p>
-<p><img src="/../img/global-runqu-to-local-runqu.png" alt="从全局队列中拿一些到本地队列中"></p>
+<p><img src="/img/global-runqu-to-local-runqu.png" alt="从全局队列中拿一些到本地队列中"></p>
 <pre><code class="highlight go"><span class="comment">// go/src/runtime/proc.go</span>
 
 <span class="comment">// Try get a batch of G&#x27;s from the global runnable queue.</span>
@@ -290,7 +288,7 @@
 &#125;</code></pre>
 
 <p>协程窃取的主要执行逻辑通过runqsteal以及runqgrab函数实现，窃取的核心逻辑是：将要窃取的p本地运行队列中的g的个数的一半放入到自己的运行队列中。</p>
-<p><img src="/../img/go-steal.png" alt="协程窃取"></p>
+<p><img src="/img/go-steal.png" alt="协程窃取"></p>
 <pre><code class="highlight go"><span class="comment">// Steal half of elements from local runnable queue of p2</span>
 <span class="comment">// and put onto local runnable queue of p.</span>
 <span class="comment">// Returns one of the stolen elements (or nil if failed).</span>
@@ -477,7 +475,5 @@
     &#125;
     unlock(&amp;allpLock)
     <span class="keyword">return</span> <span class="type">uint32</span>(n)
-&#125;</code></pre></div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
-function gtag(){dataLayer.push(arguments);}
-gtag('js', new Date());
-gtag('config', 'G-XXXXXXXXX');</script></html>
+&#125;</code></pre>
+<hr/><p><span>↶ </span><a href="/">返回首页</a><span></span></p></div></div><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script></body></html>

@@ -13,6 +13,16 @@ body {
     font-size: 21px;
 }
 
+.navbar {
+    margin-bottom: 0;
+}
+
+.navbar a:focus-visible,
+a:focus-visible {
+    outline: 3px solid #8a2be2;
+    outline-offset: 3px;
+}
+
 body.mobile {
     font-size: 32px;
 }
@@ -154,6 +164,33 @@ div.word-count {
 
 #articleCounts {
     display: none;
+}
+
+@media screen and (max-width: 768px) {
+    body {
+        font-size: 18px;
+    }
+
+    .navbar {
+        margin: 12px 12px 0;
+    }
+
+    .navbar-brand,
+    .navbar-nav {
+        font-size: 18px;
+    }
+
+    div.outer {
+        margin: 24px 12px 40px;
+    }
+
+    .title {
+        padding: 14px 12px;
+    }
+
+    .paginator {
+        margin: 24px 12px 40px;
+    }
 }
 
 

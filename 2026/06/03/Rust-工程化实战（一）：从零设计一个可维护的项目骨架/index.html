@@ -1,6 +1,4 @@
-<!DOCTYPE html><html lang="zh-cn"><head><title>Rust 工程化实战（一）：从零设计一个可维护的项目骨架</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
-  document.body.classList.add('mobile')
-}</script><div><div class="inner"><h1>Rust 工程化实战（一）：从零设计一个可维护的项目骨架</h1><div class="time">2026-06-03</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>这是 Rust 工程化实战系列的第一篇。</p>
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust 工程化实战（一）：从零设计一个可维护的项目骨架 | billchen的博客</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。"><meta name="author" content="billchen"><link rel="canonical" href="https://billchen-818.github.io/2026/06/03/Rust-%E5%B7%A5%E7%A8%8B%E5%8C%96%E5%AE%9E%E6%88%98%EF%BC%88%E4%B8%80%EF%BC%89%EF%BC%9A%E4%BB%8E%E9%9B%B6%E8%AE%BE%E8%AE%A1%E4%B8%80%E4%B8%AA%E5%8F%AF%E7%BB%B4%E6%8A%A4%E7%9A%84%E9%A1%B9%E7%9B%AE%E9%AA%A8%E6%9E%B6/"><meta property="og:title" content="Rust 工程化实战（一）：从零设计一个可维护的项目骨架 | billchen的博客"><meta property="og:description" content="记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。"><meta property="og:type" content="article"><meta property="og:url" content="https://billchen-818.github.io/2026/06/03/Rust-%E5%B7%A5%E7%A8%8B%E5%8C%96%E5%AE%9E%E6%88%98%EF%BC%88%E4%B8%80%EF%BC%89%EF%BC%9A%E4%BB%8E%E9%9B%B6%E8%AE%BE%E8%AE%A1%E4%B8%80%E4%B8%AA%E5%8F%AF%E7%BB%B4%E6%8A%A4%E7%9A%84%E9%A1%B9%E7%9B%AE%E9%AA%A8%E6%9E%B6/"><meta property="og:site_name" content="billchen的博客"><meta name="twitter:card" content="summary"><link rel="alternate" type="application/atom+xml" title="billchen的博客" href="https://billchen-818.github.io/atom.xml"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-theme.min.css"><link rel="stylesheet" href="/css/home.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><nav class="navbar navbar-default" style="opacity:.9;" role="navigation" aria-label="主导航"><div class="container-fluid"><div class="navbar-header"><button class="navbar-toggle collapsed" type="button" data-toggle="collapse" data-target="#navbar-bs" aria-expanded="false" aria-controls="navbar-bs" aria-label="展开导航"><span class="icon-bar"></span><span class="icon-bar"></span><span class="icon-bar"></span></button><a class="navbar-brand" href="/" data-toggle="tooltip" data-placement="right">billchen的博客</a></div><div class="navbar-collapse collapse" id="navbar-bs"><ul class="nav navbar-nav navbar-right"><li><a href="/" target="_self">首页</a></li><li><a href="/archives/" target="_self">归档</a></li><li><a href="/tags/" target="_self">标签</a></li></ul></div></div></nav><div><div class="inner"><h1>Rust 工程化实战（一）：从零设计一个可维护的项目骨架</h1><div class="time">2026-06-03</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>这是 Rust 工程化实战系列的第一篇。</p>
 <p>这个系列的出发点不是”写出能跑的代码”，而是”写出能长期维护的代码”。</p>
 <p>能跑和能维护，这两件事差距很大。</p>
 <p>很多 Rust 项目写到一定规模之后，都会碰到同样的问题：</p>
@@ -20,7 +18,7 @@
 <li>多 crate 下的层次划分和依赖方向应该怎么定</li>
 <li>公开接口边界怎么控制</li>
 </ol>
-<p>文章配套的完整示例工程在 <a href="workspaces/skeleton-demo">workspaces&#x2F;skeleton-demo</a>，可以直接运行和参考。</p>
+<p>文章配套的完整示例工程在 <code>workspaces/skeleton-demo</code>，可以直接运行和参考。</p>
 <hr>
 <h2 id="一、先说结论：三条基本原则"><a href="#一、先说结论：三条基本原则" class="headerlink" title="一、先说结论：三条基本原则"></a>一、先说结论：三条基本原则</h2><p>可维护的项目骨架，核心就三条：</p>
 <p><strong>1. 依赖方向必须单向</strong></p>
@@ -160,7 +158,7 @@
 <p><strong>4. 编译速度开始影响开发效率</strong></p>
 <p>Rust 按 crate 做增量编译。把很少变化的稳定代码（比如核心业务逻辑）拆成独立 crate，能显著减少不必要的重编译。</p>
 <hr>
-<h2 id="五、多-crate-workspace-的目录结构"><a href="#五、多-crate-workspace-的目录结构" class="headerlink" title="五、多 crate workspace 的目录结构"></a>五、多 crate workspace 的目录结构</h2><p>本文示例工程 <a href="workspaces/skeleton-demo">workspaces&#x2F;skeleton-demo</a> 就是一个完整的多 crate workspace。</p>
+<h2 id="五、多-crate-workspace-的目录结构"><a href="#五、多-crate-workspace-的目录结构" class="headerlink" title="五、多 crate workspace 的目录结构"></a>五、多 crate workspace 的目录结构</h2><p>本文示例工程 <code>workspaces/skeleton-demo</code> 就是一个完整的多 crate workspace。</p>
 <p>整体结构：</p>
 <pre><code class="highlight plaintext">skeleton-demo/
 ├── Cargo.toml          # workspace 根配置
@@ -427,7 +425,7 @@
     &#125;);
 &#125;</code></pre>
 
-<p>这 6 个测试（见 <a href="workspaces/skeleton-demo/crates/core/tests/user_service_test.rs">workspaces&#x2F;skeleton-demo&#x2F;crates&#x2F;core&#x2F;tests&#x2F;user_service_test.rs</a>）在不启动任何数据库的情况下覆盖了所有核心业务规则，运行极快。</p>
+<p>这 6 个测试（见 <code>workspaces/skeleton-demo/crates/core/tests/user_service_test.rs</code>）在不启动任何数据库的情况下覆盖了所有核心业务规则，运行极快。</p>
 <h3 id="9-2-测试放在哪里"><a href="#9-2-测试放在哪里" class="headerlink" title="9.2 测试放在哪里"></a>9.2 测试放在哪里</h3><table>
 <thead>
 <tr>
@@ -498,7 +496,4 @@ crates/core
 <hr>
 <p>这一篇建立了项目骨架的基础。</p>
 <p>下一篇 [Rust 工程化实战（二）：配置、日志、错误处理如何统一起来]，会在这个骨架基础上，把配置加载、日志初始化、跨层错误处理这三件事系统地接入进来。</p>
-</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
-function gtag(){dataLayer.push(arguments);}
-gtag('js', new Date());
-gtag('config', 'G-XXXXXXXXX');</script></html>
+<hr/><p><span>↶ </span><a href="/">返回首页</a><span></span></p></div></div><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script></body></html>

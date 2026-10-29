@@ -1,6 +1,4 @@
-<!DOCTYPE html><html lang="zh-cn"><head><title>Rust unsafe 入门：边界、约束与几个典型使用场景</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
-  document.body.classList.add('mobile')
-}</script><div><div class="inner"><h1>Rust unsafe 入门：边界、约束与几个典型使用场景</h1><div class="time">2026-06-03</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>很多人对 Rust <code>unsafe</code> 的第一印象是：</p>
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust unsafe 入门：边界、约束与几个典型使用场景 | billchen的博客</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。"><meta name="author" content="billchen"><link rel="canonical" href="https://billchen-818.github.io/2026/06/03/Rust-unsafe-%E5%85%A5%E9%97%A8%EF%BC%9A%E8%BE%B9%E7%95%8C%E3%80%81%E7%BA%A6%E6%9D%9F%E4%B8%8E%E5%87%A0%E4%B8%AA%E5%85%B8%E5%9E%8B%E4%BD%BF%E7%94%A8%E5%9C%BA%E6%99%AF/"><meta property="og:title" content="Rust unsafe 入门：边界、约束与几个典型使用场景 | billchen的博客"><meta property="og:description" content="记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。"><meta property="og:type" content="article"><meta property="og:url" content="https://billchen-818.github.io/2026/06/03/Rust-unsafe-%E5%85%A5%E9%97%A8%EF%BC%9A%E8%BE%B9%E7%95%8C%E3%80%81%E7%BA%A6%E6%9D%9F%E4%B8%8E%E5%87%A0%E4%B8%AA%E5%85%B8%E5%9E%8B%E4%BD%BF%E7%94%A8%E5%9C%BA%E6%99%AF/"><meta property="og:site_name" content="billchen的博客"><meta name="twitter:card" content="summary"><link rel="alternate" type="application/atom+xml" title="billchen的博客" href="https://billchen-818.github.io/atom.xml"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-theme.min.css"><link rel="stylesheet" href="/css/home.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><nav class="navbar navbar-default" style="opacity:.9;" role="navigation" aria-label="主导航"><div class="container-fluid"><div class="navbar-header"><button class="navbar-toggle collapsed" type="button" data-toggle="collapse" data-target="#navbar-bs" aria-expanded="false" aria-controls="navbar-bs" aria-label="展开导航"><span class="icon-bar"></span><span class="icon-bar"></span><span class="icon-bar"></span></button><a class="navbar-brand" href="/" data-toggle="tooltip" data-placement="right">billchen的博客</a></div><div class="navbar-collapse collapse" id="navbar-bs"><ul class="nav navbar-nav navbar-right"><li><a href="/" target="_self">首页</a></li><li><a href="/archives/" target="_self">归档</a></li><li><a href="/tags/" target="_self">标签</a></li></ul></div></div></nav><div><div class="inner"><h1>Rust unsafe 入门：边界、约束与几个典型使用场景</h1><div class="time">2026-06-03</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>很多人对 Rust <code>unsafe</code> 的第一印象是：</p>
 <blockquote>
 <p>这是一个关闭安全检查的开关，用了之后程序就可能崩溃。</p>
 </blockquote>
@@ -18,7 +16,7 @@
 <li>如何正确使用 <code>unsafe</code>：不是”别用”，而是”怎么用对”</li>
 <li>几个典型使用场景，配完整可运行示例</li>
 </ol>
-<p>文中的完整示例工程在 <a href="workspaces/unsafe-demo">workspaces&#x2F;unsafe-demo</a>。</p>
+<p>文中的完整示例工程在 <code>workspaces/unsafe-demo</code>。</p>
 <hr>
 <h2 id="一、先说结论：unsafe-只解锁五项能力"><a href="#一、先说结论：unsafe-只解锁五项能力" class="headerlink" title="一、先说结论：unsafe 只解锁五项能力"></a>一、先说结论：<code>unsafe</code> 只解锁五项能力</h2><p>Rust 的 <code>unsafe</code> 并不是一个开关，把所有安全检查都关掉。</p>
 <p>它只额外允许你做五件事：</p>
@@ -144,7 +142,7 @@
 &#125;</code></pre>
 
 <p><code>ptr.add(i)</code> 把指针向后移动 <code>i * sizeof(i32)</code> 个字节。这是标准库内部遍历内存的常见模式。</p>
-<p>完整代码见 <a href="workspaces/unsafe-demo/src/main.rs">workspaces&#x2F;unsafe-demo&#x2F;src&#x2F;main.rs</a>。</p>
+<p>完整代码见 <code>workspaces/unsafe-demo/src/main.rs</code>。</p>
 <h3 id="4-2-调用-unsafe-函数"><a href="#4-2-调用-unsafe-函数" class="headerlink" title="4.2 调用 unsafe 函数"></a>4.2 调用 <code>unsafe</code> 函数</h3><p>声明为 <code>unsafe fn</code> 的函数，要求调用方在调用时承诺满足该函数的前提条件（precondition）。</p>
 <p>最简单的例子：</p>
 <pre><code class="highlight rust"><span class="comment">// Safety 文档：调用方必须保证 ptr 非空、对齐、且指向有效的 i32</span>
@@ -274,7 +272,7 @@ std::thread::<span class="title function_ invoke__">spawn</span>(<span class="ke
 <li><code>unsafe</code> 在内部，调用方完全感知不到</li>
 <li>每个 <code>unsafe</code> 块旁边都有明确的 Safety 注释</li>
 </ul>
-<p>完整实现包括 <code>grow</code>、<code>Drop</code>、<code>Send</code>&#x2F;<code>Sync</code> 标记，见 <a href="workspaces/unsafe-demo/src/main.rs">workspaces&#x2F;unsafe-demo&#x2F;src&#x2F;main.rs</a>。</p>
+<p>完整实现包括 <code>grow</code>、<code>Drop</code>、<code>Send</code>&#x2F;<code>Sync</code> 标记，见 <code>workspaces/unsafe-demo/src/main.rs</code>。</p>
 <h3 id="6-2-封装裸指针切片"><a href="#6-2-封装裸指针切片" class="headerlink" title="6.2 封装裸指针切片"></a>6.2 封装裸指针切片</h3><p><code>std::slice::from_raw_parts</code> 是另一个常见场景：把一段裸内存变成 Rust 切片。</p>
 <pre><code class="highlight rust"><span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">as_slice</span>(&amp;<span class="keyword">self</span>) <span class="punctuation">-&gt;</span> &amp;[<span class="type">u8</span>] &#123;
     <span class="comment">// Safety: ptr 由 Vec::as_mut_ptr() 分配，len 与分配大小匹配，</span>
@@ -353,7 +351,4 @@ std::mem::forget(value);
 <li>只是想绕过借用检查器”试试看能不能跑”</li>
 </ul>
 <p><code>unsafe</code> 是一扇门。门本身不危险，危险的是不知道门后面有什么就走进去。</p>
-</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
-function gtag(){dataLayer.push(arguments);}
-gtag('js', new Date());
-gtag('config', 'G-XXXXXXXXX');</script></html>
+<hr/><p><span>↶ </span><a href="/">返回首页</a><span></span></p></div></div><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script></body></html>

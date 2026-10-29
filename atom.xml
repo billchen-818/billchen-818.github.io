@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>billchen的博客</title>
+  <id>https://billchen-818.github.io/</id>
+  <link href="https://billchen-818.github.io/atom.xml" rel="self"/>
+  <link href="https://billchen-818.github.io/"/>
+  <updated>2026-06-03T00:10:26.000Z</updated>
+  <entry>
+    <title>Rust 工程化实战（一）：从零设计一个可维护的项目骨架</title>
+    <id>https://billchen-818.github.io/2026/06/03/Rust-工程化实战（一）：从零设计一个可维护的项目骨架/</id>
+    <link href="https://billchen-818.github.io/2026/06/03/Rust-工程化实战（一）：从零设计一个可维护的项目骨架/"/>
+    <updated>2026-06-03T00:10:26.000Z</updated>
+    <summary>这是 Rust 工程化实战系列的第一篇。 这个系列的出发点不是”写出能跑的代码”，而是”写出能长期维护的代码”。 能跑和能维护，这两件事差距很大。 很多 Rust 项目写到一定规模之后，都会碰到同样的问题： 模块之间的依赖越来越乱，改一处牵动多处 业务逻辑和基础设施代码搅在一起，想换数据库要改一堆业务代码 测试越来越难写，因为业务方法里直接依赖了数据库连接 新人接手项目，读完代码还是不清楚哪层负责什么 main.rs 越来越大，什么都往里塞 这些问题不是 Rust 特有的，但 Rust 的类型系统和模块系统提供了一套非常好的工具来解决它们——前提是你得在项目早期就把骨架设计清楚。 这一篇我会围</summary>
+  </entry>
+  <entry>
+    <title>Rust unsafe 入门：边界、约束与几个典型使用场景</title>
+    <id>https://billchen-818.github.io/2026/06/03/Rust-unsafe-入门：边界、约束与几个典型使用场景/</id>
+    <link href="https://billchen-818.github.io/2026/06/03/Rust-unsafe-入门：边界、约束与几个典型使用场景/"/>
+    <updated>2026-06-03T00:09:12.000Z</updated>
+    <summary>很多人对 Rust unsafe 的第一印象是： 这是一个关闭安全检查的开关，用了之后程序就可能崩溃。 这个理解有一半对，有一半不对。 unsafe 确实意味着”编译器不再帮你检查某些事情”，但它不是”关掉所有保护”。 更准确的理解是： unsafe 是一份协议。它告诉编译器：”这里有一些你无法验证的约束，我来负责保证它们成立。” 所以 unsafe 的本质不是”危险代码”，而是”责任转移”。 这一篇我想围绕几个问题把 unsafe 讲清楚： unsafe 到底解锁了哪几项能力 为什么 Rust 需要这个机制 如何正确使用 unsafe ：不是”别用”，而是”怎么用对” 几个典型使用场景，配完</summary>
+  </entry>
+  <entry>
+    <title>Rust trait 设计实战：什么时候该用关联类型，什么时候该用泛型参数</title>
+    <id>https://billchen-818.github.io/2026/06/02/Rust-trait-设计实战：什么时候该用关联类型，什么时候该用泛型参数/</id>
+    <link href="https://billchen-818.github.io/2026/06/02/Rust-trait-设计实战：什么时候该用关联类型，什么时候该用泛型参数/"/>
+    <updated>2026-06-02T05:47:59.000Z</updated>
+    <summary>很多人学完 Rust trait 基础之后，很快就会遇到这两种写法： // 写法一：关联类型 trait Parser &amp;#123; type Output ; fn parse (&amp;amp; self , input: &amp;amp; str ) -&amp;gt; Result &amp;lt; Self ::Output, String &amp;gt;; &amp;#125; // 写法二：泛型参数 trait Parser &amp;lt;Output&amp;gt; &amp;#123; fn parse (&amp;amp; self , input: &amp;amp; str ) -&amp;gt; Result &amp;lt;Output, String &amp;gt</summary>
+  </entry>
+  <entry>
+    <title>Rust interior mutability 体系：Cell、RefCell、Mutex、RwLock的统一理解</title>
+    <id>https://billchen-818.github.io/2026/06/02/Rust-interior-mutability-体系：Cell、RefCell、Mutex、RwLock的统一理解/</id>
+    <link href="https://billchen-818.github.io/2026/06/02/Rust-interior-mutability-体系：Cell、RefCell、Mutex、RwLock的统一理解/"/>
+    <updated>2026-06-02T05:46:12.000Z</updated>
+    <summary>很多人第一次接触 Rust interior mutability（内部可变性）时，通常会感觉这套东西有点散： Cell&amp;lt;T&amp;gt; 看起来像一个“可以偷偷改值”的小盒子 RefCell&amp;lt;T&amp;gt; 像是“运行时借用检查器” Mutex&amp;lt;T&amp;gt; 和 RwLock&amp;lt;T&amp;gt; 又突然变成了并发同步原语 然后问题就来了： 这四个东西到底是不是一类东西 为什么有的只适合单线程，有的却是并发编程核心工具 为什么 RefCell&amp;lt;T&amp;gt; 借错了会 panic，而 Mutex&amp;lt;T&amp;gt; 则会阻塞 为什么 Rust 一边强调“可变借用必须唯一”，一边又提供了这些</summary>
+  </entry>
+  <entry>
+    <title>深入理解 Rust 闭包：从语法糖到 FnOnce、FnMut、Fn 的本质</title>
+    <id>https://billchen-818.github.io/2026/06/01/深入理解-Rust-闭包：从语法糖到-FnOnce、FnMut、Fn-的本质/</id>
+    <link href="https://billchen-818.github.io/2026/06/01/深入理解-Rust-闭包：从语法糖到-FnOnce、FnMut、Fn-的本质/"/>
+    <updated>2026-06-01T01:54:18.000Z</updated>
+    <summary>引言 闭包是 Rust 中最常用的特性之一。迭代器链、异步回调、线程启动、错误处理——几乎所有场景都离不开闭包。 很多人初学闭包时，写个 |x| x + 1 觉得”不就是匿名函数吗”，但真到了下面这些场景就会卡住： 为什么这个闭包能传给 map ，那个却不行？ FnOnce 、 FnMut 、 Fn 到底有什么区别？ 闭包到底是怎么捕获变量的？为什么有时候编译器报”value moved”？ move 关键字到底做了什么？什么时候必须加？ 这些问题的本质是： 闭包不是简单的匿名函数，它是一个捕获了上下文环境的匿名结构体 。 这篇文章会从浅到深讲清楚： 闭包的基本语法 闭包如何捕获变量（不可变借</summary>
+  </entry>
+  <entry>
+    <title>深入理解 Rust 智能指针：从原理到实战</title>
+    <id>https://billchen-818.github.io/2026/06/01/深入理解-Rust-智能指针：从原理到实战/</id>
+    <link href="https://billchen-818.github.io/2026/06/01/深入理解-Rust-智能指针：从原理到实战/"/>
+    <updated>2026-06-01T01:49:25.000Z</updated>
+    <summary>引言 在 Rust 中，指针这个概念无处不在。最常见的指针就是引用（ &amp;amp;T ），它只是借用数据，不拥有数据。但在很多场景下，仅靠引用是不够的： 你想让数据分配在堆上，而不是栈上 你想让多个所有者共享同一份数据 你想在运行时动态决定数据的类型 你想在不可变结构中实现内部可变性 这些需求，普通引用都无法满足。Rust 为此提供了 智能指针 。 智能指针不同于普通引用的关键在于： 智能指针不仅持有指向数据的指针，还拥有元数据和额外能力（如自动释放内存、引用计数等）。 实际上， String 和 Vec&amp;lt;T&amp;gt; 本质上也是智能指针——它们拥有自己的堆内存，并在 Drop 时自动释放。</summary>
+  </entry>
+  <entry>
+    <title>深入理解 Rust 生命周期：从借用规则到工程实践</title>
+    <id>https://billchen-818.github.io/2026/06/01/深入理解-Rust-生命周期：从借用规则到工程实践/</id>
+    <link href="https://billchen-818.github.io/2026/06/01/深入理解-Rust-生命周期：从借用规则到工程实践/"/>
+    <updated>2026-06-01T01:48:01.000Z</updated>
+    <summary>引言 Rust 初学者最容易卡住的概念之一，不是所有权，也不是 trait，而是生命周期。 很多人第一次看到生命周期标注时，脑子里都会冒出几个问题： 为什么函数签名里会突然多出一个 &amp;#39;a 这个 &amp;#39;a 到底是什么，它是不是某个具体时间长度 为什么有些地方根本不用写生命周期，有些地方却必须写 生命周期是不是很复杂，是不是只要背语法就行 如果只是把生命周期理解成“引用活多久”，这个理解并不算错，但太浅了。 生命周期真正要解决的问题是： 编译器如何证明一个引用在被使用时一定仍然有效。 也就是说，生命周期并不是为了制造语法复杂度，而是 Rust 在没有 GC 的前提下，为了保证引用安全而</summary>
+  </entry>
+  <entry>
+    <title>Rust 重新认识所有权机制</title>
+    <id>https://billchen-818.github.io/2026/05/29/Rust-重新认识所有权机制/</id>
+    <link href="https://billchen-818.github.io/2026/05/29/Rust-重新认识所有权机制/"/>
+    <updated>2026-05-29T09:01:30.000Z</updated>
+    <summary>引言 如果你已经写了一段时间 Rust，一定对”所有权”三个字不陌生。大多数教程会告诉你：Rust 中每个值都有一个所有者，值在所有者离开作用域时被释放，赋值会发生”移动”…… 但你有没有想过—— 所有权机制到底在解决什么问题？它背后的设计哲学是什么？为什么 Rust 选择了这条路，而不是 GC？ 本文不是一篇入门教程。我们将从更深的视角重新审视所有权系统——理解它的 本质 、 边界 ，以及在实战中那些”看似简单，实则暗藏玄机”的场景。 所有权的本质：资源的确定性管理 不只是内存管理 很多人第一次接触所有权时，会把它等同于”内存管理”。这没有错，但不够准确。 所有权的本质是：对任意资源（不仅限</summary>
+  </entry>
+  <entry>
+    <title>深入理解 Rust Default Trait</title>
+    <id>https://billchen-818.github.io/2026/05/29/深入理解-Rust-Default-Trait/</id>
+    <link href="https://billchen-818.github.io/2026/05/29/深入理解-Rust-Default-Trait/"/>
+    <updated>2026-05-29T08:58:57.000Z</updated>
+    <summary>引言 在 Rust 中使用结构体或枚举时，我们经常需要一种方法来创建一个”标准”或”初始”实例，而无需每次都手动指定所有字段。尤其对于字段较多的复杂类型，手动逐一设置每个字段会非常繁琐。 那么，有没有一种方式可以方便地创建一个”合理”的默认实例呢？ 答案就是 std::default::Default trait。它为类型提供了一种标准化的方式来定义默认值。只要一个类型实现了 Default ，我们就可以轻松获得一个默认实例，简化初始化流程，让代码更加简洁——尤其是在处理配置结构体或可选字段时特别好用。 为什么需要默认值？ 假设我们有如下结构体定义： // 学生信息 struct Studen</summary>
+  </entry>
+  <entry>
+    <title>Rust Send 与 Sync 详解：线程安全标记到底是怎么工作的</title>
+    <id>https://billchen-818.github.io/2026/05/28/Rust-Send-与-Sync-详解：线程安全标记到底是怎么工作的/</id>
+    <link href="https://billchen-818.github.io/2026/05/28/Rust-Send-与-Sync-详解：线程安全标记到底是怎么工作的/"/>
+    <updated>2026-05-28T05:00:46.000Z</updated>
+    <summary>很多人第一次接触 Rust 并发时，都会很快碰到两个名字： Send Sync 然后通常会顺手记住一句话： Send 表示可以在线程间发送 Sync 表示可以在线程间共享 这当然不算错。 但如果只停在这两句口号上，后面很快还是会混： 为什么 Rc&amp;lt;T&amp;gt; 不行， Arc&amp;lt;T&amp;gt; 却可以 为什么 Mutex&amp;lt;T&amp;gt; 看起来明明是“可变的”，却又能是 Sync 为什么很多类型既是 Send 也是 Sync ，但这两个 trait 又不能混成一个 为什么它们明明没方法，却能在并发里起这么大作用 这说明： Send 和 Sync 真正难的地方，不在定义本身，而在于你是否分</summary>
+  </entry>
+  <entry>
+    <title>Rust Pin 与 Unpin 彻底讲清楚：异步底层为什么离不开它们</title>
+    <id>https://billchen-818.github.io/2026/05/28/Rust-Pin-与-Unpin-彻底讲清楚：异步底层为什么离不开它们/</id>
+    <link href="https://billchen-818.github.io/2026/05/28/Rust-Pin-与-Unpin-彻底讲清楚：异步底层为什么离不开它们/"/>
+    <updated>2026-05-28T04:59:31.000Z</updated>
+    <summary>很多人第一次接触 Pin 和 Unpin ，都会有一种非常强烈的感受： 这东西看起来像 Rust 里最不讲人话的一块。 原因也很现实。 因为你刚看到它们时，通常会同时碰到这些词： Future 自引用 地址稳定 Pin&amp;lt;&amp;amp;mut T&amp;gt; Pin&amp;lt;Box&amp;lt;T&amp;gt;&amp;gt; PhantomPinned 如果只是背定义，很容易越看越碎： Pin 到底在 pin 什么 为什么 Pin 不是“把值锁死不能改” 为什么有些类型默认就是 Unpin 为什么 async&amp;#x2F;await 底层会和这套机制强相关 为什么很多地方看起来像普通引用，一加 Pin 就完全变味了 这</summary>
+  </entry>
+  <entry>
+    <title>Rust From/Into/AsRef/Borrow 全面对比：类型转换接口该怎么设计</title>
+    <id>https://billchen-818.github.io/2026/05/27/Rust-From-Into-AsRef-Borrow-全面对比：类型转换接口该怎么设计/</id>
+    <link href="https://billchen-818.github.io/2026/05/27/Rust-From-Into-AsRef-Borrow-全面对比：类型转换接口该怎么设计/"/>
+    <updated>2026-05-27T01:02:46.000Z</updated>
+    <summary>很多人第一次系统接触 Rust 类型转换接口时，通常会很快碰到这 4 个 trait： From Into AsRef Borrow 然后就会开始混： From 和 Into 到底谁实现、谁来用 AsRef&amp;lt;str&amp;gt; 和 Borrow&amp;lt;str&amp;gt; 看起来都能拿到 &amp;amp;str ，区别到底在哪 为什么有些函数参数更适合写 impl Into&amp;lt;String&amp;gt; ，有些又更适合写 impl AsRef&amp;lt;Path&amp;gt; 明明都叫“转换”，为什么它们表达出来的语义差异这么大 这说明： Rust 里的“转换接口”其实不是一类问题，而至少是两类问题：值要不要被拿走</summary>
+  </entry>
+  <entry>
+    <title>Rust 泛型与单态化深入解析：泛型为什么快，代价又是什么</title>
+    <id>https://billchen-818.github.io/2026/05/27/Rust-泛型与单态化深入解析：泛型为什么快，代价又是什么/</id>
+    <link href="https://billchen-818.github.io/2026/05/27/Rust-泛型与单态化深入解析：泛型为什么快，代价又是什么/"/>
+    <updated>2026-05-27T00:36:36.000Z</updated>
+    <summary>很多人学 Rust 泛型时，最先记住的往往是几句话： 泛型很重要 泛型是零成本抽象 泛型通常比动态分发更快 这些结论大体没错。 但如果你只记住这些口号，后面很容易继续困惑： 泛型到底为什么快 编译器到底做了什么 为什么同样是抽象， dyn Trait 和泛型的运行时成本会不一样 如果泛型这么好，为什么还会说它有“代码膨胀”问题 这说明： Rust 泛型真正难的地方，不在语法，而在你是否理解它背后的编译模型。 这一篇我会围绕 4 个问题展开： 单态化到底是什么 为什么单态化让泛型往往更快 为什么它又可能带来编译时间和二进制体积的代价 工程里什么时候应该优先泛型，什么时候反而该克制 文中的完整示例</summary>
+  </entry>
+  <entry>
+    <title>Rust 网络编程入门：TcpListener、TcpStream 与协议拆包粘包问题</title>
+    <id>https://billchen-818.github.io/2026/05/26/Rust-网络编程入门：TcpListener、TcpStream-与协议拆包粘包问题/</id>
+    <link href="https://billchen-818.github.io/2026/05/26/Rust-网络编程入门：TcpListener、TcpStream-与协议拆包粘包问题/"/>
+    <updated>2026-05-26T09:01:26.000Z</updated>
+    <summary>很多人第一次写 Rust 网络程序，通常会先从这两类 API 开始： TcpListener TcpStream 然后很快就能跑出一个最小 demo： 服务端监听端口 客户端连上去 双方互相收发几条字符串 这一步通常不难。 真正让人开始踩坑的，是程序一旦不再只是“本地玩具示例”，问题马上就来了： 为什么我明明发了两条消息，服务端却可能一次读到一大块数据 为什么我发了一条完整消息，服务端却可能只读到半条 为什么 read 返回一次，不代表“读到了一条消息” 为什么网络代码里最难的部分，常常不是 connect 和 accept ，而是协议边界 这说明： TCP 编程最容易被误解的一点，就是它传输</summary>
+  </entry>
+  <entry>
+    <title>Rust 文件 I/O 实战：缓冲读写、分块处理、临时文件与原子重命名</title>
+    <id>https://billchen-818.github.io/2026/05/26/Rust-文件-I-O-实战：缓冲读写、分块处理、临时文件与原子重命名/</id>
+    <link href="https://billchen-818.github.io/2026/05/26/Rust-文件-I-O-实战：缓冲读写、分块处理、临时文件与原子重命名/"/>
+    <updated>2026-05-26T08:54:37.000Z</updated>
+    <summary>很多人第一次写 Rust 文件 I&amp;#x2F;O，通常就是几行代码： std::fs::read_to_string std::fs::write 读出来、改一下、再写回去 这在 demo 阶段当然够用。 但只要代码进入长期维护阶段，文件 I&amp;#x2F;O 很快就不再只是“把内容读出来”这么简单，而会变成一组工程问题： 文件稍微大一点时，还适不适合一次性读进内存 日志、导出、备份这类场景，为什么经常要用缓冲写 拷贝大文件时，为什么不能永远指望 read_to_end 更新配置文件时，为什么很多成熟程序都不是直接覆盖原文件 程序写到一半崩了，文件只写了一半怎么办 这说明： 文件 I&amp;#x2F;O</summary>
+  </entry>
+  <entry>
+    <title>Rust 测试体系设计：单元测试、集成测试、异步测试与测试数据管理</title>
+    <id>https://billchen-818.github.io/2026/05/20/Rust-测试体系设计：单元测试、集成测试、异步测试与测试数据管理/</id>
+    <link href="https://billchen-818.github.io/2026/05/20/Rust-测试体系设计：单元测试、集成测试、异步测试与测试数据管理/"/>
+    <updated>2026-05-20T02:27:45.000Z</updated>
+    <summary>很多人刚开始写 Rust 测试时，思路都很直接： 给几个函数加上 #[test] 跑一下 cargo test 看到绿色通过，就觉得测试差不多了 这在小 demo 阶段通常没问题。 但只要项目开始变成“长期维护”的程序，测试问题就会立刻从“有没有”变成“怎么组织”： 哪些逻辑应该写成单元测试，哪些应该放进集成测试 异步代码到底该怎么测，难道每个地方都直接上 #[tokio::test] 测试数据到底写死在代码里，还是单独放 fixture 一个测试失败时，到底说明业务规则错了，还是说明组装方式错了 为什么测试一多，跑起来反而越来越慢，改起来越来越脆 这说明： Rust 里的测试，不是“补几条断</summary>
+  </entry>
+  <entry>
+    <title>Rust CLI 工具开发实战：用 clap 打造一个可维护的命令行工具</title>
+    <id>https://billchen-818.github.io/2026/05/19/Rust-CLI-工具开发实战：用-clap-打造一个可维护的命令行工具/</id>
+    <link href="https://billchen-818.github.io/2026/05/19/Rust-CLI-工具开发实战：用-clap-打造一个可维护的命令行工具/"/>
+    <updated>2026-05-19T07:58:37.000Z</updated>
+    <summary>很多人第一次写 Rust CLI 工具，目标都很简单： 能解析几个参数 能跑一个子命令 能把结果打印出来 这当然没问题。 但只要工具开始往“长期维护”方向走，问题很快就不再是“参数能不能解析”，而是下面这些： 命令越来越多， main.rs 里的 match 越来越长 参数名、默认值、帮助文案散落在各处 一部分校验写在 clap 上，一部分写在业务逻辑里，边界不清 输出格式越来越多， json 、 table 、 plain 到处都是字符串分支 新增一个子命令时，解析逻辑和执行逻辑经常一起改乱 这说明： CLI 工具的难点，不是把命令行拆成字符串，而是把命令行设计成可维护的命令模型。 这也是为</summary>
+  </entry>
+  <entry>
+    <title>多签（Multisig）深入解析：从近期重大安全事故说起</title>
+    <id>https://billchen-818.github.io/2026/05/18/多签（Multisig）深入解析：从近期重大安全事故说起/</id>
+    <link href="https://billchen-818.github.io/2026/05/18/多签（Multisig）深入解析：从近期重大安全事故说起/"/>
+    <updated>2026-05-18T07:37:43.000Z</updated>
+    <summary>2025 年 2 月 21 日，加密货币交易所 ByBit 遭遇史上最大规模单次盗窃，约 15 亿美元 的 ETH 被黑客转走。 攻击者是朝鲜国家黑客组织 Lazarus Group。他们并不是直接爆破私钥，而是入侵了 Safe{Wallet}（前身 Gnosis Safe）的前端服务，篡改了 JavaScript 脚本，让 ByBit 的多签操作员在看到”正常转账界面”的同时，实际签署的却是一笔恶意合约升级交易。 这件事令人不安的地方在于： ByBit 用的就是多签钱包。 不是单签，不是简单的热钱包。是号称行业最佳实践的 3-of-3 多签冷钱包。 然而还是被偷了。 这就引出了本文想深入讨论</summary>
+  </entry>
+  <entry>
+    <title>Rust trait object 详解：dyn Trait、对象安全与动态分发</title>
+    <id>https://billchen-818.github.io/2026/05/18/Rust-trait-object-详解：dyn-Trait、对象安全与动态分发/</id>
+    <link href="https://billchen-818.github.io/2026/05/18/Rust-trait-object-详解：dyn-Trait、对象安全与动态分发/"/>
+    <updated>2026-05-18T06:10:09.000Z</updated>
+    <summary>很多人第一次接触 Rust trait object，都会觉得它有点别扭。 一方面，它看起来像“接口对象”： &amp;amp;dyn Trait Box&amp;lt;dyn Trait&amp;gt; 另一方面，它又总是伴随着一堆限制： 为什么有的 trait 能写成 dyn Trait ，有的不能？ 为什么带泛型方法的 trait 往往不对象安全？ 为什么返回 Self 的方法经常会出问题？ 既然泛型更快，为什么还需要 trait object？ 如果只背结论，这一块会非常碎。 真正更有用的理解方式是把这几个问题串起来： dyn Trait 到底解决什么问题 它和泛型分别对应什么分发方式 对象安全规则本质上在保</summary>
+  </entry>
+  <entry>
+    <title>Rust workspace 多 crate 项目组织实战：什么时候拆包，怎么拆才合理</title>
+    <id>https://billchen-818.github.io/2026/05/13/Rust-workspace-多-crate-项目组织实战：什么时候拆包，怎么拆才合理/</id>
+    <link href="https://billchen-818.github.io/2026/05/13/Rust-workspace-多-crate-项目组织实战：什么时候拆包，怎么拆才合理/"/>
+    <updated>2026-05-12T23:44:37.000Z</updated>
+    <summary>引言 很多人写 Rust 项目写到一段时间后，都会碰到一个很别扭的问题： 代码还没大到失控，但已经开始觉得“所有东西都塞在一个 crate 里有点挤了”。 这时候通常会出现两种相反的倾向。 第一种是完全不拆。 于是项目会慢慢变成这样： main.rs 越来越大 mod service 、 mod db 、 mod http 、 mod config 一层套一层 内部模块越来越多，但边界其实很模糊 想复用一部分能力时，只能复制代码 第二种是拆得过早、拆得过碎。 比如项目刚起步，就先拆出： common utils core model infra application 最后 crate 名字看</summary>
+  </entry>
+</feed>

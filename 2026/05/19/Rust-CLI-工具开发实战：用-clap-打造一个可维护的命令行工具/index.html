@@ -1,6 +1,4 @@
-<!DOCTYPE html><html lang="zh-cn"><head><title>Rust CLI 工具开发实战：用 clap 打造一个可维护的命令行工具</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
-  document.body.classList.add('mobile')
-}</script><div><div class="inner"><h1>Rust CLI 工具开发实战：用 clap 打造一个可维护的命令行工具</h1><div class="time">2026-05-19</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>很多人第一次写 Rust CLI 工具，目标都很简单：</p>
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust CLI 工具开发实战：用 clap 打造一个可维护的命令行工具 | billchen的博客</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。"><meta name="author" content="billchen"><link rel="canonical" href="https://billchen-818.github.io/2026/05/19/Rust-CLI-%E5%B7%A5%E5%85%B7%E5%BC%80%E5%8F%91%E5%AE%9E%E6%88%98%EF%BC%9A%E7%94%A8-clap-%E6%89%93%E9%80%A0%E4%B8%80%E4%B8%AA%E5%8F%AF%E7%BB%B4%E6%8A%A4%E7%9A%84%E5%91%BD%E4%BB%A4%E8%A1%8C%E5%B7%A5%E5%85%B7/"><meta property="og:title" content="Rust CLI 工具开发实战：用 clap 打造一个可维护的命令行工具 | billchen的博客"><meta property="og:description" content="记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。"><meta property="og:type" content="article"><meta property="og:url" content="https://billchen-818.github.io/2026/05/19/Rust-CLI-%E5%B7%A5%E5%85%B7%E5%BC%80%E5%8F%91%E5%AE%9E%E6%88%98%EF%BC%9A%E7%94%A8-clap-%E6%89%93%E9%80%A0%E4%B8%80%E4%B8%AA%E5%8F%AF%E7%BB%B4%E6%8A%A4%E7%9A%84%E5%91%BD%E4%BB%A4%E8%A1%8C%E5%B7%A5%E5%85%B7/"><meta property="og:site_name" content="billchen的博客"><meta name="twitter:card" content="summary"><link rel="alternate" type="application/atom+xml" title="billchen的博客" href="https://billchen-818.github.io/atom.xml"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-theme.min.css"><link rel="stylesheet" href="/css/home.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><nav class="navbar navbar-default" style="opacity:.9;" role="navigation" aria-label="主导航"><div class="container-fluid"><div class="navbar-header"><button class="navbar-toggle collapsed" type="button" data-toggle="collapse" data-target="#navbar-bs" aria-expanded="false" aria-controls="navbar-bs" aria-label="展开导航"><span class="icon-bar"></span><span class="icon-bar"></span><span class="icon-bar"></span></button><a class="navbar-brand" href="/" data-toggle="tooltip" data-placement="right">billchen的博客</a></div><div class="navbar-collapse collapse" id="navbar-bs"><ul class="nav navbar-nav navbar-right"><li><a href="/" target="_self">首页</a></li><li><a href="/archives/" target="_self">归档</a></li><li><a href="/tags/" target="_self">标签</a></li></ul></div></div></nav><div><div class="inner"><h1>Rust CLI 工具开发实战：用 clap 打造一个可维护的命令行工具</h1><div class="time">2026-05-19</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>很多人第一次写 Rust CLI 工具，目标都很简单：</p>
 <ul>
 <li>能解析几个参数</li>
 <li>能跑一个子命令</li>
@@ -43,7 +41,7 @@
 <li>参数校验应该放在 clap，还是放在业务层</li>
 <li>如何避免把一个 CLI 工具写成“能跑但很难继续加命令”的结构</li>
 </ol>
-<p>文中的完整示例工程在 <a href="workspaces/clap-demo">workspaces&#x2F;clap-demo</a>。</p>
+<p>文中的完整示例工程在 <code>workspaces/clap-demo</code>。</p>
 <hr>
 <h2 id="一、先回答根问题：CLI-的输入其实是“命令模型”"><a href="#一、先回答根问题：CLI-的输入其实是“命令模型”" class="headerlink" title="一、先回答根问题：CLI 的输入其实是“命令模型”"></a>一、先回答根问题：CLI 的输入其实是“命令模型”</h2><p>很多人看 CLI，会本能地把它理解成：</p>
 <blockquote>
@@ -105,11 +103,11 @@ task-cli <span class="built_in">export</span> --format json --output stdout --pr
 </ol>
 <p>在示例工程里，这三层分别放在：</p>
 <ul>
-<li><a href="workspaces/clap-demo/src/cli.rs">workspaces&#x2F;clap-demo&#x2F;src&#x2F;cli.rs</a></li>
-<li><a href="workspaces/clap-demo/src/app.rs">workspaces&#x2F;clap-demo&#x2F;src&#x2F;app.rs</a></li>
-<li><a href="workspaces/clap-demo/src/model.rs">workspaces&#x2F;clap-demo&#x2F;src&#x2F;model.rs</a></li>
+<li><code>workspaces/clap-demo/src/cli.rs</code></li>
+<li><code>workspaces/clap-demo/src/app.rs</code></li>
+<li><code>workspaces/clap-demo/src/model.rs</code></li>
 </ul>
-<p>入口文件 <a href="workspaces/clap-demo/src/main.rs">workspaces&#x2F;clap-demo&#x2F;src&#x2F;main.rs</a> 只做一件事：解析，然后交给应用层。</p>
+<p>入口文件 <code>workspaces/clap-demo/src/main.rs</code> 只做一件事：解析，然后交给应用层。</p>
 <pre><code class="highlight rust"><span class="keyword">mod</span> app;
 <span class="keyword">mod</span> cli;
 <span class="keyword">mod</span> model;
@@ -399,7 +397,7 @@ task-cli list --status doing --profile prod</code></pre>
 <p>你的输入协议和输出协议有没有被清楚地声明出来。</p>
 </blockquote>
 <hr>
-<h2 id="十二、完整示例：一个带枚举参数和子命令的-task-CLI"><a href="#十二、完整示例：一个带枚举参数和子命令的-task-CLI" class="headerlink" title="十二、完整示例：一个带枚举参数和子命令的 task CLI"></a>十二、完整示例：一个带枚举参数和子命令的 task CLI</h2><p>完整代码在 <a href="workspaces/clap-demo/src/cli.rs">workspaces&#x2F;clap-demo&#x2F;src&#x2F;cli.rs</a>、<a href="workspaces/clap-demo/src/app.rs">workspaces&#x2F;clap-demo&#x2F;src&#x2F;app.rs</a>、<a href="workspaces/clap-demo/src/model.rs">workspaces&#x2F;clap-demo&#x2F;src&#x2F;model.rs</a>。</p>
+<h2 id="十二、完整示例：一个带枚举参数和子命令的-task-CLI"><a href="#十二、完整示例：一个带枚举参数和子命令的-task-CLI" class="headerlink" title="十二、完整示例：一个带枚举参数和子命令的 task CLI"></a>十二、完整示例：一个带枚举参数和子命令的 task CLI</h2><p>完整代码在 <code>workspaces/clap-demo/src/cli.rs</code>、<code>workspaces/clap-demo/src/app.rs</code>、<code>workspaces/clap-demo/src/model.rs</code>。</p>
 <p>这里摘几段核心代码。</p>
 <h3 id="12-1-CLI-定义层"><a href="#12-1-CLI-定义层" class="headerlink" title="12.1 CLI 定义层"></a>12.1 CLI 定义层</h3><pre><code class="highlight rust"><span class="meta">#[derive(Debug, Clone, Parser)]</span>
 <span class="meta">#[command(</span>
@@ -450,7 +448,7 @@ task-cli list --status doing --profile prod</code></pre>
 
 <p>你会发现，这种结构虽然简单，但已经具备了后续继续长大的基础。</p>
 <hr>
-<h2 id="十三、实际运行效果"><a href="#十三、实际运行效果" class="headerlink" title="十三、实际运行效果"></a>十三、实际运行效果</h2><p>在 <a href="workspaces/clap-demo">workspaces&#x2F;clap-demo</a> 下执行：</p>
+<h2 id="十三、实际运行效果"><a href="#十三、实际运行效果" class="headerlink" title="十三、实际运行效果"></a>十三、实际运行效果</h2><p>在 <code>workspaces/clap-demo</code> 下执行：</p>
 <pre><code class="highlight bash">cargo run -- --<span class="built_in">help</span>
 cargo run -- list --<span class="built_in">help</span>
 cargo run -- list --status doing --format table
@@ -522,7 +520,4 @@ Options:
 <p>先设计命令模型，再写参数解析；先分清输入协议和业务规则，再谈 CLI 的可维护性。</p>
 </blockquote>
 <p>这比单独记住几个 <code>clap</code> 注解要重要得多。</p>
-</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
-function gtag(){dataLayer.push(arguments);}
-gtag('js', new Date());
-gtag('config', 'G-XXXXXXXXX');</script></html>
+<hr/><p><span>↶ </span><a href="/">返回首页</a><span></span></p></div></div><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script></body></html>

@@ -1,6 +1,4 @@
-<!DOCTYPE html><html lang="zh-cn"><head><title>Rust 测试体系设计：单元测试、集成测试、异步测试与测试数据管理</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
-  document.body.classList.add('mobile')
-}</script><div><div class="inner"><h1>Rust 测试体系设计：单元测试、集成测试、异步测试与测试数据管理</h1><div class="time">2026-05-20</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>很多人刚开始写 Rust 测试时，思路都很直接：</p>
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust 测试体系设计：单元测试、集成测试、异步测试与测试数据管理 | billchen的博客</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。"><meta name="author" content="billchen"><link rel="canonical" href="https://billchen-818.github.io/2026/05/20/Rust-%E6%B5%8B%E8%AF%95%E4%BD%93%E7%B3%BB%E8%AE%BE%E8%AE%A1%EF%BC%9A%E5%8D%95%E5%85%83%E6%B5%8B%E8%AF%95%E3%80%81%E9%9B%86%E6%88%90%E6%B5%8B%E8%AF%95%E3%80%81%E5%BC%82%E6%AD%A5%E6%B5%8B%E8%AF%95%E4%B8%8E%E6%B5%8B%E8%AF%95%E6%95%B0%E6%8D%AE%E7%AE%A1%E7%90%86/"><meta property="og:title" content="Rust 测试体系设计：单元测试、集成测试、异步测试与测试数据管理 | billchen的博客"><meta property="og:description" content="记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。"><meta property="og:type" content="article"><meta property="og:url" content="https://billchen-818.github.io/2026/05/20/Rust-%E6%B5%8B%E8%AF%95%E4%BD%93%E7%B3%BB%E8%AE%BE%E8%AE%A1%EF%BC%9A%E5%8D%95%E5%85%83%E6%B5%8B%E8%AF%95%E3%80%81%E9%9B%86%E6%88%90%E6%B5%8B%E8%AF%95%E3%80%81%E5%BC%82%E6%AD%A5%E6%B5%8B%E8%AF%95%E4%B8%8E%E6%B5%8B%E8%AF%95%E6%95%B0%E6%8D%AE%E7%AE%A1%E7%90%86/"><meta property="og:site_name" content="billchen的博客"><meta name="twitter:card" content="summary"><link rel="alternate" type="application/atom+xml" title="billchen的博客" href="https://billchen-818.github.io/atom.xml"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-theme.min.css"><link rel="stylesheet" href="/css/home.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><nav class="navbar navbar-default" style="opacity:.9;" role="navigation" aria-label="主导航"><div class="container-fluid"><div class="navbar-header"><button class="navbar-toggle collapsed" type="button" data-toggle="collapse" data-target="#navbar-bs" aria-expanded="false" aria-controls="navbar-bs" aria-label="展开导航"><span class="icon-bar"></span><span class="icon-bar"></span><span class="icon-bar"></span></button><a class="navbar-brand" href="/" data-toggle="tooltip" data-placement="right">billchen的博客</a></div><div class="navbar-collapse collapse" id="navbar-bs"><ul class="nav navbar-nav navbar-right"><li><a href="/" target="_self">首页</a></li><li><a href="/archives/" target="_self">归档</a></li><li><a href="/tags/" target="_self">标签</a></li></ul></div></div></nav><div><div class="inner"><h1>Rust 测试体系设计：单元测试、集成测试、异步测试与测试数据管理</h1><div class="time">2026-05-20</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>很多人刚开始写 Rust 测试时，思路都很直接：</p>
 <ul>
 <li>给几个函数加上 <code>#[test]</code></li>
 <li>跑一下 <code>cargo test</code></li>
@@ -26,7 +24,7 @@
 <li>测试数据和测试辅助代码应该怎么组织，才不会把工程拖乱</li>
 <li>怎样让测试真正成为重构保护网，而不是形式化负担</li>
 </ol>
-<p>文中的完整示例工程在 <a href="workspaces/testing-demo">workspaces&#x2F;testing-demo</a>。</p>
+<p>文中的完整示例工程在 <code>workspaces/testing-demo</code>。</p>
 <hr>
 <h2 id="一、先说结论：测试不是按“框架能力”分，而是按“反馈层次”分"><a href="#一、先说结论：测试不是按“框架能力”分，而是按“反馈层次”分" class="headerlink" title="一、先说结论：测试不是按“框架能力”分，而是按“反馈层次”分"></a>一、先说结论：测试不是按“框架能力”分，而是按“反馈层次”分</h2><p>很多人学测试时，会先接触这些词：</p>
 <ul>
@@ -62,14 +60,14 @@
 </ol>
 <p>在示例工程里，这三层分别对应：</p>
 <ul>
-<li>源码内部的单元测试 <a href="workspaces/testing-demo/src/service.rs">workspaces&#x2F;testing-demo&#x2F;src&#x2F;service.rs</a></li>
-<li><code>tests/</code> 目录下的集成测试 <a href="workspaces/testing-demo/tests/task_service.rs">workspaces&#x2F;testing-demo&#x2F;tests&#x2F;task_service.rs</a></li>
-<li>带 <code>#[tokio::test]</code> 的异步测试 <a href="workspaces/testing-demo/tests/task_service.rs">workspaces&#x2F;testing-demo&#x2F;tests&#x2F;task_service.rs</a></li>
+<li>源码内部的单元测试 <code>workspaces/testing-demo/src/service.rs</code></li>
+<li><code>tests/</code> 目录下的集成测试 <code>workspaces/testing-demo/tests/task_service.rs</code></li>
+<li>带 <code>#[tokio::test]</code> 的异步测试 <code>workspaces/testing-demo/tests/task_service.rs</code></li>
 </ul>
 <p>配套还有两块很关键的组织代码：</p>
 <ul>
-<li>测试辅助模块 <a href="workspaces/testing-demo/tests/support/mod.rs">workspaces&#x2F;testing-demo&#x2F;tests&#x2F;support&#x2F;mod.rs</a></li>
-<li>测试数据文件 <a href="workspaces/testing-demo/tests/fixtures/tasks.txt">workspaces&#x2F;testing-demo&#x2F;tests&#x2F;fixtures&#x2F;tasks.txt</a></li>
+<li>测试辅助模块 <code>workspaces/testing-demo/tests/support/mod.rs</code></li>
+<li>测试数据文件 <code>workspaces/testing-demo/tests/fixtures/tasks.txt</code></li>
 </ul>
 <p>这套结构的重点不是“目录摆得好看”，而是：</p>
 <blockquote>
@@ -235,8 +233,8 @@
 </ul>
 <p>示例里把这块拆成了两部分：</p>
 <ol>
-<li>测试辅助模块 <a href="workspaces/testing-demo/tests/support/mod.rs">workspaces&#x2F;testing-demo&#x2F;tests&#x2F;support&#x2F;mod.rs</a></li>
-<li>测试 fixture 文件 <a href="workspaces/testing-demo/tests/fixtures/tasks.txt">workspaces&#x2F;testing-demo&#x2F;tests&#x2F;fixtures&#x2F;tasks.txt</a></li>
+<li>测试辅助模块 <code>workspaces/testing-demo/tests/support/mod.rs</code></li>
+<li>测试 fixture 文件 <code>workspaces/testing-demo/tests/fixtures/tasks.txt</code></li>
 </ol>
 <p>辅助模块里对外暴露一个统一入口：</p>
 <pre><code class="highlight rust"><span class="keyword">pub</span> <span class="keyword">fn</span> <span class="title function_">fixture_service</span>() <span class="punctuation">-&gt;</span> TaskService &#123;
@@ -317,14 +315,14 @@
 </ul>
 <p>这比单纯提高覆盖率数字更有意义。</p>
 <hr>
-<h2 id="九、完整示例：一个最小但结构完整的测试-demo"><a href="#九、完整示例：一个最小但结构完整的测试-demo" class="headerlink" title="九、完整示例：一个最小但结构完整的测试 demo"></a>九、完整示例：一个最小但结构完整的测试 demo</h2><p>示例工程 <a href="workspaces/testing-demo">workspaces&#x2F;testing-demo</a> 里一共放了几类东西：</p>
+<h2 id="九、完整示例：一个最小但结构完整的测试-demo"><a href="#九、完整示例：一个最小但结构完整的测试-demo" class="headerlink" title="九、完整示例：一个最小但结构完整的测试 demo"></a>九、完整示例：一个最小但结构完整的测试 demo</h2><p>示例工程 <code>workspaces/testing-demo</code> 里一共放了几类东西：</p>
 <ol>
-<li>领域模型 <a href="workspaces/testing-demo/src/task.rs">workspaces&#x2F;testing-demo&#x2F;src&#x2F;task.rs</a></li>
-<li>服务逻辑和单元测试 <a href="workspaces/testing-demo/src/service.rs">workspaces&#x2F;testing-demo&#x2F;src&#x2F;service.rs</a></li>
-<li>集成测试 <a href="workspaces/testing-demo/tests/task_service.rs">workspaces&#x2F;testing-demo&#x2F;tests&#x2F;task_service.rs</a></li>
-<li>smoke test <a href="workspaces/testing-demo/tests/smoke.rs">workspaces&#x2F;testing-demo&#x2F;tests&#x2F;smoke.rs</a></li>
-<li>测试辅助模块 <a href="workspaces/testing-demo/tests/support/mod.rs">workspaces&#x2F;testing-demo&#x2F;tests&#x2F;support&#x2F;mod.rs</a></li>
-<li>fixture 文件 <a href="workspaces/testing-demo/tests/fixtures/tasks.txt">workspaces&#x2F;testing-demo&#x2F;tests&#x2F;fixtures&#x2F;tasks.txt</a></li>
+<li>领域模型 <code>workspaces/testing-demo/src/task.rs</code></li>
+<li>服务逻辑和单元测试 <code>workspaces/testing-demo/src/service.rs</code></li>
+<li>集成测试 <code>workspaces/testing-demo/tests/task_service.rs</code></li>
+<li>smoke test <code>workspaces/testing-demo/tests/smoke.rs</code></li>
+<li>测试辅助模块 <code>workspaces/testing-demo/tests/support/mod.rs</code></li>
+<li>fixture 文件 <code>workspaces/testing-demo/tests/fixtures/tasks.txt</code></li>
 </ol>
 <p>这套结构虽然很小，但已经能覆盖一篇工程实战文章最核心的几个点：</p>
 <ul>
@@ -334,7 +332,7 @@
 <li>测试数据如何复用和收口</li>
 </ul>
 <hr>
-<h2 id="十、实际运行结果"><a href="#十、实际运行结果" class="headerlink" title="十、实际运行结果"></a>十、实际运行结果</h2><p>在 <a href="workspaces/testing-demo">workspaces&#x2F;testing-demo</a> 下执行：</p>
+<h2 id="十、实际运行结果"><a href="#十、实际运行结果" class="headerlink" title="十、实际运行结果"></a>十、实际运行结果</h2><p>在 <code>workspaces/testing-demo</code> 下执行：</p>
 <pre><code class="highlight bash">cargo <span class="built_in">test</span></code></pre>
 
 <p>当前示例已经可以稳定通过，运行结果会看到：</p>
@@ -380,7 +378,4 @@ test result: ok. 4 passed</code></pre>
 <p>测试不是给代码加附件，而是给系统建立分层反馈。</p>
 </blockquote>
 <p>一旦你用这个视角去看单元测试、集成测试、异步测试和 fixture 管理，它们就不再是零散技巧，而会变成一套真正有工程价值的测试体系。</p>
-</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
-function gtag(){dataLayer.push(arguments);}
-gtag('js', new Date());
-gtag('config', 'G-XXXXXXXXX');</script></html>
+<hr/><p><span>↶ </span><a href="/">返回首页</a><span></span></p></div></div><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script></body></html>

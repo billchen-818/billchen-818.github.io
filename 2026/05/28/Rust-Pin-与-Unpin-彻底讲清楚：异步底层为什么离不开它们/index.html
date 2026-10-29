@@ -1,6 +1,4 @@
-<!DOCTYPE html><html lang="zh-cn"><head><title>Rust Pin 与 Unpin 彻底讲清楚：异步底层为什么离不开它们</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
-  document.body.classList.add('mobile')
-}</script><div><div class="inner"><h1>Rust Pin 与 Unpin 彻底讲清楚：异步底层为什么离不开它们</h1><div class="time">2026-05-28</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>很多人第一次接触 <code>Pin</code> 和 <code>Unpin</code>，都会有一种非常强烈的感受：</p>
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust Pin 与 Unpin 彻底讲清楚：异步底层为什么离不开它们 | billchen的博客</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。"><meta name="author" content="billchen"><link rel="canonical" href="https://billchen-818.github.io/2026/05/28/Rust-Pin-%E4%B8%8E-Unpin-%E5%BD%BB%E5%BA%95%E8%AE%B2%E6%B8%85%E6%A5%9A%EF%BC%9A%E5%BC%82%E6%AD%A5%E5%BA%95%E5%B1%82%E4%B8%BA%E4%BB%80%E4%B9%88%E7%A6%BB%E4%B8%8D%E5%BC%80%E5%AE%83%E4%BB%AC/"><meta property="og:title" content="Rust Pin 与 Unpin 彻底讲清楚：异步底层为什么离不开它们 | billchen的博客"><meta property="og:description" content="记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。"><meta property="og:type" content="article"><meta property="og:url" content="https://billchen-818.github.io/2026/05/28/Rust-Pin-%E4%B8%8E-Unpin-%E5%BD%BB%E5%BA%95%E8%AE%B2%E6%B8%85%E6%A5%9A%EF%BC%9A%E5%BC%82%E6%AD%A5%E5%BA%95%E5%B1%82%E4%B8%BA%E4%BB%80%E4%B9%88%E7%A6%BB%E4%B8%8D%E5%BC%80%E5%AE%83%E4%BB%AC/"><meta property="og:site_name" content="billchen的博客"><meta name="twitter:card" content="summary"><link rel="alternate" type="application/atom+xml" title="billchen的博客" href="https://billchen-818.github.io/atom.xml"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-theme.min.css"><link rel="stylesheet" href="/css/home.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><nav class="navbar navbar-default" style="opacity:.9;" role="navigation" aria-label="主导航"><div class="container-fluid"><div class="navbar-header"><button class="navbar-toggle collapsed" type="button" data-toggle="collapse" data-target="#navbar-bs" aria-expanded="false" aria-controls="navbar-bs" aria-label="展开导航"><span class="icon-bar"></span><span class="icon-bar"></span><span class="icon-bar"></span></button><a class="navbar-brand" href="/" data-toggle="tooltip" data-placement="right">billchen的博客</a></div><div class="navbar-collapse collapse" id="navbar-bs"><ul class="nav navbar-nav navbar-right"><li><a href="/" target="_self">首页</a></li><li><a href="/archives/" target="_self">归档</a></li><li><a href="/tags/" target="_self">标签</a></li></ul></div></div></nav><div><div class="inner"><h1>Rust Pin 与 Unpin 彻底讲清楚：异步底层为什么离不开它们</h1><div class="time">2026-05-28</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>很多人第一次接触 <code>Pin</code> 和 <code>Unpin</code>，都会有一种非常强烈的感受：</p>
 <blockquote>
 <p>这东西看起来像 Rust 里最不讲人话的一块。</p>
 </blockquote>
@@ -33,7 +31,7 @@
 <li><code>Pin</code> 和 <code>Unpin</code> 分别在表达什么约束</li>
 <li>为什么 Future 底层离不开它们</li>
 </ol>
-<p>文中的完整示例工程在 <a href="workspaces/pin-demo">workspaces&#x2F;pin-demo</a>。</p>
+<p>文中的完整示例工程在 <code>workspaces/pin-demo</code>。</p>
 <hr>
 <h2 id="一、先说结论：Pin-约束的是“位置不能再变”，不是“值不能改”"><a href="#一、先说结论：Pin-约束的是“位置不能再变”，不是“值不能改”" class="headerlink" title="一、先说结论：Pin 约束的是“位置不能再变”，不是“值不能改”"></a>一、先说结论：<code>Pin</code> 约束的是“位置不能再变”，不是“值不能改”</h2><p>很多人第一次看到 <code>Pin</code>，会本能地把它理解成：</p>
 <blockquote>
@@ -77,7 +75,7 @@
 <p>就是一个值内部的某部分，持有了指向它自己另一部分的引用或指针。</p>
 <p>一旦这个值整体被搬家，内部原先记录的地址关系就可能失效。</p>
 <p>这正是 <code>Pin</code> 存在的根本背景。</p>
-<h3 id="3-1-一个最小直觉示例"><a href="#3-1-一个最小直觉示例" class="headerlink" title="3.1 一个最小直觉示例"></a>3.1 一个最小直觉示例</h3><p>看示例工程 <a href="workspaces/pin-demo/src/main.rs">workspaces&#x2F;pin-demo&#x2F;src&#x2F;main.rs</a> 里的这个结构：</p>
+<h3 id="3-1-一个最小直觉示例"><a href="#3-1-一个最小直觉示例" class="headerlink" title="3.1 一个最小直觉示例"></a>3.1 一个最小直觉示例</h3><p>看示例工程 <code>workspaces/pin-demo/src/main.rs</code> 里的这个结构：</p>
 <pre><code class="highlight rust"><span class="keyword">struct</span> <span class="title class_">MovableBuffer</span> &#123;
     text: <span class="type">String</span>,
     text_ptr: *<span class="keyword">const</span> <span class="type">String</span>,
@@ -254,11 +252,11 @@ movable after move: field addr=0x..., stored addr=0x..., same=false</code></pre>
 <p>都不需要 pinning 语义。</p>
 <h3 id="9-2-对异步底层、自引用结构、侵入式数据结构等场景，再认真处理-Pin"><a href="#9-2-对异步底层、自引用结构、侵入式数据结构等场景，再认真处理-Pin" class="headerlink" title="9.2 对异步底层、自引用结构、侵入式数据结构等场景，再认真处理 Pin"></a>9.2 对异步底层、自引用结构、侵入式数据结构等场景，再认真处理 <code>Pin</code></h3><p>这类场景里，<code>Pin</code> 才是真正的工具，而不是概念负担。</p>
 <hr>
-<h2 id="十、完整示例：一个最小的-Pin-Unpin-地址稳定性-demo"><a href="#十、完整示例：一个最小的-Pin-Unpin-地址稳定性-demo" class="headerlink" title="十、完整示例：一个最小的 Pin&#x2F;Unpin 地址稳定性 demo"></a>十、完整示例：一个最小的 Pin&#x2F;Unpin 地址稳定性 demo</h2><p>示例工程 <a href="workspaces/pin-demo">workspaces&#x2F;pin-demo</a> 里放了三段最关键的对照：</p>
+<h2 id="十、完整示例：一个最小的-Pin-Unpin-地址稳定性-demo"><a href="#十、完整示例：一个最小的-Pin-Unpin-地址稳定性-demo" class="headerlink" title="十、完整示例：一个最小的 Pin&#x2F;Unpin 地址稳定性 demo"></a>十、完整示例：一个最小的 Pin&#x2F;Unpin 地址稳定性 demo</h2><p>示例工程 <code>workspaces/pin-demo</code> 里放了三段最关键的对照：</p>
 <ol>
-<li>可移动值在 move 前后地址关系变化 <a href="workspaces/pin-demo/src/main.rs">workspaces&#x2F;pin-demo&#x2F;src&#x2F;main.rs</a></li>
-<li><code>Pin&lt;Box&lt;T&gt;&gt;</code> 下地址保持稳定 <a href="workspaces/pin-demo/src/main.rs">workspaces&#x2F;pin-demo&#x2F;src&#x2F;main.rs</a></li>
-<li><code>u64</code> 这类 <code>Unpin</code> 类型的 pinning 几乎没有额外效果 <a href="workspaces/pin-demo/src/main.rs">workspaces&#x2F;pin-demo&#x2F;src&#x2F;main.rs</a></li>
+<li>可移动值在 move 前后地址关系变化 <code>workspaces/pin-demo/src/main.rs</code></li>
+<li><code>Pin&lt;Box&lt;T&gt;&gt;</code> 下地址保持稳定 <code>workspaces/pin-demo/src/main.rs</code></li>
+<li><code>u64</code> 这类 <code>Unpin</code> 类型的 pinning 几乎没有额外效果 <code>workspaces/pin-demo/src/main.rs</code></li>
 </ol>
 <p>它不是一个完整异步 runtime 示例，但它把最难的核心前提讲清楚了：</p>
 <ul>
@@ -268,7 +266,7 @@ movable after move: field addr=0x..., stored addr=0x..., same=false</code></pre>
 <li><code>Unpin</code> 负责说明“这个类型其实不依赖这层约束”</li>
 </ul>
 <hr>
-<h2 id="十一、实际运行结果"><a href="#十一、实际运行结果" class="headerlink" title="十一、实际运行结果"></a>十一、实际运行结果</h2><p>在 <a href="workspaces/pin-demo">workspaces&#x2F;pin-demo</a> 下执行：</p>
+<h2 id="十一、实际运行结果"><a href="#十一、实际运行结果" class="headerlink" title="十一、实际运行结果"></a>十一、实际运行结果</h2><p>在 <code>workspaces/pin-demo</code> 下执行：</p>
 <pre><code class="highlight bash">cargo run</code></pre>
 
 <p>当前示例会输出类似结果：</p>
@@ -303,7 +301,4 @@ u64 is Unpin, pinned value = 10</code></pre>
 <p>不要把 <code>Pin</code> 理解成“不能改”，要把它理解成“不能再随便挪位置”。</p>
 </blockquote>
 <p>这句想通了，后面的很多细节都会顺下来。</p>
-</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
-function gtag(){dataLayer.push(arguments);}
-gtag('js', new Date());
-gtag('config', 'G-XXXXXXXXX');</script></html>
+<hr/><p><span>↶ </span><a href="/">返回首页</a><span></span></p></div></div><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script></body></html>

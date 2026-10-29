@@ -1,6 +1,4 @@
-<!DOCTYPE html><html lang="zh-cn"><head><title>Rust Send 与 Sync 详解：线程安全标记到底是怎么工作的</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=0.5"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"><link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><script>if (/mobile/i.test(navigator.userAgent) || /android/i.test(navigator.userAgent)) {
-  document.body.classList.add('mobile')
-}</script><div><div class="inner"><h1>Rust Send 与 Sync 详解：线程安全标记到底是怎么工作的</h1><div class="time">2026-05-28</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>很多人第一次接触 Rust 并发时，都会很快碰到两个名字：</p>
+<!DOCTYPE html><html lang="zh-cn"><head><title>Rust Send 与 Sync 详解：线程安全标记到底是怎么工作的 | billchen的博客</title><meta http-equiv="content-type" content="text/html; charset=utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。"><meta name="author" content="billchen"><link rel="canonical" href="https://billchen-818.github.io/2026/05/28/Rust-Send-%E4%B8%8E-Sync-%E8%AF%A6%E8%A7%A3%EF%BC%9A%E7%BA%BF%E7%A8%8B%E5%AE%89%E5%85%A8%E6%A0%87%E8%AE%B0%E5%88%B0%E5%BA%95%E6%98%AF%E6%80%8E%E4%B9%88%E5%B7%A5%E4%BD%9C%E7%9A%84/"><meta property="og:title" content="Rust Send 与 Sync 详解：线程安全标记到底是怎么工作的 | billchen的博客"><meta property="og:description" content="记录 Rust、区块链、Solana、Go 与 AI 工程实践的个人技术博客。"><meta property="og:type" content="article"><meta property="og:url" content="https://billchen-818.github.io/2026/05/28/Rust-Send-%E4%B8%8E-Sync-%E8%AF%A6%E8%A7%A3%EF%BC%9A%E7%BA%BF%E7%A8%8B%E5%AE%89%E5%85%A8%E6%A0%87%E8%AE%B0%E5%88%B0%E5%BA%95%E6%98%AF%E6%80%8E%E4%B9%88%E5%B7%A5%E4%BD%9C%E7%9A%84/"><meta property="og:site_name" content="billchen的博客"><meta name="twitter:card" content="summary"><link rel="alternate" type="application/atom+xml" title="billchen的博客" href="https://billchen-818.github.io/atom.xml"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="manifest" href="/site.webmanifest"><link rel="stylesheet" href="/css/highlight/xcode.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-tooltips.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap.min.css"><link rel="stylesheet" href="/css/bootstrap/bootstrap-theme.min.css"><link rel="stylesheet" href="/css/home.css"><link rel="stylesheet" href="/css/post.css"><script src="/js/jquery.min.js"></script><meta name="generator" content="Hexo 7.3.0"></head><body><nav class="navbar navbar-default" style="opacity:.9;" role="navigation" aria-label="主导航"><div class="container-fluid"><div class="navbar-header"><button class="navbar-toggle collapsed" type="button" data-toggle="collapse" data-target="#navbar-bs" aria-expanded="false" aria-controls="navbar-bs" aria-label="展开导航"><span class="icon-bar"></span><span class="icon-bar"></span><span class="icon-bar"></span></button><a class="navbar-brand" href="/" data-toggle="tooltip" data-placement="right">billchen的博客</a></div><div class="navbar-collapse collapse" id="navbar-bs"><ul class="nav navbar-nav navbar-right"><li><a href="/" target="_self">首页</a></li><li><a href="/archives/" target="_self">归档</a></li><li><a href="/tags/" target="_self">标签</a></li></ul></div></div></nav><div><div class="inner"><h1>Rust Send 与 Sync 详解：线程安全标记到底是怎么工作的</h1><div class="time">2026-05-28</div><ul class="tags"><li><span>#</span><a href="/tags/Rust/">Rust</a></li></ul><p>很多人第一次接触 Rust 并发时，都会很快碰到两个名字：</p>
 <ul>
 <li><code>Send</code></li>
 <li><code>Sync</code></li>
@@ -29,7 +27,7 @@
 <li><code>Rc</code>、<code>Arc</code>、<code>Mutex</code>、<code>RefCell</code> 这些常见类型到底各自落在哪一边</li>
 <li>这些规则为什么能在编译期挡住数据竞争</li>
 </ol>
-<p>文中的完整示例工程在 <a href="workspaces/send-sync-demo">workspaces&#x2F;send-sync-demo</a>。</p>
+<p>文中的完整示例工程在 <code>workspaces/send-sync-demo</code>。</p>
 <hr>
 <h2 id="一、先说结论：Send-管“值能不能过线程边界”，Sync-管“引用能不能过线程边界”"><a href="#一、先说结论：Send-管“值能不能过线程边界”，Sync-管“引用能不能过线程边界”" class="headerlink" title="一、先说结论：Send 管“值能不能过线程边界”，Sync 管“引用能不能过线程边界”"></a>一、先说结论：<code>Send</code> 管“值能不能过线程边界”，<code>Sync</code> 管“引用能不能过线程边界”</h2><p>这是整篇文章最重要的一句话。</p>
 <p>很多人一开始会把 <code>Send</code> 和 <code>Sync</code> 都理解成“线程安全”。</p>
@@ -83,7 +81,7 @@
 <p>很多线程安全问题，不是靠运行时兜底，而是靠类型系统提前挡掉。</p>
 </blockquote>
 <hr>
-<h2 id="四、先看-Send：什么叫“值能安全地跨线程移动”？"><a href="#四、先看-Send：什么叫“值能安全地跨线程移动”？" class="headerlink" title="四、先看 Send：什么叫“值能安全地跨线程移动”？"></a>四、先看 <code>Send</code>：什么叫“值能安全地跨线程移动”？</h2><p>示例工程 <a href="workspaces/send-sync-demo/src/main.rs">workspaces&#x2F;send-sync-demo&#x2F;src&#x2F;main.rs</a> 里先演示了一种最简单的 <code>Send</code> 场景：</p>
+<h2 id="四、先看-Send：什么叫“值能安全地跨线程移动”？"><a href="#四、先看-Send：什么叫“值能安全地跨线程移动”？" class="headerlink" title="四、先看 Send：什么叫“值能安全地跨线程移动”？"></a>四、先看 <code>Send</code>：什么叫“值能安全地跨线程移动”？</h2><p>示例工程 <code>workspaces/send-sync-demo/src/main.rs</code> 里先演示了一种最简单的 <code>Send</code> 场景：</p>
 <pre><code class="highlight rust"><span class="keyword">let</span> (tx, rx) = mpsc::<span class="title function_ invoke__">channel</span>();
 <span class="keyword">let</span> <span class="variable">sender</span> = thread::<span class="title function_ invoke__">spawn</span>(<span class="keyword">move</span> || &#123;
     tx.<span class="title function_ invoke__">send</span>(<span class="string">&quot;hello from worker&quot;</span>.<span class="title function_ invoke__">to_string</span>()).<span class="title function_ invoke__">unwrap</span>();
@@ -242,11 +240,11 @@ sender.<span class="title function_ invoke__">join</span>().<span class="title f
 <p>它不是在运行时帮你赌运气，而是在类型层面让错误更难发生。</p>
 </blockquote>
 <hr>
-<h2 id="十一、完整示例：一个最小-Send-Sync-对照-demo"><a href="#十一、完整示例：一个最小-Send-Sync-对照-demo" class="headerlink" title="十一、完整示例：一个最小 Send&#x2F;Sync 对照 demo"></a>十一、完整示例：一个最小 Send&#x2F;Sync 对照 demo</h2><p>示例工程 <a href="workspaces/send-sync-demo">workspaces&#x2F;send-sync-demo</a> 里放了三组最关键的代码：</p>
+<h2 id="十一、完整示例：一个最小-Send-Sync-对照-demo"><a href="#十一、完整示例：一个最小-Send-Sync-对照-demo" class="headerlink" title="十一、完整示例：一个最小 Send&#x2F;Sync 对照 demo"></a>十一、完整示例：一个最小 Send&#x2F;Sync 对照 demo</h2><p>示例工程 <code>workspaces/send-sync-demo</code> 里放了三组最关键的代码：</p>
 <ol>
-<li>用 channel 演示 <code>Send</code> 场景 <a href="workspaces/send-sync-demo/src/main.rs">workspaces&#x2F;send-sync-demo&#x2F;src&#x2F;main.rs</a></li>
-<li>用 <code>Arc&lt;Mutex&lt;Vec&lt;_&gt;&gt;&gt;</code> 演示共享可变状态 <a href="workspaces/send-sync-demo/src/main.rs">workspaces&#x2F;send-sync-demo&#x2F;src&#x2F;main.rs</a></li>
-<li>用 <code>Rc&lt;T&gt;</code> 作为不能跨线程的对照 <a href="workspaces/send-sync-demo/src/main.rs">workspaces&#x2F;send-sync-demo&#x2F;src&#x2F;main.rs</a></li>
+<li>用 channel 演示 <code>Send</code> 场景 <code>workspaces/send-sync-demo/src/main.rs</code></li>
+<li>用 <code>Arc&lt;Mutex&lt;Vec&lt;_&gt;&gt;&gt;</code> 演示共享可变状态 <code>workspaces/send-sync-demo/src/main.rs</code></li>
+<li>用 <code>Rc&lt;T&gt;</code> 作为不能跨线程的对照 <code>workspaces/send-sync-demo/src/main.rs</code></li>
 </ol>
 <p>另外还加了几行静态断言：</p>
 <pre><code class="highlight rust"><span class="keyword">fn</span> <span class="title function_">assert_send</span>&lt;T: <span class="built_in">Send</span>&gt;() &#123;&#125;
@@ -261,7 +259,7 @@ assert_sync::&lt;Arc&lt;Mutex&lt;<span class="type">Vec</span>&lt;<span class="t
 <p>Send&#x2F;Sync 不只是文档概念，它们是能被编译器真实检查的类型性质。</p>
 </blockquote>
 <hr>
-<h2 id="十二、实际运行结果"><a href="#十二、实际运行结果" class="headerlink" title="十二、实际运行结果"></a>十二、实际运行结果</h2><p>在 <a href="workspaces/send-sync-demo">workspaces&#x2F;send-sync-demo</a> 下执行：</p>
+<h2 id="十二、实际运行结果"><a href="#十二、实际运行结果" class="headerlink" title="十二、实际运行结果"></a>十二、实际运行结果</h2><p>在 <code>workspaces/send-sync-demo</code> 下执行：</p>
 <pre><code class="highlight bash">cargo run</code></pre>
 
 <p>当前示例会输出类似结果：</p>
@@ -299,7 +297,4 @@ rc strong count on main thread =&gt; 1</code></pre>
 <p>不要把 Send&#x2F;Sync 理解成“线程安全标签”，要把它们理解成“所有权过线程边界”和“引用过线程边界”这两道不同的安全门。</p>
 </blockquote>
 <p>这句想通了，<code>Rc</code>、<code>Arc</code>、<code>Mutex</code>、<code>RefCell</code> 这些常见类型的位置基本也就都清楚了。</p>
-</div></div></body><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXX"></script><script>window.dataLayer = window.dataLayer || [];
-function gtag(){dataLayer.push(arguments);}
-gtag('js', new Date());
-gtag('config', 'G-XXXXXXXXX');</script></html>
+<hr/><p><span>↶ </span><a href="/">返回首页</a><span></span></p></div></div><script src="/js/highlight.min.js"></script><script src="/js/main.js"></script><script src="/js/bootstrap/bootstrap.min.js"></script></body></html>
