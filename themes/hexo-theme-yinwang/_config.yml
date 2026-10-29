@@ -1,0 +1,63 @@
+# Navigation bar without starting with a slash
+menu:
+  首页: ''
+  归档: 'archives/'
+  标签: 'tags/'
+
+# Recommended to enable when the page count is more than 1
+paginator: true
+
+# Header section
+header:
+  blank: false     # Open header links in a new tab
+
+# Article list
+list:
+  date: true       # Display date in the article list
+  wordcount: true  # Display word count
+
+# Footer section
+footer:
+  display: true                # Display the footer
+  href: ""                     # Display the footer as an href
+  text: "© billchen"           # Footer content
+
+# Article page
+post:
+  title_h1: true               # Use h1 for article titles
+  blank: false                 # Open articles in a new tab
+  backHome: true               # Display back to home at the end of the article
+  backhome_right: false        # Align back to home content to the right
+  backHome_hr: true            # Display a divider line before back to home
+  backHome_prefix: "↶ "        # Prefix content for back to home
+  backHome_content: "返回首页"  # Main content for back to home
+  backHome_suffix: ""          # Suffix content for back to home
+  show_tags: true              # Display tags at the end of the article
+
+# Tag cloud
+tags:
+  all: true       # Display all tags on the tag cloud page
+
+# Micro-blog
+github:
+  owner: smallyunet
+  repo: hexo-blog
+micro_blogs:
+  - year: 2020
+    issue: 7
+  - year: 2021
+    issue: 10
+  - year: 2022
+    issue: 19
+  - year: 2023
+    issue: 29
+issue_years: []
+
+google_analysis:
+  enable: false
+  id: ""
+
+# Public page-view and visitor counters
+busuanzi:
+  enable: true
+  script: https://cdn.busuanzi.cc/busuanzi/3.6.9/busuanzi.min.js
